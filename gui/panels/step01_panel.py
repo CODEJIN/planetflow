@@ -1,0 +1,263 @@
+"""Step 1 — PIPP preprocessing panel."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from gui.i18n import S
+from gui.panels.base_panel import BasePanel
+from gui.widgets.ser_preview import SerPreviewWidget
+
+_SPINBOX_STYLE = (
+    "QSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
+    " border-radius: 3px; padding: 3px 6px; }"
+    "QSpinBox:focus { border-color: #4da6ff; }"
+)
+_INPUT_STYLE = (
+    "QLineEdit { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
+    " border-radius: 3px; padding: 3px 6px; }"
+    "QLineEdit:focus { border-color: #4da6ff; }"
+)
+_BTN_BROWSE = (
+    "QPushButton { background: #3c3c3c; color: #aaa; border: 1px solid #555;"
+    " border-radius: 3px; padding: 3px 8px; }"
+    "QPushButton:hover { background: #4a4a4a; color: #d4d4d4; }"
+)
+_LABEL_STYLE = "color: #d4d4d4; font-size: 12px;"
+
+
+def _dir_row(parent: QWidget, line_edit: QLineEdit) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(4)
+    row.addWidget(line_edit)
+    btn = QPushButton(S("btn.browse"))
+    btn.setFixedWidth(70)
+    btn.setStyleSheet(_BTN_BROWSE)
+
+    def _browse():
+        current = line_edit.text().strip()
+        folder = QFileDialog.getExistingDirectory(
+            parent, "폴더 선택", current or str(Path.home())
+        )
+        if folder:
+            line_edit.setText(folder)
+
+    btn.clicked.connect(_browse)
+    row.addWidget(btn)
+    return row
+
+
+class Step01Panel(BasePanel):
+    STEP_ID   = "01"
+    TITLE_KEY = "step01.title"
+    DESC_KEY  = "step01.desc"
+    OPTIONAL  = True
+
+    # Emitted when output dir changes (editingFinished) so downstream panels
+    # can refresh their auto-derived path labels immediately.
+    dirs_changed = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        self._output_dir: Path | None = None
+        self._output_manually_edited = False
+        super().__init__(parent)
+
+    # ── BasePanel interface ───────────────────────────────────────────────────
+
+    def build_form(self) -> None:
+        # ── Horizontal split: controls (left) | preview (right) ────────────
+        main_widget = QWidget()
+        main_widget.setStyleSheet("background: transparent;")
+        main_hlayout = QHBoxLayout(main_widget)
+        main_hlayout.setSpacing(16)
+        main_hlayout.setContentsMargins(0, 0, 0, 0)
+
+        # ── Left: controls ──────────────────────────────────────────────────
+        left_widget = QWidget()
+        left_widget.setStyleSheet("background: transparent;")
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setSpacing(8)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        form_widget = QWidget()
+        form_widget.setStyleSheet("background: transparent;")
+        fl = QFormLayout(form_widget)
+        fl.setSpacing(10)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # SER input directory
+        _tip_ser = (
+            "SER 영상 파일이 있는 촬영 폴더를 지정합니다.\n"
+            "하위 폴더를 포함하여 모든 .SER 파일을 검색합니다.\n"
+            "예: D:\\Capture\\260402\\"
+        )
+        self._ser_dir = QLineEdit()
+        self._ser_dir.setStyleSheet(_INPUT_STYLE)
+        self._ser_dir.setPlaceholderText(S("step01.ser_dir.placeholder"))
+        self._ser_dir.setToolTip(_tip_ser)
+        self._ser_dir.textChanged.connect(self._on_ser_dir_changed)
+        lbl_ser = QLabel(S("step01.ser_dir"))
+        lbl_ser.setToolTip(_tip_ser)
+        fl.addRow(lbl_ser, _dir_row(self, self._ser_dir))
+
+        # Output directory
+        _tip_out = (
+            "PIPP 처리된 SER 파일이 저장될 폴더입니다.\n"
+            "전역 설정의 출력 기준 폴더 아래에 자동으로 설정됩니다.\n\n"
+            "이 경로를 AutoStakkert 4의 입력 폴더로 지정하면\n"
+            "PIPP 처리 결과를 바로 스태킹할 수 있습니다."
+        )
+        self._output_step1 = QLineEdit()
+        self._output_step1.setStyleSheet(_INPUT_STYLE)
+        self._output_step1.setPlaceholderText("자동 설정됩니다")
+        self._output_step1.textEdited.connect(self._on_output_manually_edited)
+        self._output_step1.editingFinished.connect(self.dirs_changed)
+        lbl_out = QLabel(S("step01.output_dir"))
+        lbl_out.setToolTip(_tip_out)
+        fl.addRow(lbl_out, _dir_row(self, self._output_step1))
+
+        # ROI size
+        _tip_roi = (
+            "PIPP 처리 후 출력할 정사각형 크롭 크기(px)입니다.\n"
+            "행성 원반보다 충분히 크게 설정하세요.\n"
+            "448~512px이 목성에 일반적입니다."
+        )
+        self._roi_size = QSpinBox()
+        self._roi_size.setStyleSheet(_SPINBOX_STYLE)
+        self._roi_size.setRange(64, 1024)
+        self._roi_size.setSingleStep(16)
+        self._roi_size.setValue(448)
+        self._roi_size.setToolTip(_tip_roi)
+        self._roi_size.valueChanged.connect(self._on_params_changed)
+        lbl_roi = QLabel(S("step01.roi_size"))
+        lbl_roi.setToolTip(_tip_roi)
+        fl.addRow(lbl_roi, self._roi_size)
+
+        # Min diameter
+        _tip_diam = (
+            "유효한 행성으로 인정할 최소 원반 지름(px)입니다.\n"
+            "이보다 작은 원반이 감지되면 해당 프레임은 제거됩니다.\n"
+            "대기 요동으로 인한 순간 소실 프레임을 걸러냅니다."
+        )
+        self._min_diameter = QSpinBox()
+        self._min_diameter.setStyleSheet(_SPINBOX_STYLE)
+        self._min_diameter.setRange(10, 500)
+        self._min_diameter.setSingleStep(5)
+        self._min_diameter.setValue(50)
+        self._min_diameter.setToolTip(_tip_diam)
+        self._min_diameter.valueChanged.connect(self._on_params_changed)
+        lbl_diam = QLabel(S("step01.min_diameter"))
+        lbl_diam.setToolTip(_tip_diam)
+        fl.addRow(lbl_diam, self._min_diameter)
+
+        left_layout.addWidget(form_widget)
+        left_layout.addStretch()
+        main_hlayout.addWidget(left_widget, 1)
+
+        # ── Right: preview ──────────────────────────────────────────────────
+        self._preview = SerPreviewWidget(parent=self)
+        main_hlayout.addWidget(self._preview, 0)
+
+        idx = self._form_layout.count() - 1
+        self._form_layout.insertWidget(idx, main_widget)
+
+    def get_config_updates(self) -> dict[str, Any]:
+        step1_out = self._output_step1.text().strip()
+        output_base = str(Path(step1_out).parent) if step1_out else ""
+        return {
+            "ser_input_dir":    self._ser_dir.text().strip(),
+            "step01_output_dir": step1_out,
+            "output_dir":       output_base,
+            "roi_size":         self._roi_size.value(),
+            "min_diameter":     self._min_diameter.value(),
+        }
+
+    def load_session(self, data: dict[str, Any]) -> None:
+        ser_dir = data.get("ser_input_dir", "")
+
+        self._ser_dir.blockSignals(True)
+        self._ser_dir.setText(ser_dir)
+        self._ser_dir.blockSignals(False)
+
+        self._roi_size.blockSignals(True)
+        self._roi_size.setValue(int(data.get("roi_size", 448)))
+        self._roi_size.blockSignals(False)
+
+        self._min_diameter.blockSignals(True)
+        self._min_diameter.setValue(int(data.get("min_diameter", 50)))
+        self._min_diameter.blockSignals(False)
+
+        step1_out = data.get("step01_output_dir", "")
+        if step1_out:
+            self._output_manually_edited = True
+            self._output_step1.setText(step1_out)
+            self._output_dir = Path(step1_out).parent
+        else:
+            out = data.get("output_dir", "")
+            if out and not self._output_manually_edited:
+                self._output_step1.setText(str(Path(out) / "step01_pipp"))
+                self._output_dir = Path(out)
+
+        # Sync preview
+        if hasattr(self, "_preview"):
+            self._preview.set_params(
+                roi_size=int(data.get("roi_size", 448)),
+                min_diameter=int(data.get("min_diameter", 50)),
+            )
+            self._preview.set_input_dir(ser_dir or None)
+
+    def output_paths(self) -> list[Path]:
+        step1_out = self._output_step1.text().strip() if hasattr(self, "_output_step1") else ""
+        if step1_out:
+            p = Path(step1_out)
+            if p.exists():
+                return sorted(p.glob("*.ser"))
+        if self._output_dir is None:
+            return []
+        step_dir = self._output_dir / "step01_pipp"
+        if not step_dir.exists():
+            return []
+        return sorted(step_dir.glob("*.ser"))
+
+    def set_output_dir(self, path: Path | str) -> None:
+        if not self._output_manually_edited:
+            self._output_dir = Path(path) if path else None
+
+    # ── Qt events ─────────────────────────────────────────────────────────────
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if hasattr(self, "_preview"):
+            self._preview.schedule_update(150)
+
+    # ── Slots ─────────────────────────────────────────────────────────────────
+
+    def _on_ser_dir_changed(self, text: str) -> None:
+        if hasattr(self, "_preview"):
+            self._preview.set_input_dir(text.strip() or None)
+
+    def _on_params_changed(self) -> None:
+        if not hasattr(self, "_preview"):
+            return
+        self._preview.set_params(
+            roi_size=self._roi_size.value(),
+            min_diameter=self._min_diameter.value(),
+        )
+        self._preview.schedule_update()
+
+    def _on_output_manually_edited(self, _text: str) -> None:
+        self._output_manually_edited = True

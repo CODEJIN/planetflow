@@ -1,0 +1,816 @@
+"""Main application window for the planetary imaging pipeline GUI."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QStackedWidget,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from gui import session
+from gui.i18n import S
+from gui.panels.settings_panel import SettingsPanel
+from gui.panels.step01_panel import Step01Panel
+from gui.panels.step02_panel import Step02Panel
+from gui.panels.step03_panel import Step03Panel
+from gui.panels.step04_panel import Step04Panel
+from gui.panels.step05_panel import Step05Panel
+from gui.panels.step06_panel import Step06Panel
+from gui.panels.step07_panel import Step07Panel
+from gui.panels.step08_panel import Step08Panel
+from gui.panels.step09_panel import Step09Panel
+from gui.panels.step10_panel import Step10Panel
+from gui.step_runner import StepRunner
+from gui.widgets.log_widget import LogWidget
+from gui.widgets.step_item import StepItem
+from pipeline.config import (
+    PipelineConfig,
+    PippConfig,
+    WaveletConfig,
+    QualityConfig,
+    DerotationConfig,
+    CompositeConfig,
+    CompositeSpec,
+    GifConfig,
+    SummaryGridConfig,
+)
+
+# ── Dark theme stylesheet ──────────────────────────────────────────────────────
+
+_ICONS_DIR = Path(__file__).parent / "icons"
+
+# __CHECK_SVG__ is replaced at runtime with the actual path to check.svg
+_DARK_STYLE_TEMPLATE = """
+QMainWindow, QWidget {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+}
+QMenuBar {
+    background-color: #2d2d2d;
+    color: #d4d4d4;
+    border-bottom: 1px solid #444;
+}
+QMenuBar::item:selected {
+    background-color: #3c3c3c;
+}
+QMenu {
+    background-color: #2d2d2d;
+    color: #d4d4d4;
+    border: 1px solid #555;
+}
+QMenu::item:selected {
+    background-color: #3c3c3c;
+}
+QSplitter::handle {
+    background-color: #444;
+}
+QScrollBar:vertical {
+    background: #2d2d2d;
+    width: 8px;
+}
+QScrollBar::handle:vertical {
+    background: #555;
+    border-radius: 4px;
+    min-height: 20px;
+}
+QStatusBar {
+    background: #252526;
+    color: #888;
+    border-top: 1px solid #444;
+}
+QPushButton {
+    background: #3c3c3c;
+    color: #d4d4d4;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 4px 10px;
+}
+QPushButton:hover {
+    background: #4a4a4a;
+}
+QPushButton:disabled {
+    color: #666;
+    background: #2d2d2d;
+    border-color: #444;
+}
+QCheckBox {
+    spacing: 6px;
+    color: #d4d4d4;
+}
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border: 2px solid #555;
+    border-radius: 3px;
+    background: #2a2a2a;
+}
+QCheckBox::indicator:hover {
+    border-color: #888;
+    background: #333;
+}
+QCheckBox::indicator:checked {
+    border: 2px solid #4da6ff;
+    background: #1d3a5a;
+    image: url("__CHECK_SVG__");
+}
+QCheckBox::indicator:checked:hover {
+    border-color: #66b8ff;
+}
+QRadioButton {
+    spacing: 6px;
+    color: #d4d4d4;
+}
+QRadioButton::indicator {
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    border: 2px solid #555;
+    background: #2a2a2a;
+}
+QRadioButton::indicator:hover {
+    border-color: #888;
+    background: #333;
+}
+QRadioButton::indicator:checked {
+    border: 2px solid #4da6ff;
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 #4da6ff, stop:0.38 #4da6ff, stop:0.42 #1d3a5a, stop:1 #1d3a5a);
+}
+QRadioButton::indicator:checked:hover {
+    border-color: #66b8ff;
+}
+"""
+
+
+def _build_dark_style() -> str:
+    check_svg = (_ICONS_DIR / "check.svg").as_posix()
+    return _DARK_STYLE_TEMPLATE.replace("__CHECK_SVG__", check_svg)
+
+
+DARK_STYLE = _build_dark_style()
+
+# ── Step definitions ───────────────────────────────────────────────────────────
+
+_STEP_DEFS = [
+    # (step_id, sidebar_label, optional)
+    ("01", "01 — PIPP 전처리",         True),
+    ("02", "02 — AutoStakkert 4",       True),
+    ("03", "03 — Wavelet 미리보기",     False),
+    ("04", "04 — 품질 평가",            False),
+    ("05", "05 — De-rotation 스태킹",   False),
+    ("06", "06 — Wavelet 마스터",       False),
+    ("07", "07 — RGB 합성 (마스터)",    False),
+    # separator before optional final steps
+    ("08", "08 — 시계열 합성",          True),
+    ("09", "09 — 애니메이션 GIF",       True),
+    ("10", "10 — 요약 그리드",          True),
+]
+
+# Which step IDs get a separator _before_ them in the sidebar
+_SEPARATOR_BEFORE = {"03", "08"}
+
+
+class MainWindow(QMainWindow):
+    """Top-level application window."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(S("app.title"))
+        self.resize(1440, 980)
+        self.setStyleSheet(DARK_STYLE)
+
+        self._session_data: dict[str, Any] = {}
+        self._results:      dict[str, Any] = {}
+        self._runner: StepRunner | None = None
+        self._step_items:   dict[str, StepItem]  = {}
+        self._enabled_steps: dict[str, bool]      = {}
+
+        self._build_ui()
+        self._build_menubar()
+        self.load_session()
+
+    # ── UI construction ───────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ── Left sidebar ────────────────────────────────────────────────────
+        sidebar = QWidget()
+        sidebar.setFixedWidth(200)
+        sidebar.setStyleSheet("background: #252526; border-right: 1px solid #3c3c3c;")
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
+
+        # App title
+        title_widget = QWidget()
+        title_widget.setStyleSheet("background: #1e1e1e; border-bottom: 1px solid #3c3c3c;")
+        title_layout = QVBoxLayout(title_widget)
+        title_layout.setContentsMargins(10, 10, 10, 10)
+        app_title = QLabel(S("app.title"))
+        app_title.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        app_title.setStyleSheet("color: #e8e8e8;")
+        app_title.setWordWrap(True)
+        title_layout.addWidget(app_title)
+        sidebar_layout.addWidget(title_widget)
+
+        # Settings entry
+        settings_item = QWidget()
+        settings_item.setStyleSheet(
+            "QWidget { background: transparent; padding: 2px; }"
+            "QWidget:hover { background: #2a2a2a; }"
+        )
+        settings_item_layout = QHBoxLayout(settings_item)
+        settings_item_layout.setContentsMargins(8, 6, 8, 6)
+        settings_icon = QLabel("⚙")
+        settings_icon.setFixedWidth(18)
+        settings_icon.setStyleSheet("color: #888;")
+        settings_item_layout.addWidget(settings_icon)
+        settings_lbl = QLabel(S("app.settings"))
+        settings_lbl.setStyleSheet("color: #ccc;")
+        settings_item_layout.addWidget(settings_lbl)
+        settings_item_layout.addStretch()
+        settings_item.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_item.mousePressEvent = lambda _e: self._show_panel("settings")
+        sidebar_layout.addWidget(settings_item)
+
+        # Step list (scrollable)
+        step_scroll = QScrollArea()
+        step_scroll.setWidgetResizable(True)
+        step_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        step_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        step_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+
+        step_list_widget = QWidget()
+        step_list_widget.setStyleSheet("background: transparent;")
+        step_list_layout = QVBoxLayout(step_list_widget)
+        step_list_layout.setContentsMargins(0, 4, 0, 4)
+        step_list_layout.setSpacing(1)
+
+        session_data = session.load()
+        enabled_steps = session_data.get("enabled_steps", {})
+
+        for step_id, label, optional in _STEP_DEFS:
+            if step_id in _SEPARATOR_BEFORE:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setStyleSheet("color: #444; margin: 4px 8px;")
+                step_list_layout.addWidget(sep)
+
+            # Steps 08 and 09 default to enabled even though they are optional
+            _default_on = {"08", "09"}
+            enabled = enabled_steps.get(step_id, True if step_id in _default_on else not optional)
+            item = StepItem(step_id, label, optional=optional, enabled=enabled)
+            item.clicked.connect(self._on_step_clicked)
+            item.toggled.connect(self._on_step_toggled)
+            self._step_items[step_id]   = item
+            self._enabled_steps[step_id] = enabled
+            step_list_layout.addWidget(item)
+
+        step_list_layout.addStretch()
+        step_scroll.setWidget(step_list_widget)
+        sidebar_layout.addWidget(step_scroll, 1)
+
+        # Run All button
+        run_all_widget = QWidget()
+        run_all_widget.setStyleSheet("background: #1e1e1e; border-top: 1px solid #3c3c3c;")
+        run_all_layout = QVBoxLayout(run_all_widget)
+        run_all_layout.setContentsMargins(8, 8, 8, 8)
+        self._btn_run_all = QPushButton(S("app.run_all"))
+        self._btn_run_all.setFixedHeight(34)
+        self._btn_run_all.setToolTip(
+            "Step 3 ~ 10을 순서대로 자동 실행합니다.\n\n"
+            "• Step 01 (PIPP)과 Step 02 (AS!4)는 수동 작업이라 제외됩니다.\n"
+            "  → AS!4 완료 후 이 버튼을 누르면 Step 03부터 진행됩니다.\n"
+            "• 체크 해제된 선택적 스텝(08, 09, 10)은 건너뜁니다.\n"
+            "• 한 스텝이 실패하면 이후 스텝은 실행되지 않습니다.\n"
+            "• 실행 전 현재 설정이 자동으로 저장됩니다."
+        )
+        self._btn_run_all.setStyleSheet(
+            "QPushButton { background: #2d6a4f; color: white; border-radius: 5px;"
+            " font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #40916c; }"
+            "QPushButton:disabled { background: #333; color: #666; border: none; }"
+        )
+        self._btn_run_all.clicked.connect(self._on_run_all)
+        run_all_layout.addWidget(self._btn_run_all)
+        sidebar_layout.addWidget(run_all_widget)
+
+        main_layout.addWidget(sidebar)
+
+        # ── Right area ──────────────────────────────────────────────────────
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+        right_splitter.setStyleSheet("QSplitter::handle { background: #444; height: 3px; }")
+
+        # Panel stack
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background: #1e1e1e;")
+
+        # Settings panel
+        self._settings_panel = SettingsPanel()
+        self._settings_panel._btn_save.clicked.connect(self._on_settings_saved)
+        self._settings_panel._btn_reset.clicked.connect(self._reset_session)
+        self._stack.addWidget(self._settings_panel)
+        self._panel_index: dict[str, int] = {"settings": 0}
+
+        # Step panels
+        self._step_panels: dict[str, QWidget] = {}
+        panel_classes = {
+            "01": Step01Panel,
+            "02": Step02Panel,
+            "03": Step03Panel,
+            "04": Step04Panel,
+            "05": Step05Panel,
+            "06": Step06Panel,
+            "07": Step07Panel,
+            "08": Step08Panel,
+            "09": Step09Panel,
+            "10": Step10Panel,
+        }
+        for step_id, cls in panel_classes.items():
+            panel = cls()
+            self._step_panels[step_id] = panel
+            idx = self._stack.addWidget(panel)
+            self._panel_index[step_id] = idx
+
+            # Connect run_requested for BasePanel subclasses
+            if hasattr(panel, "run_requested"):
+                panel.run_requested.connect(self._on_run_step)
+
+            # Connect next button for BasePanel subclasses
+            if hasattr(panel, "_btn_next"):
+                panel._btn_next.clicked.connect(
+                    lambda _checked, sid=step_id: self._advance_to_next(sid)
+                )
+
+        # Step 02 completed → advance to step 03
+        self._step_panels["02"].completed.connect(
+            lambda: self._show_panel("03")
+        )
+
+        # Step 01 output folder changes → refresh downstream path labels
+        self._step_panels["01"].dirs_changed.connect(self._on_step01_dirs_changed)
+
+        # Step 03 folder changes → refresh downstream path labels immediately
+        self._step_panels["03"].dirs_changed.connect(self._on_step03_dirs_changed)
+
+        right_splitter.addWidget(self._stack)
+
+        # Log widget
+        self._log_widget = LogWidget()
+        self._log_widget.setMinimumHeight(120)
+        right_splitter.addWidget(self._log_widget)
+        right_splitter.setSizes([600, 200])
+
+        main_layout.addWidget(right_splitter, 1)
+
+        # ── Status bar ──────────────────────────────────────────────────────
+        self._status_bar = QStatusBar()
+        self.setStatusBar(self._status_bar)
+        self._status_label = QLabel(S("app.status.ready"))
+        self._status_bar.addWidget(self._status_label)
+        self._output_dir_label = QLabel("")
+        self._output_dir_label.setStyleSheet("color: #666;")
+        self._status_bar.addPermanentWidget(self._output_dir_label)
+
+    def _build_menubar(self) -> None:
+        self.menuBar().setVisible(False)
+
+    # ── Session management ────────────────────────────────────────────────────
+
+    def _reset_session(self) -> None:
+        """Prompt the user, then wipe the session file and reload defaults."""
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "세션 초기화",
+            "저장된 세션을 삭제하고 모든 설정을 기본값으로 되돌립니다.\n계속하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._session_data = session.reset()
+        self.load_session()
+        QMessageBox.information(self, "세션 초기화", "세션이 초기화되었습니다.")
+
+    def load_session(self) -> None:
+        """Load session from disk and apply to all panels."""
+        self._session_data = session.load()
+        self._settings_panel.load_session(self._session_data)
+
+        # Apply enabled step states — iterate ALL steps (not just saved ones)
+        # so that visual state and checkbox are fully reset after a session reset.
+        enabled_steps = self._session_data.get("enabled_steps", {})
+        _default_on = {"08", "09"}
+        for step_id, _label, optional in _STEP_DEFS:
+            enabled = enabled_steps.get(
+                step_id,
+                True if step_id in _default_on else not optional,
+            )
+            self._enabled_steps[step_id] = enabled
+            item = self._step_items.get(step_id)
+            if item:
+                item.set_enabled_visual(enabled)
+                if item._check is not None:
+                    item._check.blockSignals(True)
+                    item._check.setChecked(enabled)
+                    item._check.blockSignals(False)
+
+        # Enforce Step 09 dependency on Step 08 (GIF needs series output)
+        if not self._enabled_steps.get("08", True):
+            item09 = self._step_items.get("09")
+            if item09:
+                item09.set_checkbox_enabled(False)
+                item09.set_enabled_visual(False)
+                self._enabled_steps["09"] = False
+
+        # Load step panels that use load_session() to populate derived folder fields
+        for sid in ("01", "03", "04", "05", "06", "07", "08", "09", "10"):
+            panel = self._step_panels.get(sid)
+            if panel and hasattr(panel, "load_session"):
+                panel.load_session(self._session_data)
+
+        # Update status bar
+        output_dir = self._session_data.get("output_dir", "")
+        self._output_dir_label.setText(f"출력: {output_dir}" if output_dir else "")
+
+    def save_session(self) -> None:
+        """Collect all panel values and persist to disk."""
+        data = self._session_data.copy()
+        data.update(self._settings_panel.get_session_values())
+
+        # Gather enabled steps
+        data["enabled_steps"] = dict(self._enabled_steps)
+
+        # Gather config updates from each step panel
+        for step_id, panel in self._step_panels.items():
+            if hasattr(panel, "get_config_updates"):
+                data.update(panel.get_config_updates())
+
+        self._session_data = data
+        session.save(data)
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+
+    def _show_panel(self, key: str) -> None:
+        idx = self._panel_index.get(key)
+        if idx is not None:
+            self._stack.setCurrentIndex(idx)
+
+        # Update sidebar selection
+        for sid, item in self._step_items.items():
+            item.set_selected(sid == key)
+
+    def _on_step_clicked(self, step_id: str) -> None:
+        self._show_panel(step_id)
+
+    def _on_step_toggled(self, step_id: str, enabled: bool) -> None:
+        self._enabled_steps[step_id] = enabled
+        if step_id in self._step_items:
+            self._step_items[step_id].set_enabled_visual(enabled)
+        # Step 09 (GIF) requires Step 08 (series) output — enforce dependency
+        if step_id == "08":
+            item09 = self._step_items.get("09")
+            if item09:
+                if not enabled:
+                    # Step 08 disabled → uncheck Step 09 (checkbox stays clickable)
+                    item09.set_checkbox_enabled(False)
+                    item09.set_enabled_visual(False)
+                    self._enabled_steps["09"] = False
+        elif step_id == "09" and enabled:
+            # Step 09 enabled → cascade: also enable Step 08 if it was off
+            if not self._enabled_steps.get("08", False):
+                item08 = self._step_items.get("08")
+                if item08 is not None and item08._check is not None:
+                    item08._check.setChecked(True)  # triggers _on_step_toggled("08", True)
+
+    def _advance_to_next(self, current_step_id: str) -> None:
+        """Show the panel after the given step in the sidebar order."""
+        ids = [s for s, _l, _o in _STEP_DEFS]
+        try:
+            current_idx = ids.index(current_step_id)
+        except ValueError:
+            return
+        if current_idx + 1 < len(ids):
+            self._show_panel(ids[current_idx + 1])
+
+    # ── Step execution ────────────────────────────────────────────────────────
+
+    def _on_step01_dirs_changed(self) -> None:
+        """Refresh output_dir and all dependent panels when Step 1 output changes."""
+        updates = self._step_panels["01"].get_config_updates()
+        new_output_dir = updates.get("output_dir", "")
+        if new_output_dir:
+            self._session_data["output_dir"]        = new_output_dir
+            self._session_data["step01_output_dir"] = updates.get("step01_output_dir", "")
+            self._output_dir_label.setText(f"출력: {new_output_dir}")
+            for sid in ("03", "04", "05", "06", "07", "08", "09", "10"):
+                dep = self._step_panels.get(sid)
+                if dep and hasattr(dep, "load_session"):
+                    dep.load_session(self._session_data)
+
+    def _on_step03_dirs_changed(self) -> None:
+        """Refresh downstream path labels when Step 3 folder fields change.
+
+        Called on editingFinished (focus-out / Enter) — before any run.
+        Updates _session_data in memory without writing to disk so downstream
+        panels show correct auto-derived paths immediately.
+        """
+        updates = self._step_panels["03"].get_config_updates()
+        self._session_data["input_dir"]        = updates.get("input_dir", "")
+        self._session_data["output_dir"]        = updates.get("output_dir", "")
+        self._session_data["step03_output_dir"] = updates.get("step03_output_dir", "")
+        for sid in ("04", "05", "06", "07", "08", "09", "10"):
+            dep = self._step_panels.get(sid)
+            if dep and hasattr(dep, "load_session"):
+                dep.load_session(self._session_data)
+
+    def _on_settings_saved(self) -> None:
+        self.save_session()
+        output_dir = self._session_data.get("output_dir", "")
+        self._output_dir_label.setText(f"출력: {output_dir}" if output_dir else "")
+        # Refresh derived folder labels in dependent panels
+        for sid in ("01", "04", "05", "06", "07", "08", "09", "10"):
+            panel = self._step_panels.get(sid)
+            if panel and hasattr(panel, "load_session"):
+                panel.load_session(self._session_data)
+        QMessageBox.information(self, "설정", S("msg.settings_saved"))
+
+    def _on_run_step(self, step_id: str) -> None:
+        """Run a single step."""
+        if self._runner and self._runner.isRunning():
+            return
+        config = self.build_config()
+        self._runner = StepRunner(config, [step_id], self._results, parent=self)
+        self._connect_runner(self._runner)
+        self._runner.start()
+
+    def _on_run_all(self) -> None:
+        """Run steps 03-10 in order (01 requires PIPP setup, 02 is manual AS!4)."""
+        if self._runner and self._runner.isRunning():
+            return
+
+        # Validate Step 3 input folder has TIF files before starting
+        step03 = self._step_panels.get("03")
+        if step03:
+            updates = step03.get_config_updates()
+            input_dir = updates.get("input_dir", "").strip()
+            if not input_dir:
+                QMessageBox.warning(
+                    self,
+                    "입력 폴더 없음",
+                    "Step 3의 AS!4 TIF 입력 폴더를 설정해주세요.\n\n"
+                    "Step 3 패널에서 폴더를 지정한 후 다시 시도하세요.",
+                )
+                return
+            input_path = Path(input_dir)
+            tif_files = list(input_path.glob("*.tif")) + list(input_path.glob("*.TIF"))
+            if not input_path.exists() or not tif_files:
+                QMessageBox.warning(
+                    self,
+                    "TIF 파일 없음",
+                    f"입력 폴더에 TIF 파일이 없습니다:\n{input_dir}\n\n"
+                    "AutoStakkert 4를 실행하여 TIF 파일을 생성한 후 다시 시도하세요.",
+                )
+                return
+
+        steps = [
+            sid for sid, _label, _opt in _STEP_DEFS
+            if sid not in ("01", "02") and self._enabled_steps.get(sid, True)
+        ]
+        if not steps:
+            return
+
+        # Reset status icons for all steps that will be re-run
+        for sid in steps:
+            if sid in self._step_items:
+                self._step_items[sid].set_status("idle")
+            panel = self._step_panels.get(sid)
+            if panel and hasattr(panel, "set_status"):
+                panel.set_status("idle")
+
+        config = self.build_config()
+        self._runner = StepRunner(config, steps, self._results, parent=self)
+        self._connect_runner(self._runner)
+        self._runner.start()
+        self._btn_run_all.setEnabled(False)
+        self._status_label.setText(S("app.status.running"))
+
+    def _connect_runner(self, runner: StepRunner) -> None:
+        runner.log_line.connect(self._log_widget.append_line)
+        runner.step_started.connect(self._on_step_started)
+        runner.step_finished.connect(self._on_step_finished)
+        runner.progress.connect(self._on_step_progress)
+        runner.all_done.connect(self._on_all_done)
+
+    def _on_step_progress(self, step_id: str, current: int, total: int) -> None:
+        panel = self._step_panels.get(step_id)
+        if panel and hasattr(panel, "set_progress"):
+            panel.set_progress(current, total)
+
+    def _on_step_started(self, step_id: str) -> None:
+        if step_id in self._step_items:
+            self._step_items[step_id].set_status("running")
+        panel = self._step_panels.get(step_id)
+        if panel and hasattr(panel, "set_status"):
+            panel.set_status("running")
+        if panel and hasattr(panel, "set_running"):
+            panel.set_running(True)
+        # Auto-navigate to the currently running step panel
+        self._show_panel(step_id)
+
+    def _on_step_finished(self, step_id: str, ok: bool, results: Any) -> None:
+        status = "success" if ok else "error"
+        if step_id in self._step_items:
+            self._step_items[step_id].set_status(status)
+        panel = self._step_panels.get(step_id)
+        if panel and hasattr(panel, "set_status"):
+            panel.set_status(status)
+        if panel and hasattr(panel, "set_running"):
+            panel.set_running(False)
+        if ok:
+            if results is not None:
+                self._results[step_id] = results
+            # After step 03 completes, refresh dependent panels so their
+            # auto-derived path labels reflect the updated input/output dirs.
+            if step_id == "03":
+                for sid in ("04", "05", "06", "07", "08", "09", "10"):
+                    dep = self._step_panels.get(sid)
+                    if dep and hasattr(dep, "load_session"):
+                        dep.load_session(self._session_data)
+            # After step 05 completes, refresh step 06 so its wavelet preview
+            # picks up the newly created step05_derotated/ directory.
+            if step_id == "05":
+                dep = self._step_panels.get("06")
+                if dep and hasattr(dep, "load_session"):
+                    dep.load_session(self._session_data)
+            if panel and hasattr(panel, "refresh_after_run"):
+                panel.refresh_after_run()
+
+    def _on_all_done(self) -> None:
+        self._btn_run_all.setEnabled(True)
+        self._status_label.setText(S("app.status.ready"))
+
+    # ── Config builder ────────────────────────────────────────────────────────
+
+    def build_config(self) -> PipelineConfig:
+        """Build a PipelineConfig from the current session data."""
+        self.save_session()
+        d = self._session_data
+
+        ser_dir    = Path(d.get("ser_input_dir", "") or ".")
+        input_dir  = Path(d.get("input_dir", "") or ".")
+        output_dir = Path(d.get("output_dir", "") or ".")
+        step01_out_raw = d.get("step01_output_dir", "")
+        step01_out = Path(step01_out_raw) if step01_out_raw else None
+
+        pipp = PippConfig(
+            roi_size     = int(d.get("roi_size", 448)),
+            min_diameter = int(d.get("min_diameter", 50)),
+        )
+
+        wavelet = WaveletConfig(
+            preview_amounts = list(d.get("preview_amounts", [200.0, 200.0, 200.0, 0.0, 0.0, 0.0])),
+            master_amounts  = list(d.get("master_amounts",  [200.0, 200.0, 200.0, 0.0, 0.0, 0.0])),
+            border_taper_px = int(d.get("border_taper_px", 0)),
+        )
+
+        # window_frames: number of filter cycles (= time-series frames) per window.
+        # Old sessions may store window_cycles or window_seconds; convert on load.
+        cycle_sec = int(d.get("cycle_seconds", 270))
+        if "window_frames" in d:
+            window_frames = int(d["window_frames"])
+        elif "window_cycles" in d:
+            window_frames = int(d["window_cycles"])
+        else:
+            window_sec    = int(d.get("window_seconds", 900))
+            window_frames = max(1, round(window_sec / cycle_sec))
+        quality = QualityConfig(
+            window_frames         = window_frames,
+            cycle_minutes         = cycle_sec  / 60.0,
+            n_windows             = int(d.get("n_windows", 1)),
+            allow_overlap         = bool(d.get("allow_overlap", False)),
+            min_quality_threshold = float(d.get("min_quality_threshold_04", 0.0)),
+        )
+
+        derotation = DerotationConfig(
+            rotation_period_hours = float(d.get("rotation_period_hours",
+                                               d.get("rotation_period", 9.9281))),
+            horizons_id           = str(d.get("horizons_id", "599")),
+            warp_scale            = float(d.get("warp_scale", 0.80)),
+            normalize_brightness  = bool(d.get("normalize_brightness", False)),
+            min_quality_threshold = float(d.get("min_quality_threshold", 0.3)),
+        )
+
+        # Build CompositeSpec list from session data (set by step07 panel)
+        raw_specs = d.get("composite_specs")
+        if raw_specs:
+            specs = [
+                CompositeSpec(
+                    name = s.get("name", "RGB"),
+                    R    = s.get("R", "R"),
+                    G    = s.get("G", "G"),
+                    B    = s.get("B", "B"),
+                    L    = s.get("L") or None,
+                )
+                for s in raw_specs if s.get("name")
+            ]
+        else:
+            specs = None  # use CompositeConfig default
+
+        # series_cycle_seconds: step8-specific; fall back to step4's cycle_seconds
+        _series_cyc = float(d.get("series_cycle_seconds",
+                                   d.get("cycle_seconds", 270)))
+        composite = CompositeConfig(
+            max_shift_px            = float(d.get("max_shift_px", 8.0)),
+            global_filter_normalize = bool(d.get("global_filter_normalize", True)),
+            series_scale            = float(d.get("series_scale", 1.00)),
+            cycle_seconds           = _series_cyc,
+            stack_window_n          = int(d.get("stack_window_n", 5)),
+            stack_min_quality       = float(d.get("stack_min_quality", 0.05)),
+            save_mono_frames        = bool(d.get("save_mono_frames", False)),
+            **({"specs": specs} if specs else {}),
+        )
+
+        gif = GifConfig(
+            fps           = float(d.get("fps", 6.0)),
+            resize_factor = float(d.get("resize_factor", 1.0)),
+        )
+
+        # Derive composite column names from the step07 composite_specs so the
+        # summary grid always reflects what step07 actually produced.
+        raw_specs = d.get("composite_specs")
+        if raw_specs:
+            grid_composites = [s.get("name", "") for s in raw_specs if s.get("name")]
+        else:
+            grid_composites = ["RGB", "IR-RGB", "CH4-G-IR"]
+
+        grid = SummaryGridConfig(
+            black_point  = float(d.get("black_point", 0.04)),
+            gamma        = float(d.get("gamma", 0.8)),
+            cell_size_px = int(d.get("cell_size_px", 300)),
+            composites   = grid_composites,
+        )
+
+        filters_raw = d.get("filters", "IR,R,G,B,CH4")
+        if isinstance(filters_raw, str):
+            filters = [f.strip() for f in filters_raw.split(",") if f.strip()]
+        else:
+            filters = list(filters_raw)
+
+        camera_mode = d.get("camera_mode", "mono")
+        # For color camera, default filter list is a single "COLOR" entry
+        if camera_mode == "color" and filters == ["IR", "R", "G", "B", "CH4"]:
+            filters = ["COLOR"]
+
+        return PipelineConfig(
+            ser_input_dir     = ser_dir,
+            input_dir         = input_dir,
+            output_base_dir   = output_dir,
+            step01_output_dir = step01_out,
+            pipp            = pipp,
+            wavelet         = wavelet,
+            quality         = quality,
+            derotation      = derotation,
+            composite       = composite,
+            gif             = gif,
+            grid            = grid,
+            target          = str(d.get("target", "Jup")),
+            filters         = filters,
+            camera_mode     = camera_mode,
+        )
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "정보",
+            f"{S('app.title')}\n\n행성 촬영 파이프라인 GUI\n\n"
+            "단계별 처리를 자동화하는 도구입니다.",
+        )
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.save_session()
+        super().closeEvent(event)
