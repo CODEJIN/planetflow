@@ -606,7 +606,3 @@ The following screenshots are missing or reflect outdated UI and need to be re-c
 | Step 07 color mode | New screen: before/after panels + channel gain graph |
 | Step 08 mono mode | Parameters completely changed |
 | Step 08 color mode | New screen |
-
----
-
-*Screenshots for this guide need to be added by the user. Save images in the `docs/images/` folder and replace each image path accordingly.*

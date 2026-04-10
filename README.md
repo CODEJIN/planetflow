@@ -161,9 +161,3 @@ SER files
 4. Run **Steps 03–04** to preview and score stacks
 5. Run **Steps 05–07** for final de-rotated composites
 6. *(Optional)* Run **Steps 08–10** for time-series animation and summary
-
----
-
-## License
-
-MIT
