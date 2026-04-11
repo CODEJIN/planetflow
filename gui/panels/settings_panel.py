@@ -246,10 +246,10 @@ class SettingsPanel(QWidget):
         btn_widget.setStyleSheet(f"background: {_PANEL_BG}; border-top: 1px solid #444;")
         btn_layout = QHBoxLayout(btn_widget)
         btn_layout.setContentsMargins(16, 8, 16, 12)
-        self._btn_reset = QPushButton("세션 초기화")
+        self._btn_reset = QPushButton(S("btn.reset_session"))
         self._btn_reset.setStyleSheet(_BTN_RESET)
         self._btn_reset.setFixedHeight(34)
-        self._btn_reset.setToolTip("저장된 세션을 삭제하고 모든 설정을 기본값으로 되돌립니다.")
+        self._btn_reset.setToolTip(S("btn.reset_session.tooltip"))
         self._btn_save = QPushButton(S("settings.save"))
         self._btn_save.setStyleSheet(_BTN_SAVE)
         self._btn_save.setFixedHeight(34)
@@ -340,3 +340,8 @@ class SettingsPanel(QWidget):
             if self._lang_combo.itemData(i) == lang:
                 self._lang_combo.setCurrentIndex(i)
                 break
+
+    def retranslate(self) -> None:
+        """Update widget texts after a runtime language change."""
+        self._btn_reset.setText(S("btn.reset_session"))
+        self._btn_reset.setToolTip(S("btn.reset_session.tooltip"))

@@ -15,18 +15,18 @@ from gui.i18n import S
 
 
 def _fmt_remaining(seconds: float) -> str:
-    """Format remaining seconds as a human-readable Korean string."""
+    """Format remaining seconds as a human-readable string."""
     if seconds < 5:
-        return "거의 완료..."
+        return S("fmt.almost_done")
     if seconds < 60:
-        return f"약 {int(seconds)+1}초 남음"
+        return S("fmt.seconds_left", n=int(seconds) + 1)
     minutes = int(seconds / 60)
     secs = int(seconds % 60)
     if minutes < 60:
-        return f"약 {minutes}분 {secs:02d}초 남음"
+        return S("fmt.minutes_left", m=minutes, s=secs)
     hours = minutes // 60
     mins = minutes % 60
-    return f"약 {hours}시간 {mins}분 남음"
+    return S("fmt.hours_left", h=hours, m=mins)
 
 
 class BasePanel(QWidget):

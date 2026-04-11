@@ -398,7 +398,7 @@ class Step05Panel(BasePanel):
         self._sweep_btn.setEnabled(enabled)
         if not enabled:
             self._sweep_result.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
-            self._sweep_result.setText("Step 4 완료 후 사용 가능")
+            self._sweep_result.setText(S("step05.sweep_wait"))
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -408,7 +408,7 @@ class Step05Panel(BasePanel):
             return
 
         self._sweep_btn.setEnabled(False)
-        self._sweep_btn.setText("탐색 중…")
+        self._sweep_btn.setText(S("step05.sweeping"))
         self._sweep_result.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
         self._sweep_result.setText("")
 

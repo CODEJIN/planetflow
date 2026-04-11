@@ -177,6 +177,9 @@ class Step01Panel(BasePanel):
         idx = self._form_layout.count() - 1
         self._form_layout.insertWidget(idx, main_widget)
 
+    def retranslate(self) -> None:
+        self._preview.retranslate()
+
     def get_config_updates(self) -> dict[str, Any]:
         step1_out = self._output_step1.text().strip()
         output_base = str(Path(step1_out).parent) if step1_out else ""

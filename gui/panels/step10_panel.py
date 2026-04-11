@@ -141,6 +141,9 @@ class Step10Panel(BasePanel):
         self._black_point.valueChanged.connect(self._on_params_changed)
         self._gamma.valueChanged.connect(self._on_params_changed)
 
+    def retranslate(self) -> None:
+        self._preview.retranslate()
+
     def get_config_updates(self) -> dict[str, Any]:
         return {
             "black_point":  self._black_point.value(),

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import session
+from gui import i18n
 from gui.i18n import S
 from gui.panels.settings_panel import SettingsPanel
 from gui.panels.step01_panel import Step01Panel
@@ -168,18 +169,18 @@ DARK_STYLE = _build_dark_style()
 # ── Step definitions ───────────────────────────────────────────────────────────
 
 _STEP_DEFS = [
-    # (step_id, sidebar_label, optional)
-    ("01", "01 — PIPP 전처리",         False),
-    ("02", "02 — AutoStakkert 4",       False),
-    ("03", "03 — Wavelet 미리보기",     False),
-    ("04", "04 — 품질 평가",            False),
-    ("05", "05 — De-rotation 스태킹",   False),
-    ("06", "06 — Wavelet 마스터",       False),
-    ("07", "07 — RGB 합성 (마스터)",    False),
+    # (step_id, i18n_key, optional)
+    ("01", "sidebar.step01", False),
+    ("02", "sidebar.step02", False),
+    ("03", "sidebar.step03", False),
+    ("04", "sidebar.step04", False),
+    ("05", "sidebar.step05", False),
+    ("06", "sidebar.step06", False),
+    ("07", "sidebar.step07", False),
     # separator before optional final steps
-    ("08", "08 — 시계열 합성",          True),
-    ("09", "09 — 애니메이션 GIF",       True),
-    ("10", "10 — 요약 그리드",          True),
+    ("08", "sidebar.step08", True),
+    ("09", "sidebar.step09", True),
+    ("10", "sidebar.step10", True),
 ]
 
 # Which step IDs get a separator _before_ them in the sidebar
@@ -192,7 +193,7 @@ class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(S("app.title"))
-        self.resize(1440, 1080)
+        self.resize(1440, 1010)
         self.setStyleSheet(DARK_STYLE)
 
         self._session_data: dict[str, Any] = {}
@@ -216,7 +217,7 @@ class MainWindow(QMainWindow):
 
         # ── Left sidebar ────────────────────────────────────────────────────
         sidebar = QWidget()
-        sidebar.setFixedWidth(200)
+        sidebar.setFixedWidth(250)
         sidebar.setStyleSheet("background: #252526; border-right: 1px solid #3c3c3c;")
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
@@ -280,7 +281,7 @@ class MainWindow(QMainWindow):
             # Steps 08 and 09 default to enabled even though they are optional
             _default_on = {"08", "09"}
             enabled = enabled_steps.get(step_id, True if step_id in _default_on else not optional)
-            item = StepItem(step_id, label, optional=optional, enabled=enabled)
+            item = StepItem(step_id, S(label), optional=optional, enabled=enabled)
             item.clicked.connect(self._on_step_clicked)
             item.toggled.connect(self._on_step_toggled)
             self._step_items[step_id]   = item
@@ -396,6 +397,49 @@ class MainWindow(QMainWindow):
     def _build_menubar(self) -> None:
         self.menuBar().setVisible(False)
 
+    # ── Panel rebuild (called on language change) ─────────────────────────────
+
+    def _rebuild_step_panels(self) -> None:
+        """Remove all step panels and recreate them so every S() label picks up
+        the newly loaded language.  Session data is already saved at this point."""
+        panel_classes = {
+            "01": Step01Panel, "02": Step02Panel, "03": Step03Panel,
+            "04": Step04Panel, "05": Step05Panel, "06": Step06Panel,
+            "07": Step07Panel, "08": Step08Panel, "09": Step09Panel,
+            "10": Step10Panel,
+        }
+
+        # Remove old panels from the stack
+        for panel in self._step_panels.values():
+            self._stack.removeWidget(panel)
+            panel.deleteLater()
+        self._step_panels.clear()
+        # Keep settings panel at index 0; rebuild panel_index from scratch
+        self._panel_index = {"settings": 0}
+
+        # Recreate and reconnect
+        for step_id, cls in panel_classes.items():
+            panel = cls()
+            self._step_panels[step_id] = panel
+            idx = self._stack.addWidget(panel)
+            self._panel_index[step_id] = idx
+
+            if hasattr(panel, "run_requested"):
+                panel.run_requested.connect(self._on_run_step)
+            if hasattr(panel, "_btn_next"):
+                panel._btn_next.clicked.connect(
+                    lambda _checked, sid=step_id: self._advance_to_next(sid)
+                )
+
+        self._step_panels["02"].completed.connect(lambda: self._show_panel("03"))
+        self._step_panels["01"].dirs_changed.connect(self._on_step01_dirs_changed)
+        self._step_panels["03"].dirs_changed.connect(self._on_step03_dirs_changed)
+
+        # Restore session data into all new panels from in-memory data
+        # (do NOT call load_session() here — that would re-read the disk and
+        # overwrite unsaved changes, e.g. a language switch before save_session)
+        self._apply_session_data()
+
     # ── Session management ────────────────────────────────────────────────────
 
     def _reset_session(self) -> None:
@@ -403,8 +447,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMessageBox
         reply = QMessageBox.question(
             self,
-            "세션 초기화",
-            "저장된 세션을 삭제하고 모든 설정을 기본값으로 되돌립니다.\n계속하시겠습니까?",
+            S("btn.reset_session"),
+            S("msg.reset_session.confirm"),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -412,11 +456,21 @@ class MainWindow(QMainWindow):
             return
         self._session_data = session.reset()
         self.load_session()
-        QMessageBox.information(self, "세션 초기화", "세션이 초기화되었습니다.")
+        QMessageBox.information(self, S("btn.reset_session"), S("msg.reset_session.done"))
 
     def load_session(self) -> None:
         """Load session from disk and apply to all panels."""
         self._session_data = session.load()
+        self._apply_session_data()
+
+    def _apply_session_data(self) -> None:
+        """Apply self._session_data to all panels without reading from disk.
+
+        Called by load_session() after a disk read, and also by
+        _rebuild_step_panels() so that an in-progress language switch does not
+        trigger a second disk read that would overwrite the unsaved language
+        change.
+        """
         self._settings_panel.load_session(self._session_data)
 
         # Apply enabled step states — iterate ALL steps (not just saved ones)
@@ -453,7 +507,7 @@ class MainWindow(QMainWindow):
 
         # Update status bar
         output_dir = self._session_data.get("output_dir", "")
-        self._output_dir_label.setText(f"출력: {output_dir}" if output_dir else "")
+        self._output_dir_label.setText(S("label.output", d=output_dir) if output_dir else "")
 
     def save_session(self) -> None:
         """Collect all panel values and persist to disk."""
@@ -532,7 +586,7 @@ class MainWindow(QMainWindow):
         if new_output_dir:
             self._session_data["output_dir"]        = new_output_dir
             self._session_data["step01_output_dir"] = updates.get("step01_output_dir", "")
-            self._output_dir_label.setText(f"출력: {new_output_dir}")
+            self._output_dir_label.setText(S("label.output", d=new_output_dir))
             for sid in ("03", "04", "05", "06", "07", "08", "09", "10"):
                 dep = self._step_panels.get(sid)
                 if dep and hasattr(dep, "load_session"):
@@ -556,10 +610,33 @@ class MainWindow(QMainWindow):
 
     def _on_settings_saved(self) -> None:
         # 1. Apply new settings values to session data first (camera_mode etc.)
+        old_lang = self._session_data.get("language", "ko")
         data = self._session_data.copy()
         data.update(self._settings_panel.get_session_values())
         data["enabled_steps"] = dict(self._enabled_steps)
         self._session_data = data
+
+        # Reload i18n and refresh UI if language changed
+        new_lang = data.get("language", "ko")
+        if new_lang != old_lang:
+            i18n.load(new_lang)
+
+            # Rebuild settings panel with new language
+            self._stack.removeWidget(self._settings_panel)
+            self._settings_panel.deleteLater()
+            self._settings_panel = SettingsPanel()
+            self._settings_panel._btn_save.clicked.connect(self._on_settings_saved)
+            self._settings_panel._btn_reset.clicked.connect(self._reset_session)
+            self._stack.insertWidget(0, self._settings_panel)
+
+            # Update sidebar labels
+            for step_id, key, _optional in _STEP_DEFS:
+                item = self._step_items.get(step_id)
+                if item:
+                    item.set_label(S(key))
+
+            # Rebuild step panels (applies _session_data in-memory, not from disk)
+            self._rebuild_step_panels()
 
         # 2. Refresh panels with the updated session (updates _is_color in step07/08)
         for sid in ("01", "04", "05", "06", "07", "08", "09", "10"):
@@ -571,7 +648,7 @@ class MainWindow(QMainWindow):
         self.save_session()
 
         output_dir = self._session_data.get("output_dir", "")
-        self._output_dir_label.setText(f"출력: {output_dir}" if output_dir else "")
+        self._output_dir_label.setText(S("label.output", d=output_dir) if output_dir else "")
         QMessageBox.information(self, "설정", S("msg.settings_saved"))
 
     def _on_run_step(self, step_id: str) -> None:

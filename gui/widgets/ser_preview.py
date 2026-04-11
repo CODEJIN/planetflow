@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from gui.i18n import S
+
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
@@ -148,8 +150,8 @@ class _Worker(QObject):
                 )
                 roi_pt = (rx1, ry1)
 
-                verdict = "✓ 통과" if passed else f"✗ 기준 미달 (min {self._min_diam}px)"
-                status  = f"감지: {diameter}px  {verdict}  [{mid_idx + 1}/{total}]"
+                verdict = S("preview.detect.pass") if passed else S("preview.detect.fail", min=self._min_diam)
+                status  = S("preview.detect.found", d=diameter, verdict=verdict, i=mid_idx + 1, t=total)
                 crop_raw = planet_detect.get_cropped_frame(frame, (cx, cy), self._roi_size)
             else:
                 # Not detected — draw ROI box at frame centre (orange)
@@ -164,7 +166,7 @@ class _Worker(QObject):
                 )
                 roi_pt    = (rx1, ry1)
                 roi_color = (255, 180, 0)
-                status    = f"행성 미감지  [{mid_idx + 1}/{total}]"
+                status    = S("preview.detect.none", i=mid_idx + 1, t=total)
                 crop_raw  = planet_detect.get_cropped_frame(frame, (cx, cy), self._roi_size)
 
             # Scale overlay to fit panel; draw text AFTER scaling so font size is consistent
@@ -233,11 +235,11 @@ class SerPreviewWidget(QWidget):
         root.setContentsMargins(0, 4, 0, 0)
         root.setSpacing(4)
 
-        lbl = QLabel("미리보기")
-        lbl.setStyleSheet("color: #aaa; font-size: 11px;")
-        root.addWidget(lbl)
+        self._header_lbl = QLabel(S("preview.label"))
+        self._header_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        root.addWidget(self._header_lbl)
 
-        self._status_lbl = QLabel("SER 입력 폴더를 설정하면 미리보기가 활성화됩니다.")
+        self._status_lbl = QLabel(S("preview.status.ser"))
         self._status_lbl.setStyleSheet(_STATUS_STYLE)
         self._status_lbl.setWordWrap(True)
         root.addWidget(self._status_lbl)
@@ -248,22 +250,30 @@ class SerPreviewWidget(QWidget):
         self._raw_lbl  = _make_img_label()
         self._crop_lbl = _make_img_label()
 
-        for img_lbl, cap in (
-            (self._raw_lbl,  "원본 + 감지"),
-            (self._crop_lbl, "ROI 크롭"),
+        self._cap_raw_lbl  = QLabel(S("preview.cap.raw_detect"))
+        self._cap_crop_lbl = QLabel(S("preview.cap.roi_crop"))
+        for img_lbl, cap_lbl in (
+            (self._raw_lbl,  self._cap_raw_lbl),
+            (self._crop_lbl, self._cap_crop_lbl),
         ):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(img_lbl)
-            c = QLabel(cap)
-            c.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            c.setStyleSheet(_CAP_STYLE)
-            col.addWidget(c)
+            cap_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cap_lbl.setStyleSheet(_CAP_STYLE)
+            col.addWidget(cap_lbl)
             panels.addLayout(col)
 
         root.addLayout(panels)
+        root.addStretch()
 
     # ── Public API ──────────────────────────────────────────────────────────────
+
+    def retranslate(self) -> None:
+        self._header_lbl.setText(S("preview.label"))
+        self._status_lbl.setText(S("preview.status.ser"))
+        self._cap_raw_lbl.setText(S("preview.cap.raw_detect"))
+        self._cap_crop_lbl.setText(S("preview.cap.roi_crop"))
 
     def set_input_dir(self, folder) -> None:
         if folder:
@@ -311,7 +321,7 @@ class SerPreviewWidget(QWidget):
 
         self._running = True
         self._pending = False
-        self._status_lbl.setText(f"처리 중…  {ser.name}")
+        self._status_lbl.setText(f"{S('preview.rendering')}  {ser.name}")
 
         worker = _Worker(ser, self._roi_size, self._min_diam)
         thread = QThread(self)

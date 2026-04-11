@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from gui.i18n import S
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel,
@@ -92,7 +94,7 @@ class ImageGrid(QWidget):
             self._hbox.insertWidget(self._hbox.count() - 1, thumb)
 
         if len(paths) > _MAX_SHOWN:
-            more = QLabel(f"+{len(paths) - _MAX_SHOWN} 개 더...")
+            more = QLabel(S("image_grid.more", n=len(paths) - _MAX_SHOWN))
             more.setStyleSheet("color: #888; padding: 8px;")
             self._hbox.insertWidget(self._hbox.count() - 1, more)
 

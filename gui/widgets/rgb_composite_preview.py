@@ -13,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from gui.i18n import S
+
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
@@ -203,11 +205,11 @@ class RgbCompositePreviewWidget(QWidget):
         root.setContentsMargins(0, 4, 0, 0)
         root.setSpacing(4)
 
-        lbl = QLabel("미리보기")
-        lbl.setStyleSheet("color: #aaa; font-size: 11px;")
-        root.addWidget(lbl)
+        self._header_lbl = QLabel(S("preview.label"))
+        self._header_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        root.addWidget(self._header_lbl)
 
-        self._status_lbl = QLabel("Step 6 출력 폴더를 설정하면 미리보기가 활성화됩니다.")
+        self._status_lbl = QLabel(S("preview.status.step6"))
         self._status_lbl.setStyleSheet(_STATUS_STYLE)
         self._status_lbl.setWordWrap(True)
         root.addWidget(self._status_lbl)
@@ -218,22 +220,30 @@ class RgbCompositePreviewWidget(QWidget):
         self._left_lbl  = _make_img_label()
         self._right_lbl = _make_img_label()
 
-        for img_lbl, cap in (
-            (self._left_lbl,  "입력 채널"),
-            (self._right_lbl, "합성 결과"),
+        self._cap_left_lbl  = QLabel(S("preview.cap.input_ch"))
+        self._cap_right_lbl = QLabel(S("preview.cap.composite"))
+        for img_lbl, cap_lbl in (
+            (self._left_lbl,  self._cap_left_lbl),
+            (self._right_lbl, self._cap_right_lbl),
         ):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(img_lbl)
-            c = QLabel(cap)
-            c.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            c.setStyleSheet(_CAP_STYLE)
-            col.addWidget(c)
+            cap_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cap_lbl.setStyleSheet(_CAP_STYLE)
+            col.addWidget(cap_lbl)
             panels.addLayout(col)
 
         root.addLayout(panels)
+        root.addStretch()
 
     # ── Public API ──────────────────────────────────────────────────────────────
+
+    def retranslate(self) -> None:
+        self._header_lbl.setText(S("preview.label"))
+        self._status_lbl.setText(S("preview.status.step6"))
+        self._cap_left_lbl.setText(S("preview.cap.input_ch"))
+        self._cap_right_lbl.setText(S("preview.cap.composite"))
 
     def set_input_dir(self, folder) -> None:
         if folder:
@@ -242,7 +252,7 @@ class RgbCompositePreviewWidget(QWidget):
             self._step06_dir = None
 
         if self._step06_dir is None:
-            self._status_lbl.setText("Step 6 출력 폴더를 설정하면 미리보기가 활성화됩니다.")
+            self._status_lbl.setText(S("preview.status.step6"))
         elif self.isVisible():
             self.schedule_update(100)
 
@@ -281,7 +291,7 @@ class RgbCompositePreviewWidget(QWidget):
 
         self._running = True
         self._pending = False
-        self._status_lbl.setText("처리 중…")
+        self._status_lbl.setText(S("preview.rendering"))
 
         worker = _Worker(
             self._step06_dir,
@@ -326,6 +336,6 @@ class RgbCompositePreviewWidget(QWidget):
         self._running = False
         self._thread  = None
         self._worker  = None
-        self._status_lbl.setText(f"오류: {msg}")
+        self._status_lbl.setText(S("preview.error", msg=msg))
         if self._pending:
             self._pending = False

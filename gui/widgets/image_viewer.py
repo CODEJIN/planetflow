@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from gui.i18n import S
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QSlider,
@@ -45,7 +47,7 @@ class ImageViewer(QWidget):
             "background: #111; border-radius: 4px; border: 1px solid #3a3a3a;"
         )
         self._img_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._img_label.setToolTip("클릭하면 원본 크기로 봅니다")
+        self._img_label.setToolTip(S("image_viewer.zoom_tip"))
         self._img_label.mousePressEvent = lambda _e: self._open_full()
         layout.addWidget(self._img_label)
 

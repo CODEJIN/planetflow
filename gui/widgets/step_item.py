@@ -53,17 +53,21 @@ class StepItem(QWidget):
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._icon)
 
-        # Step label
+        # Step label — stretch=1 so it consumes all space left over after the
+        # fixed icon and the small checkbox; Ignored policy lets it shrink to 0
+        # if the sidebar is too narrow rather than pushing the checkbox off-screen.
         self._label = QLabel(label)
         self._label.setFont(QFont("Arial", 10))
-        self._label.setSizePolicy(QSizePolicy.Policy.Expanding,
+        self._label.setSizePolicy(QSizePolicy.Policy.Ignored,
                                   QSizePolicy.Policy.Preferred)
-        layout.addWidget(self._label)
+        layout.addWidget(self._label, stretch=1)
 
-        # Optional toggle checkbox
+        # Optional toggle checkbox — fixed width so it never competes with the
+        # label for stretch space.
         if optional:
             self._check = QCheckBox()
             self._check.setChecked(enabled)
+            self._check.setFixedWidth(20)
             self._check.setToolTip("활성화/비활성화")
             self._check.stateChanged.connect(
                 lambda s: self.toggled.emit(
@@ -90,6 +94,9 @@ class StepItem(QWidget):
         icon, colour = STATUS_STYLE.get(status, ("○", "#888888"))
         self._icon.setText(icon)
         self._icon.setStyleSheet(f"color: {colour};")
+
+    def set_label(self, text: str) -> None:
+        self._label.setText(text)
 
     def set_enabled_visual(self, enabled: bool) -> None:
         """Dim the row when the step is disabled (optional + unchecked)."""

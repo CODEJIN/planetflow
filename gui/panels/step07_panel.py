@@ -220,7 +220,7 @@ class _Step07MonoWidget(QWidget):
         self._input_lbl = QLineEdit()
         self._input_lbl.setReadOnly(True)
         self._input_lbl.setStyleSheet(_READONLY_STYLE)
-        self._input_lbl.setToolTip("Step 6 마스터 이미지가 있는 폴더 (자동)")
+        self._input_lbl.setToolTip(S("step07.input_dir.tooltip"))
         lbl_in = QLabel(S("step07.input_dir"))
         fl.addRow(lbl_in, self._input_lbl)
 
@@ -230,10 +230,7 @@ class _Step07MonoWidget(QWidget):
         lbl_out = QLabel(S("step07.output_dir"))
         fl.addRow(lbl_out, self._output_lbl)
 
-        _tip_shift = (
-            "채널 간 정렬 시 허용되는 최대 이동량(px)입니다.\n"
-            "너무 크면 잘못된 채널이 정렬될 수 있습니다."
-        )
+        _tip_shift = S("step07.max_shift.tooltip")
         self._max_shift = QDoubleSpinBox()
         self._max_shift.setStyleSheet(_SPINBOX_STYLE)
         self._max_shift.setRange(0.0, 100.0)
@@ -304,6 +301,9 @@ class _Step07MonoWidget(QWidget):
         for row in self._spec_rows:
             for cb in row._combos.values():
                 cb.currentIndexChanged.connect(self._on_params_changed)
+
+    def retranslate(self) -> None:
+        self._preview.retranslate()
 
     def load_session(self, data: dict[str, Any]) -> None:
         out = data.get("output_dir", "")
@@ -561,7 +561,7 @@ class _CCGraphWidget(QWidget):
             painter.drawText(
                 0, 0, W, H,
                 Qt.AlignmentFlag.AlignCenter,
-                "미리보기 후 자동 계산값이 표시됩니다",
+                S("step07.canvas.no_data"),
             )
             return
 
@@ -572,7 +572,7 @@ class _CCGraphWidget(QWidget):
     def _draw_gain_bars(self, painter: QPainter, ax: int, ay: int, aw: int, ah: int) -> None:
         painter.setPen(QColor("#888"))
         painter.setFont(QFont("Arial", 8))
-        painter.drawText(ax, ay, aw, 14, Qt.AlignmentFlag.AlignLeft, "채널 이득 (G 기준)")
+        painter.drawText(ax, ay, aw, 14, Qt.AlignmentFlag.AlignLeft, S("step07.canvas.gain"))
 
         chart_y = ay + 16
         chart_h = ah - 36
@@ -607,7 +607,7 @@ class _CCGraphWidget(QWidget):
     def _draw_shift_diagram(self, painter: QPainter, ax: int, ay: int, aw: int, ah: int) -> None:
         painter.setPen(QColor("#888"))
         painter.setFont(QFont("Arial", 8))
-        painter.drawText(ax, ay, aw, 14, Qt.AlignmentFlag.AlignLeft, "색수차 이동 (G 기준)")
+        painter.drawText(ax, ay, aw, 14, Qt.AlignmentFlag.AlignLeft, S("step07.canvas.shift"))
 
         cx = ax + aw // 2
         cy = ay + 16 + (ah - 36) // 2
@@ -676,11 +676,14 @@ class _Step07ColorWidget(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setSpacing(10)
+        root = QHBoxLayout(self)
+        root.setSpacing(12)
         root.setContentsMargins(0, 0, 0, 0)
 
-        # ── Folder labels ──────────────────────────────────────────────────
+        # ── Left: form controls ────────────────────────────────────────────
+        left = QVBoxLayout()
+        left.setSpacing(10)
+
         folder_form = QWidget()
         folder_form.setStyleSheet("background: transparent;")
         fl = QFormLayout(folder_form)
@@ -698,33 +701,35 @@ class _Step07ColorWidget(QWidget):
         self._output_lbl.setStyleSheet(_READONLY_STYLE)
         fl.addRow(QLabel(S("step07.output_dir")), self._output_lbl)
 
-        root.addWidget(folder_form)
+        left.addWidget(folder_form)
 
-        # ── Info + refresh button ──────────────────────────────────────────
-        info = QLabel(
-            "윈도우마다 자동으로 화이트밸런스와 색수차 보정이 적용됩니다.\n"
-            "아래 미리보기에서 첫 번째 윈도우의 보정 결과를 확인할 수 있습니다."
-        )
+        info = QLabel(S("step07.cc.info"))
         info.setStyleSheet(_INFO_STYLE)
         info.setWordWrap(True)
-        root.addWidget(info)
+        left.addWidget(info)
 
         btn_row = QHBoxLayout()
-        self._btn_refresh = QPushButton("미리보기 갱신")
+        self._btn_refresh = QPushButton(S("step07.cc.btn_refresh"))
         self._btn_refresh.setStyleSheet(_BTN_REFRESH)
-        self._btn_refresh.setToolTip("Step 6 PNG에서 자동 보정 결과를 미리봅니다.")
+        self._btn_refresh.setToolTip(S("step07.cc.btn_refresh.tooltip"))
         self._btn_refresh.clicked.connect(lambda: self.schedule_update(0))
         btn_row.addWidget(self._btn_refresh)
         btn_row.addStretch()
-        root.addLayout(btn_row)
+        left.addLayout(btn_row)
 
-        # Status
-        self._status_lbl = QLabel("Step 6 출력 폴더가 설정되면 미리보기가 활성화됩니다.")
+        left.addStretch()
+        root.addLayout(left, 1)
+
+        # ── Right: preview (status + before/after images + graph) ─────────
+        right = QVBoxLayout()
+        right.setSpacing(4)
+        right.setContentsMargins(0, 0, 0, 0)
+
+        self._status_lbl = QLabel(S("step07.cc.status_init"))
         self._status_lbl.setStyleSheet(_STATUS_STYLE)
         self._status_lbl.setWordWrap(True)
-        root.addWidget(self._status_lbl)
+        right.addWidget(self._status_lbl)
 
-        # ── Before / After preview panels ──────────────────────────────────
         panels_row = QHBoxLayout()
         panels_row.setSpacing(8)
         panels_row.setContentsMargins(0, 0, 0, 0)
@@ -732,26 +737,36 @@ class _Step07ColorWidget(QWidget):
         self._before_lbl = _make_img_label_cc()
         self._after_lbl  = _make_img_label_cc()
 
-        for img_lbl, cap in ((self._before_lbl, "보정 전"), (self._after_lbl, "보정 후")):
+        self._cap_before_lbl = QLabel(S("step07.cc.cap_before"))
+        self._cap_after_lbl  = QLabel(S("step07.cc.cap_after"))
+        for img_lbl, cap_lbl in (
+            (self._before_lbl, self._cap_before_lbl),
+            (self._after_lbl,  self._cap_after_lbl),
+        ):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(img_lbl)
-            c = QLabel(cap)
-            c.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            c.setStyleSheet(_CAP_STYLE)
-            col.addWidget(c)
+            cap_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cap_lbl.setStyleSheet(_CAP_STYLE)
+            col.addWidget(cap_lbl)
             panels_row.addLayout(col)
 
-        panels_row.addStretch()
-        root.addLayout(panels_row)
+        right.addLayout(panels_row)
 
-        # ── Graph (fills width of two preview panels) ──────────────────────
         self._graph = _CCGraphWidget()
-        root.addWidget(self._graph)
+        right.addWidget(self._graph)
 
-        root.addStretch()
+        right.addStretch()
+        root.addLayout(right, 0)
 
     # ── Public interface ──────────────────────────────────────────────────────
+
+    def retranslate(self) -> None:
+        self._btn_refresh.setText(S("step07.cc.btn_refresh"))
+        self._btn_refresh.setToolTip(S("step07.cc.btn_refresh.tooltip"))
+        self._status_lbl.setText(S("step07.cc.status_init"))
+        self._cap_before_lbl.setText(S("step07.cc.cap_before"))
+        self._cap_after_lbl.setText(S("step07.cc.cap_after"))
 
     def load_session(self, data: dict[str, Any]) -> None:
         out = data.get("output_dir", "")
@@ -809,13 +824,13 @@ class _Step07ColorWidget(QWidget):
 
         png = _find_color_png(self._step06_dir)
         if png is None:
-            self._status_lbl.setText(f"PNG 없음: {self._step06_dir}")
+            self._status_lbl.setText(S("preview.no_png_short", d=self._step06_dir))
             return
 
         self._running = True
         self._pending = False
         self._btn_refresh.setEnabled(False)
-        self._status_lbl.setText(f"자동 보정 계산 중…  {png.name}")
+        self._status_lbl.setText(S("preview.auto_calc", f=png.name))
 
         worker = _CCPreviewWorker(png)
         thread = QThread(self)
@@ -854,9 +869,9 @@ class _Step07ColorWidget(QWidget):
         self._after_lbl.setPixmap(_numpy_to_pixmap(corr_u8))
 
         self._status_lbl.setText(
-            f"자동 계산 완료  ({w}×{h})  "
-            f"R×{r_gain:.3f}  G×1.000  B×{b_gain:.3f}  "
-            f"R_shift=({r_sx:+.2f},{r_sy:+.2f})  B_shift=({b_sx:+.2f},{b_sy:+.2f})"
+            S("step07.cc.done",
+              wh=f"{w}×{h}", rg=r_gain, bg=b_gain,
+              rsx=r_sx, rsy=r_sy, bsx=b_sx, bsy=b_sy)
         )
         self._graph.update_data(r_gain, b_gain, r_sx, r_sy, b_sx, b_sy)
 
@@ -870,7 +885,7 @@ class _Step07ColorWidget(QWidget):
         self._thread  = None
         self._worker  = None
         self._btn_refresh.setEnabled(True)
-        self._status_lbl.setText(f"오류: {msg}")
+        self._status_lbl.setText(S("preview.error", msg=msg))
         if self._pending:
             self._pending = False
 
@@ -910,6 +925,10 @@ class Step07Panel(BasePanel):
             self._color_widget.load_session(data)
         else:
             self._mono_widget.load_session(data)
+
+    def retranslate(self) -> None:
+        self._mono_widget.retranslate()
+        self._color_widget.retranslate()
 
     def output_paths(self) -> list[Path]:
         if self._is_color:

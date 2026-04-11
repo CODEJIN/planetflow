@@ -16,6 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
+from gui.i18n import S
+
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap
@@ -47,27 +49,57 @@ class _Worker(QObject):
         levels: int,
         power: float,
         sharpen_filter: float,
+        edge_feather_factor: float = 0.0,
     ) -> None:
         super().__init__()
-        self._path           = tif_path
-        self._amounts        = amounts
-        self._levels         = levels
-        self._power          = power
-        self._sharpen_filter = sharpen_filter
+        self._path                = tif_path
+        self._amounts             = amounts
+        self._levels              = levels
+        self._power               = power
+        self._sharpen_filter      = sharpen_filter
+        self._edge_feather_factor = edge_feather_factor
 
     @Slot()
     def run(self) -> None:
         try:
             from pipeline.modules import image_io, wavelet
 
-            orig  = image_io.read_tif(self._path)          # float32 [0,1]
-            sharp = wavelet.sharpen(
-                orig,
-                levels=self._levels,
-                amounts=self._amounts,
-                power=self._power,
-                sharpen_filter=self._sharpen_filter,
-            )
+            orig = image_io.read_tif(self._path)          # float32 [0,1]
+
+            if self._edge_feather_factor > 0.0:
+                from pipeline.modules.derotation import find_disk_center
+                _lum = orig.mean(axis=2) if orig.ndim == 3 else orig
+                try:
+                    _cx, _cy, _sr, _, _ = find_disk_center(_lum)
+                    _has_disk = _sr >= 5
+                except Exception:
+                    _has_disk = False
+
+                if _has_disk:
+                    sharp = wavelet.sharpen_disk_aware(
+                        orig, _cx, _cy, _sr,
+                        levels=self._levels,
+                        amounts=self._amounts,
+                        power=self._power,
+                        sharpen_filter=self._sharpen_filter,
+                        edge_feather_factor=self._edge_feather_factor,
+                    )
+                else:
+                    sharp = wavelet.sharpen(
+                        orig,
+                        levels=self._levels,
+                        amounts=self._amounts,
+                        power=self._power,
+                        sharpen_filter=self._sharpen_filter,
+                    )
+            else:
+                sharp = wavelet.sharpen(
+                    orig,
+                    levels=self._levels,
+                    amounts=self._amounts,
+                    power=self._power,
+                    sharpen_filter=self._sharpen_filter,
+                )
 
             orig_u8  = _to_uint8(orig)
             sharp_u8 = _to_uint8(sharp)
@@ -146,11 +178,12 @@ class WaveletPreviewWidget(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._sharpen_filter = sharpen_filter
+        self._sharpen_filter      = sharpen_filter
         self._input_dir: Optional[Path] = None
         self._amounts:   List[float]    = [200.0, 200.0, 200.0, 0.0, 0.0, 0.0]
         self._levels:    int            = 6
         self._power:     float          = 1.0
+        self._edge_feather_factor: float = 0.0
 
         # State flags — more reliable than thread.isRunning()
         self._running = False
@@ -174,12 +207,12 @@ class WaveletPreviewWidget(QWidget):
         root.setSpacing(4)
 
         # Header
-        lbl = QLabel("미리보기")
-        lbl.setStyleSheet("color: #aaa; font-size: 11px;")
-        root.addWidget(lbl)
+        self._header_lbl = QLabel(S("preview.label"))
+        self._header_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        root.addWidget(self._header_lbl)
 
         # Status label (shows filename while rendering, or error/hint)
-        self._status_lbl = QLabel("입력 폴더에 TIF 파일을 설정하면 미리보기가 활성화됩니다.")
+        self._status_lbl = QLabel(S("preview.status.tif"))
         self._status_lbl.setStyleSheet(_STATUS_STYLE)
         self._status_lbl.setWordWrap(True)
         root.addWidget(self._status_lbl)
@@ -191,19 +224,30 @@ class WaveletPreviewWidget(QWidget):
         self._orig_lbl  = _make_img_label()
         self._sharp_lbl = _make_img_label()
 
-        for img_lbl, cap in ((self._orig_lbl, "원본"), (self._sharp_lbl, "웨이블릿 적용")):
+        self._cap_orig_lbl  = QLabel(S("preview.cap.original"))
+        self._cap_sharp_lbl = QLabel(S("preview.cap.wavelet"))
+        for img_lbl, cap_lbl in (
+            (self._orig_lbl,  self._cap_orig_lbl),
+            (self._sharp_lbl, self._cap_sharp_lbl),
+        ):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(img_lbl)
-            c = QLabel(cap)
-            c.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            c.setStyleSheet(_CAP_STYLE)
-            col.addWidget(c)
+            cap_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cap_lbl.setStyleSheet(_CAP_STYLE)
+            col.addWidget(cap_lbl)
             panels.addLayout(col)
 
         root.addLayout(panels)
+        root.addStretch()
 
     # ── Public API ──────────────────────────────────────────────────────────────
+
+    def retranslate(self) -> None:
+        self._header_lbl.setText(S("preview.label"))
+        self._status_lbl.setText(S("preview.status.tif"))
+        self._cap_orig_lbl.setText(S("preview.cap.original"))
+        self._cap_sharp_lbl.setText(S("preview.cap.wavelet"))
 
     def set_input_dir(self, folder) -> None:
         """Set TIF source folder.  Accepts Path, str, or None."""
@@ -226,10 +270,12 @@ class WaveletPreviewWidget(QWidget):
         amounts: List[float],
         levels: int = 6,
         power: float = 1.0,
+        edge_feather_factor: float = 0.0,
     ) -> None:
-        self._amounts = list(amounts)
-        self._levels  = levels
-        self._power   = power
+        self._amounts             = list(amounts)
+        self._levels              = levels
+        self._power               = power
+        self._edge_feather_factor = edge_feather_factor
 
     def schedule_update(self, delay: int = 400) -> None:
         """Debounced update — restarts timer on every call."""
@@ -263,12 +309,12 @@ class WaveletPreviewWidget(QWidget):
 
         tif = _pick_tif(self._input_dir)
         if tif is None:
-            self._status_lbl.setText(f"TIF 파일 없음: {self._input_dir}")
+            self._status_lbl.setText(S("preview.no_tif", d=self._input_dir))
             return
 
         self._running = True
         self._pending = False
-        self._status_lbl.setText(f"처리 중…  {tif.name}")
+        self._status_lbl.setText(f"{S('preview.rendering')}  {tif.name}")
 
         worker = _Worker(
             tif,
@@ -276,6 +322,7 @@ class WaveletPreviewWidget(QWidget):
             self._levels,
             self._power,
             self._sharpen_filter,
+            self._edge_feather_factor,
         )
         # QThread(self): Qt parent keeps C++ object alive so Python ref-drops
         # in _on_done/_on_error are safe even if the OS thread is still quitting.

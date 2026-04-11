@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from gui.i18n import S
+
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap
@@ -165,11 +167,11 @@ class LevelsPreviewWidget(QWidget):
         root.setContentsMargins(0, 4, 0, 0)
         root.setSpacing(4)
 
-        lbl = QLabel("미리보기")
-        lbl.setStyleSheet("color: #aaa; font-size: 11px;")
-        root.addWidget(lbl)
+        self._header_lbl = QLabel(S("preview.label"))
+        self._header_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
+        root.addWidget(self._header_lbl)
 
-        self._status_lbl = QLabel("Step 7 출력 폴더를 설정하면 미리보기가 활성화됩니다.")
+        self._status_lbl = QLabel(S("preview.status.step7"))
         self._status_lbl.setStyleSheet(_STATUS_STYLE)
         self._status_lbl.setWordWrap(True)
         root.addWidget(self._status_lbl)
@@ -180,19 +182,30 @@ class LevelsPreviewWidget(QWidget):
         self._orig_lbl = _make_img_label()
         self._adj_lbl  = _make_img_label()
 
-        for img_lbl, cap in ((self._orig_lbl, "레벨 조정 전"), (self._adj_lbl, "레벨 조정 후")):
+        self._cap_orig_lbl = QLabel(S("preview.cap.before"))
+        self._cap_adj_lbl  = QLabel(S("preview.cap.after"))
+        for img_lbl, cap_lbl in (
+            (self._orig_lbl, self._cap_orig_lbl),
+            (self._adj_lbl,  self._cap_adj_lbl),
+        ):
             col = QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(img_lbl)
-            c = QLabel(cap)
-            c.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            c.setStyleSheet(_CAP_STYLE)
-            col.addWidget(c)
+            cap_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cap_lbl.setStyleSheet(_CAP_STYLE)
+            col.addWidget(cap_lbl)
             panels.addLayout(col)
 
         root.addLayout(panels)
+        root.addStretch()
 
     # ── Public API ──────────────────────────────────────────────────────────────
+
+    def retranslate(self) -> None:
+        self._header_lbl.setText(S("preview.label"))
+        self._status_lbl.setText(S("preview.status.step7"))
+        self._cap_orig_lbl.setText(S("preview.cap.before"))
+        self._cap_adj_lbl.setText(S("preview.cap.after"))
 
     def set_input_dir(self, folder) -> None:
         if folder:
@@ -234,14 +247,14 @@ class LevelsPreviewWidget(QWidget):
         png = _pick_png(self._input_dir)
         if png is None:
             if not self._input_dir.is_dir():
-                self._status_lbl.setText("Step 7을 먼저 실행해 주세요.")
+                self._status_lbl.setText(S("preview.run_step7_first"))
             else:
-                self._status_lbl.setText(f"PNG 파일 없음: {self._input_dir}")
+                self._status_lbl.setText(S("preview.no_png", d=self._input_dir))
             return
 
         self._running = True
         self._pending = False
-        self._status_lbl.setText(f"처리 중…  {png.name}")
+        self._status_lbl.setText(f"{S('preview.rendering')}  {png.name}")
 
         worker = _Worker(png, self._black_point, self._white_point, self._gamma)
         thread = QThread(self)
@@ -275,6 +288,6 @@ class LevelsPreviewWidget(QWidget):
         self._running = False
         self._thread  = None
         self._worker  = None
-        self._status_lbl.setText(f"오류: {msg}")
+        self._status_lbl.setText(S("preview.error", msg=msg))
         if self._pending:
             self._pending = False

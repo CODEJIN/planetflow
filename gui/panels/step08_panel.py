@@ -291,10 +291,16 @@ class _Step08MonoWidget(QWidget):
         wav_vl.addWidget(amounts_label)
 
         self._series_wavelet_spins: list[QDoubleSpinBox] = []
-        for i, default in enumerate(_SERIES_WAVELET_DEFAULTS):
-            row_layout, spin = _make_wavelet_row(i + 1, default)
-            wav_vl.addLayout(row_layout)
-            self._series_wavelet_spins.append(spin)
+        defaults8m = list(_SERIES_WAVELET_DEFAULTS)
+        for i in range(0, len(defaults8m), 2):
+            pair = QHBoxLayout()
+            pair.setSpacing(12)
+            for j in range(2):
+                if i + j < len(defaults8m):
+                    row_layout, spin = _make_wavelet_row(i + j + 1, defaults8m[i + j])
+                    pair.addLayout(row_layout)
+                    self._series_wavelet_spins.append(spin)
+            wav_vl.addLayout(pair)
 
         _tip_feather8 = (
             "디스크 림브(가장자리) 부근의 웨이블릿 감쇠 폭을 결정합니다.\n"
@@ -323,16 +329,6 @@ class _Step08MonoWidget(QWidget):
         wav_vl.addLayout(feather_form)
 
         root.addWidget(wav_section)
-
-        # ── Info ──────────────────────────────────────────────────────────────
-        info = QLabel(
-            "이 단계는 Step 3의 wavelet 미리보기 PNG를 기반으로 시간대별 필터 세트를 자동으로 "
-            "합성합니다. Step 3 및 Step 4가 완료된 후 실행하세요.\n\n"
-            "출력: step08_series/ 폴더에 시계열 RGB 합성 PNG가 생성됩니다."
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet(_INFO_STYLE)
-        root.addWidget(info)
 
     def get_config_updates(self) -> dict[str, Any]:
         series_specs = [r.to_dict() for r in self._spec_rows if r.to_dict()["name"]]
@@ -566,30 +562,52 @@ class _Step08ColorWidget(QWidget):
         wav_vl.addWidget(amounts_label)
 
         self._series_wavelet_spins: list[QDoubleSpinBox] = []
-        for i, default in enumerate(_SERIES_WAVELET_DEFAULTS):
-            row_layout, spin = _make_wavelet_row(i + 1, default)
-            wav_vl.addLayout(row_layout)
-            self._series_wavelet_spins.append(spin)
+        defaults8c = list(_SERIES_WAVELET_DEFAULTS)
+        for i in range(0, len(defaults8c), 2):
+            pair = QHBoxLayout()
+            pair.setSpacing(12)
+            for j in range(2):
+                if i + j < len(defaults8c):
+                    row_layout, spin = _make_wavelet_row(i + j + 1, defaults8c[i + j])
+                    pair.addLayout(row_layout)
+                    self._series_wavelet_spins.append(spin)
+            wav_vl.addLayout(pair)
+
+        _tip_feather8 = (
+            "디스크 림브(가장자리) 부근의 웨이블릿 감쇠 폭을 결정합니다.\n"
+            "레벨 L의 페더 폭 = 2^L × factor (px)\n\n"
+            "  0.0  = 페더링 없음 (림브까지 풀 선명화, 링잉 발생 위험)\n"
+            "  2.0  = 기본값 (권장)\n"
+            "  8.0  = 광폭 페더 (행성 내부도 일부 감쇠됨)\n\n"
+            "Step 6과 독립적으로 Step 8 시계열 프레임에만 적용됩니다."
+        )
+        feather_form = QFormLayout()
+        feather_form.setContentsMargins(0, 6, 0, 0)
+        feather_form.setSpacing(6)
+        feather_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._series_edge_feather = QDoubleSpinBox()
+        self._series_edge_feather.setStyleSheet(_DBLSPIN_STYLE)
+        self._series_edge_feather.setRange(0.0, 8.0)
+        self._series_edge_feather.setDecimals(1)
+        self._series_edge_feather.setSingleStep(0.5)
+        self._series_edge_feather.setValue(2.0)
+        self._series_edge_feather.setFixedWidth(72)
+        self._series_edge_feather.setToolTip(_tip_feather8)
+        lbl_feather8 = QLabel(S("step08.edge_feather"))
+        lbl_feather8.setToolTip(_tip_feather8)
+        feather_form.addRow(lbl_feather8, self._series_edge_feather)
+        wav_vl.addLayout(feather_form)
 
         root.addWidget(wav_section)
 
-        # ── Info ──────────────────────────────────────────────────────────────
-        info = QLabel(
-            "컬러 카메라 모드: 연속 촬영한 색상 프레임을 슬라이딩 윈도우로 스태킹합니다.\n"
-            "스태킹 → 웨이블릿 선명화 → 자동 화이트밸런스 + 색수차 보정 순으로 처리됩니다.\n\n"
-            "출력: step08_series/ 폴더에 시계열 COLOR 합성 PNG가 생성됩니다."
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet(_INFO_STYLE)
-        root.addWidget(info)
-
     def get_config_updates(self) -> dict[str, Any]:
         return {
-            "series_scale":         self._series_scale.value(),
-            "series_cycle_seconds": self._series_cycle_seconds.value(),
-            "stack_window_n":       self._stack_window_n.value(),
-            "stack_min_quality":    self._stack_min_quality.value(),
-            "series_amounts":       [s.value() for s in self._series_wavelet_spins],
+            "series_scale":               self._series_scale.value(),
+            "series_cycle_seconds":       self._series_cycle_seconds.value(),
+            "stack_window_n":             self._stack_window_n.value(),
+            "stack_min_quality":          self._stack_min_quality.value(),
+            "series_amounts":             [s.value() for s in self._series_wavelet_spins],
+            "series_edge_feather_factor": self._series_edge_feather.value(),
         }
 
     def load_session(self, data: dict[str, Any]) -> None:
@@ -608,6 +626,7 @@ class _Step08ColorWidget(QWidget):
         amounts = data.get("series_amounts", _SERIES_WAVELET_DEFAULTS)
         for spin, val in zip(self._series_wavelet_spins, amounts):
             spin.setValue(float(val))
+        self._series_edge_feather.setValue(float(data.get("series_edge_feather_factor", 2.0)))
 
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:

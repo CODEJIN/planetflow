@@ -226,12 +226,18 @@ class Step03Panel(BasePanel):
         wav_layout.setContentsMargins(0, 0, 0, 0)
 
         self._wavelet_spins: list[QDoubleSpinBox] = []
-        for i, default in enumerate(_WAVELET_DEFAULTS):
-            row_layout, spin = _make_wavelet_row(
-                self, i + 1, default, on_change=self._on_params_changed
-            )
-            wav_layout.addLayout(row_layout)
-            self._wavelet_spins.append(spin)
+        defaults = list(_WAVELET_DEFAULTS)
+        for i in range(0, len(defaults), 2):
+            pair = QHBoxLayout()
+            pair.setSpacing(12)
+            for j in range(2):
+                if i + j < len(defaults):
+                    row_layout, spin = _make_wavelet_row(
+                        self, i + j + 1, defaults[i + j], on_change=self._on_params_changed
+                    )
+                    pair.addLayout(row_layout)
+                    self._wavelet_spins.append(spin)
+            wav_layout.addLayout(pair)
         left_layout.addWidget(wavelet_widget)
 
         # Border taper
@@ -264,6 +270,9 @@ class Step03Panel(BasePanel):
 
         idx = self._form_layout.count() - 1
         self._form_layout.insertWidget(idx, main_widget)
+
+    def retranslate(self) -> None:
+        self._preview.retranslate()
 
     def get_config_updates(self) -> dict[str, Any]:
         step3_out = self._output_step3.text().strip()

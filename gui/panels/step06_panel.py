@@ -166,12 +166,18 @@ class Step06Panel(BasePanel):
         wav_layout.setContentsMargins(0, 0, 0, 0)
 
         self._wavelet_spins: list[QDoubleSpinBox] = []
-        for i, default in enumerate(_WAVELET_DEFAULTS):
-            row_layout, spin = _make_wavelet_row(
-                i + 1, default, on_change=self._on_params_changed
-            )
-            wav_layout.addLayout(row_layout)
-            self._wavelet_spins.append(spin)
+        defaults = list(_WAVELET_DEFAULTS)
+        for i in range(0, len(defaults), 2):
+            pair = QHBoxLayout()
+            pair.setSpacing(12)
+            for j in range(2):
+                if i + j < len(defaults):
+                    row_layout, spin = _make_wavelet_row(
+                        i + j + 1, defaults[i + j], on_change=self._on_params_changed
+                    )
+                    pair.addLayout(row_layout)
+                    self._wavelet_spins.append(spin)
+            wav_layout.addLayout(pair)
         left_layout.addWidget(wavelet_widget)
 
         # Edge feather + border taper controls
@@ -202,6 +208,7 @@ class Step06Panel(BasePanel):
         lbl_feather = QLabel(S("step06.edge_feather"))
         lbl_feather.setToolTip(_tip_feather)
         extra_form.addRow(lbl_feather, self._edge_feather)
+        self._edge_feather.valueChanged.connect(self._on_params_changed)
 
         left_layout.addWidget(extra_widget)
         left_layout.addStretch()
@@ -214,6 +221,9 @@ class Step06Panel(BasePanel):
 
         idx = self._form_layout.count() - 1
         self._form_layout.insertWidget(idx, main_widget)
+
+    def retranslate(self) -> None:
+        self._preview.retranslate()
 
     def get_config_updates(self) -> dict[str, Any]:
         return {
@@ -234,7 +244,10 @@ class Step06Panel(BasePanel):
             spin.setValue(float(val))
         self._edge_feather.setValue(float(data.get("edge_feather_factor", 2.0)))
         if hasattr(self, "_preview"):
-            self._preview.set_params(amounts=amounts, levels=6, power=1.0)
+            self._preview.set_params(
+                amounts=amounts, levels=6, power=1.0,
+                edge_feather_factor=self._edge_feather.value(),
+            )
 
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
@@ -259,5 +272,6 @@ class Step06Panel(BasePanel):
             amounts=[s.value() for s in self._wavelet_spins],
             levels=6,
             power=1.0,
+            edge_feather_factor=self._edge_feather.value(),
         )
         self._preview.schedule_update()
