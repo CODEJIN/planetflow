@@ -230,11 +230,11 @@ class MainWindow(QMainWindow):
         title_widget.setStyleSheet("background: #1e1e1e; border-bottom: 1px solid #3c3c3c;")
         title_layout = QVBoxLayout(title_widget)
         title_layout.setContentsMargins(10, 10, 10, 10)
-        app_title = QLabel(S("app.title"))
-        app_title.setFont(QFont("Arial", 11, QFont.Weight.Bold))
-        app_title.setStyleSheet("color: #e8e8e8;")
-        app_title.setWordWrap(True)
-        title_layout.addWidget(app_title)
+        self._app_title_lbl = QLabel(S("app.title"))
+        self._app_title_lbl.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self._app_title_lbl.setStyleSheet("color: #e8e8e8;")
+        self._app_title_lbl.setWordWrap(True)
+        title_layout.addWidget(self._app_title_lbl)
         sidebar_layout.addWidget(title_widget)
 
         # Settings entry
@@ -249,9 +249,9 @@ class MainWindow(QMainWindow):
         settings_icon.setFixedWidth(18)
         settings_icon.setStyleSheet("color: #888;")
         settings_item_layout.addWidget(settings_icon)
-        settings_lbl = QLabel(S("app.settings"))
-        settings_lbl.setStyleSheet("color: #ccc;")
-        settings_item_layout.addWidget(settings_lbl)
+        self._settings_lbl = QLabel(S("app.settings"))
+        self._settings_lbl.setStyleSheet("color: #ccc;")
+        settings_item_layout.addWidget(self._settings_lbl)
         settings_item_layout.addStretch()
         settings_item.setCursor(Qt.CursorShape.PointingHandCursor)
         settings_item.mousePressEvent = lambda _e: self._show_panel("settings")
@@ -722,7 +722,15 @@ class MainWindow(QMainWindow):
             self._settings_panel._btn_reset.clicked.connect(self._reset_session)
             self._stack.insertWidget(1, self._settings_panel)
 
-            # Update sidebar labels
+            # Update window title and static sidebar labels
+            self.setWindowTitle(S("app.title"))
+            self._app_title_lbl.setText(S("app.title"))
+            self._settings_lbl.setText(S("app.settings"))
+
+            # Update log widget buttons
+            self._log_widget.retranslate()
+
+            # Update sidebar step labels
             for step_id, key, _optional in _STEP_DEFS:
                 item = self._step_items.get(step_id)
                 if item:

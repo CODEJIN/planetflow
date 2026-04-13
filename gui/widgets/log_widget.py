@@ -71,6 +71,10 @@ class LogWidget(QWidget):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def retranslate(self) -> None:
+        self._btn_clear.setText(S("log.clear"))
+        self._btn_copy.setText(S("log.copy"))
+
     def append_line(self, line: str) -> None:
         """Append one log line with colour-coding.  Thread-safe via Qt signal."""
         colour = _colour_for(line)
