@@ -498,9 +498,13 @@ def _compute_adaptive_warp_maps(
         if dx is None:
             continue
 
-        shift_x[ay, ax] = float(dx) * conf
-        shift_y[ay, ax] = float(dy) * conf
-        weight[ay, ax]  = conf
+        lap   = cv2.Laplacian(frm_patch, cv2.CV_32F)
+        sharp = float(np.var(lap))
+        w     = conf * float(np.log1p(sharp))
+
+        shift_x[ay, ax] = float(dx) * w
+        shift_y[ay, ax] = float(dy) * w
+        weight[ay, ax]  = w
         n_good += 1
 
     if n_good < 3:

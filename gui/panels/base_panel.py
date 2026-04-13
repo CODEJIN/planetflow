@@ -166,6 +166,24 @@ class BasePanel(QWidget):
         """Override to return output file paths (informational, not displayed)."""
         return []
 
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        """Pre-flight checks for this step.
+
+        Override in subclasses to add validation logic.  Return a list of
+        ``gui.validation.ValidationIssue`` objects.  An empty list means the
+        step is ready to run.
+
+        Add new checks by appending items to the list — no architecture change
+        needed.  Example::
+
+            from gui.validation import ValidationIssue, count_files
+            issues = []
+            if not count_files(config.get("input_dir", ""), "*.tif", "*.TIF"):
+                issues.append(ValidationIssue("error", "입력 TIF 파일이 없습니다."))
+            return issues
+        """
+        return []
+
     # ── Status ─────────────────────────────────────────────────────────────────
 
     def set_status(self, status: str) -> None:

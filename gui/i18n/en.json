@@ -1,4 +1,7 @@
 {
+  "welcome.subtitle": "Planetary imaging post-processing pipeline",
+  "welcome.pipeline_status": "Pipeline Progress",
+  "welcome.btn_resume": "Start Pipeline",
   "app.title": "Planetary Imaging Pipeline",
   "app.lang_toggle": "한국어",
   "app.settings": "Settings",
@@ -251,7 +254,7 @@
   "step02.output_dir.tooltip": "Folder where the stacked TIF files will be saved.\nThis output is automatically used as the input for Step 3.",
   "step02.top_percent.tooltip": "Only the top N% of frames by quality score are used for stacking.\nLower values produce sharper results but more noise. (default: 25%)",
   "step02.ap_size.tooltip": "Minimum patch size for the adaptive AP grid (pixels).\nLoG energy analysis auto-selects 8–9 APs at per-location optimal sizes.\n64 px = default (matches AS!4 default).",
-  "step02.n_iterations.tooltip": "Number of stacking iterations.\n2 = uses the first stack as reference for a second pass → improved AP accuracy (recommended).\n1 = faster but less precise.",
+  "step02.n_iterations.tooltip": "Number of stacking iterations.\n1 = recommended (no meaningful difference from 2 in practice).\n2 = uses the first stack as reference for a second pass, but the improvement is negligible.",
 
   "step03.input_dir.tooltip": "Folder of TIF files that Step 3 will assess for quality.\nShould be the Step 2 Lucky Stacking output folder.\nAuto-filled by cascade but can be overridden.",
   "step03.output_dir.tooltip": "Folder where quality score CSVs and window recommendation JSON are saved.\nSet automatically.",

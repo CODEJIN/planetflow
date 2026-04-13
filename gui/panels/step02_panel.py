@@ -168,8 +168,8 @@ class Step02Panel(BasePanel):
         # ── n_iterations ──────────────────────────────────────────────────────
         self._n_iterations = QSpinBox()
         self._n_iterations.setStyleSheet(_SPINBOX_STYLE)
-        self._n_iterations.setRange(1, 3)
-        self._n_iterations.setValue(2)
+        self._n_iterations.setRange(1, 2)
+        self._n_iterations.setValue(1)
         self._n_iterations.setFixedWidth(80)
         lbl_iter = QLabel(S("step02.n_iterations"))
         lbl_iter.setToolTip(S("step02.n_iterations.tooltip"))
@@ -227,12 +227,22 @@ class Step02Panel(BasePanel):
         top_pct = float(data.get("lucky_top_percent", 0.25))
         self._top_percent.setValue(int(round(top_pct * 100)))
         self._ap_size.setValue(int(data.get("lucky_ap_size", 64)))
-        self._n_iterations.setValue(int(data.get("lucky_n_iterations", 2)))
+        self._n_iterations.setValue(int(data.get("lucky_n_iterations", 1)))
 
         # Sync preview
         if hasattr(self, "_preview"):
             self._preview.set_input_dir(ser_value or None)
             self._preview.set_params(ap_size=int(data.get("lucky_ap_size", 64)))
+
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        from gui.validation import ValidationIssue, count_files
+        issues = []
+        ser_dir = (config.get("step02_ser_dir", "") or config.get("ser_input_dir", "")).strip()
+        if not ser_dir:
+            issues.append(ValidationIssue("error", "SER 입력 폴더가 설정되지 않았습니다."))
+        elif not batch_mode and not count_files(ser_dir, "*.ser", "*.SER"):
+            issues.append(ValidationIssue("error", f"SER 파일이 없습니다: {ser_dir}"))
+        return issues
 
     def refresh_after_run(self) -> None:
         """After a successful run, emit dirs_changed so Step 3 picks up the output."""

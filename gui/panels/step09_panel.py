@@ -101,6 +101,19 @@ class Step09Panel(BasePanel):
         self._fps.setValue(float(data.get("fps", 6.0)))
         self._resize_factor.setValue(float(data.get("resize_factor", 1.0)))
 
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        from gui.validation import ValidationIssue, count_files
+        issues = []
+        if not batch_mode:
+            out_base = config.get("output_dir", "").strip()
+            input_path = str(Path(out_base) / "step08_series") if out_base else ""
+            if not count_files(input_path, "*.png", "*.PNG", "*.tif", "*.TIF"):
+                issues.append(ValidationIssue(
+                    "error",
+                    "시계열 합성 결과가 없습니다. Step 8을 먼저 실행하세요.",
+                ))
+        return issues
+
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
             return []

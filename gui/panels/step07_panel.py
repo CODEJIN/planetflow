@@ -241,6 +241,18 @@ class Step07Panel(BasePanel):
         if hasattr(self, "_preview"):
             self._preview.set_params(amounts=amounts, levels=6, power=1.0)
 
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        from gui.validation import ValidationIssue, count_files
+        issues = []
+        if not batch_mode:
+            input_dir = config.get("input_dir", "").strip()
+            if not input_dir or not count_files(input_dir, "*.tif", "*.TIF"):
+                issues.append(ValidationIssue(
+                    "error",
+                    "TIF 입력 파일이 없습니다. Step 2 (Lucky Stacking)를 먼저 실행하세요.",
+                ))
+        return issues
+
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
             return []

@@ -27,13 +27,14 @@ from gui import session
 from gui import i18n
 from gui.i18n import S
 from gui.panels.settings_panel import SettingsPanel
+from gui.panels.welcome_panel import WelcomePanel
 from gui.panels.step01_panel import Step01Panel
 from gui.panels.step02_panel import Step02Panel
-from gui.panels.step03_panel import Step06Panel   # 구 step07 RGB composite가 step03 파일에 있음
-from gui.panels.step04_panel import Step03Panel   # 구 step04 Quality가 step04 파일에 있음
-from gui.panels.step05_panel import Step04Panel   # 구 step05 Derotation이 step05 파일에 있음
-from gui.panels.step06_panel import Step05Panel   # 구 step06 Wavelet Master가 step06 파일에 있음
-from gui.panels.step07_panel import Step07Panel   # 구 step03 Wavelet Preview가 step07 파일에 있음
+from gui.panels.step03_panel import Step03Panel
+from gui.panels.step04_panel import Step04Panel
+from gui.panels.step05_panel import Step05Panel
+from gui.panels.step06_panel import Step06Panel
+from gui.panels.step07_panel import Step07Panel
 from gui.panels.step08_panel import Step08Panel
 from gui.panels.step09_panel import Step09Panel
 from gui.panels.step10_panel import Step10Panel
@@ -321,12 +322,18 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet("background: #1e1e1e;")
 
-        # Settings panel
+        # Welcome panel (index 0 — shown on startup)
+        self._welcome_panel = WelcomePanel()
+        self._welcome_panel.go_settings.connect(lambda: self._show_panel("settings"))
+        self._welcome_panel.go_resume.connect(self._on_welcome_resume)
+        self._stack.addWidget(self._welcome_panel)
+
+        # Settings panel (index 1)
         self._settings_panel = SettingsPanel()
         self._settings_panel._btn_save.clicked.connect(self._on_settings_saved)
         self._settings_panel._btn_reset.clicked.connect(self._reset_session)
         self._stack.addWidget(self._settings_panel)
-        self._panel_index: dict[str, int] = {"settings": 0}
+        self._panel_index: dict[str, int] = {"welcome": 0, "settings": 1}
 
         # Step panels
         self._step_panels: dict[str, QWidget] = {}
@@ -407,8 +414,8 @@ class MainWindow(QMainWindow):
             self._stack.removeWidget(panel)
             panel.deleteLater()
         self._step_panels.clear()
-        # Keep settings panel at index 0; rebuild panel_index from scratch
-        self._panel_index = {"settings": 0}
+        # Keep welcome (0) and settings (1) panels; rebuild step panel_index from scratch
+        self._panel_index = {"welcome": 0, "settings": 1}
 
         # Recreate and reconnect
         for step_id, cls in panel_classes.items():
@@ -464,6 +471,7 @@ class MainWindow(QMainWindow):
         trigger a second disk read that would overwrite the unsaved language
         change.
         """
+        self._welcome_panel.load_session(self._session_data)
         self._settings_panel.load_session(self._session_data)
 
         # Apply enabled step states — iterate ALL steps (not just saved ones)
@@ -600,6 +608,15 @@ class MainWindow(QMainWindow):
             key = "app.run_all.from3"
         self._btn_run_all.setText(S(key))
 
+    def _on_welcome_resume(self) -> None:
+        """Navigate to the first enabled step panel."""
+        for step_id, _, optional in _STEP_DEFS:
+            if not optional or self._enabled_steps.get(step_id, False):
+                self._show_panel(step_id)
+                return
+        # Fallback: show step 03 (always mandatory)
+        self._show_panel("03")
+
     def _advance_to_next(self, current_step_id: str) -> None:
         """Show the panel after the given step in the sidebar order."""
         ids = [s for s, _l, _o in _STEP_DEFS]
@@ -703,7 +720,7 @@ class MainWindow(QMainWindow):
             self._settings_panel = SettingsPanel()
             self._settings_panel._btn_save.clicked.connect(self._on_settings_saved)
             self._settings_panel._btn_reset.clicked.connect(self._reset_session)
-            self._stack.insertWidget(0, self._settings_panel)
+            self._stack.insertWidget(1, self._settings_panel)
 
             # Update sidebar labels
             for step_id, key, _optional in _STEP_DEFS:
@@ -728,9 +745,29 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "설정", S("msg.settings_saved"))
 
     def _on_run_step(self, step_id: str) -> None:
-        """Run a single step."""
+        """Run a single step, with pre-flight validation."""
         if self._runner and self._runner.isRunning():
             return
+        panel = self._step_panels.get(step_id)
+        if panel and hasattr(panel, "validate"):
+            d = self._session_data
+            issues = panel.validate(d)
+            errors   = [i for i in issues if i.severity == "error"]
+            warnings = [i for i in issues if i.severity == "warning"]
+            if errors:
+                msg = "\n".join(f"⛔ {e.message}" for e in errors)
+                if warnings:
+                    msg += "\n\n" + "\n".join(f"⚠ {w.message}" for w in warnings)
+                QMessageBox.critical(self, "실행 불가", msg)
+                return
+            if warnings:
+                msg = "\n".join(f"⚠ {w.message}" for w in warnings)
+                ret = QMessageBox.warning(
+                    self, "경고", msg + "\n\n계속 실행하시겠습니까?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                )
+                if ret != QMessageBox.Yes:
+                    return
         config = self.build_config()
         self._runner = StepRunner(config, [step_id], self._results, parent=self)
         self._connect_runner(self._runner)
@@ -763,8 +800,17 @@ class MainWindow(QMainWindow):
         if not steps:
             return
 
-        # 4. Show confirmation dialog
-        if not self._show_batch_confirm(steps, start_from, d):
+        # 4. Pre-flight validation for all planned steps
+        issues: dict[str, list] = {}
+        for sid in steps:
+            panel = self._step_panels.get(sid)
+            if panel and hasattr(panel, "validate"):
+                result = panel.validate(d, batch_mode=True)
+                if result:
+                    issues[sid] = result
+
+        # 5. Show graphical confirmation dialog (with validation results)
+        if not self._show_batch_confirm(steps, start_from, d, issues=issues):
             return
 
         # 5. Reset status icons and launch runner
@@ -818,9 +864,15 @@ class MainWindow(QMainWindow):
             result.append(sid)
         return result
 
-    def _show_batch_confirm(self, steps: list[str], start_from: str, d: dict) -> bool:
-        """Show a confirmation dialog listing what will run and where outputs go."""
-        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout
+    def _show_batch_confirm(
+        self,
+        steps: list[str],
+        start_from: str,
+        d: dict,
+        issues: dict[str, list] | None = None,
+    ) -> bool:
+        """Show a graphical pipeline confirmation dialog."""
+        from gui.widgets.batch_confirm_dialog import BatchConfirmDialog
 
         # Input summary with file count
         if start_from in ("01", "02"):
@@ -840,74 +892,38 @@ class MainWindow(QMainWindow):
 
         out_base = d.get("output_dir", "")
 
-        def _out(step_id: str) -> str:
-            if step_id == "01":
-                return d.get("step01_output_dir", "(미설정)")
-            if step_id == "02":
-                return d.get("step02_output_dir", "(미설정)")
-            _names = {
-                "03": "step03_quality",
-                "04": "step04_derotated",
-                "05": "step05_wavelet_master",
-                "06": "step06_rgb_composite",
-                "07": "step07_wavelet_preview",
-                "08": "step08_series_composite",
-                "09": "step09_gif",
-                "10": "step10_summary_grid",
-            }
-            if out_base and step_id in _names:
-                return f"{out_base}/{_names[step_id]}"
-            return "(미설정)"
-
-        _step_names = {
-            "01": "PIPP 전처리",
-            "02": "Lucky Stacking",
-            "03": "품질 평가",
-            "04": "De-rotation 스태킹",
-            "05": "Wavelet 마스터",
-            "06": "RGB 합성",
-            "07": "Wavelet 미리보기",
-            "08": "시계열 합성",
-            "09": "애니메이션 GIF",
-            "10": "요약 그리드",
+        _out_names = {
+            "03": "step03_quality",
+            "04": "step04_derotated",
+            "05": "step05_wavelet_master",
+            "06": "step06_rgb_composite",
+            "07": "step07_wavelet_preview",
+            "08": "step08_series_composite",
+            "09": "step09_gif",
+            "10": "step10_summary_grid",
         }
 
-        all_ids = [sid for sid, _, _ in _STEP_DEFS]
-        start_idx = all_ids.index(start_from)
+        def _out(step_id: str) -> str:
+            if step_id == "01":
+                return d.get("step01_output_dir", "")
+            if step_id == "02":
+                return d.get("step02_output_dir", "")
+            if out_base and step_id in _out_names:
+                return f"{out_base}/{_out_names[step_id]}"
+            return ""
 
-        lines = [inp_summary, ""]
-        for sid, _, optional in _STEP_DEFS:
-            if all_ids.index(sid) < start_idx:
-                continue
-            name = _step_names.get(sid, sid)
-            if sid in steps:
-                lines.append(f"  ✓  Step {sid} — {name}")
-                lines.append(f"       → {_out(sid)}")
-            elif optional:
-                lines.append(f"  —  Step {sid} — {name}  (건너뜀)")
+        output_paths = {sid: _out(sid) for sid, _, _ in _STEP_DEFS}
 
-        dlg = QDialog(self)
-        dlg.setWindowTitle("일괄 실행 확인")
-        dlg.setMinimumWidth(520)
-        layout = QVBoxLayout(dlg)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 12)
-        lbl = QLabel("\n".join(lines))
-        lbl.setWordWrap(True)
-        lbl.setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: #d4d4d4;"
-            " background: transparent;"
+        dlg = BatchConfirmDialog(
+            parent=self,
+            steps=steps,
+            all_defs=_STEP_DEFS,
+            start_from=start_from,
+            output_paths=output_paths,
+            input_summary=inp_summary,
+            issues=issues,
         )
-        layout.addWidget(lbl)
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("실행")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        layout.addWidget(btns)
-        return dlg.exec() == QDialog.DialogCode.Accepted
+        return dlg.exec() == dlg.DialogCode.Accepted
 
     def _connect_runner(self, runner: StepRunner) -> None:
         runner.log_line.connect(self._log_widget.append_line)

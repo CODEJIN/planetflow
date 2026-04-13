@@ -1,4 +1,7 @@
 {
+  "welcome.subtitle": "행성 이미지 자동 후처리 파이프라인",
+  "welcome.pipeline_status": "파이프라인 진행 현황",
+  "welcome.btn_resume": "파이프라인 시작",
   "app.title": "행성 촬영 파이프라인",
   "app.lang_toggle": "English",
   "app.settings": "설정",
@@ -251,7 +254,7 @@
   "step02.output_dir.tooltip": "스태킹된 TIF 파일이 저장될 폴더입니다.\n출력 폴더는 Step 3의 입력으로 자동 연결됩니다.",
   "step02.top_percent.tooltip": "품질 점수 기준 상위 N%의 프레임만 스태킹에 사용합니다.\n낮을수록 더 선명하지만 노이즈가 많아집니다. (기본값: 25%)",
   "step02.ap_size.tooltip": "Adaptive AP 모드에서 허용할 최소 패치 크기입니다 (픽셀).\nLoG 에너지 분석으로 위치별 최적 크기를 자동 선택 (8~9개 AP).\n64px = 기본값 (AS!4 기본값과 동일).",
-  "step02.n_iterations.tooltip": "스태킹 반복 횟수입니다.\n2회 = 첫 스택을 reference로 재사용 → AP 정밀도 향상 (권장).\n1회 = 빠르지만 정확도 낮음.",
+  "step02.n_iterations.tooltip": "스태킹 반복 횟수입니다.\n1회 = 권장 (2회와 실질적 차이 없음).\n2회 = 첫 스택을 reference로 재사용하지만 결과 차이가 미미합니다.",
 
   "step03.input_dir.tooltip": "Step 3가 품질을 평가할 TIF 파일 폴더입니다.\nStep 2 Lucky Stacking 출력 폴더와 동일합니다.\ncascade로 자동 설정되지만 직접 변경할 수 있습니다.",
   "step03.output_dir.tooltip": "품질 점수 CSV, 윈도우 추천 JSON이 저장될 폴더입니다.\n자동으로 설정됩니다.",

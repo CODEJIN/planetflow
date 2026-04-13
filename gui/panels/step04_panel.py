@@ -1,20 +1,22 @@
-"""Step 3 — Quality assessment panel."""
+"""Step 4 — De-rotation stacking panel."""
 from __future__ import annotations
 
+import csv
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+import numpy as np
+
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QSpinBox,
     QWidget,
 )
 
@@ -25,11 +27,6 @@ _SPINBOX_STYLE = (
     "QDoubleSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
     " border-radius: 3px; padding: 3px 6px; }"
     "QDoubleSpinBox:focus { border-color: #4da6ff; }"
-)
-_INT_SPINBOX_STYLE = (
-    "QSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
-    " border-radius: 3px; padding: 3px 6px; }"
-    "QSpinBox:focus { border-color: #4da6ff; }"
 )
 _CHECK_STYLE = (
     "QCheckBox { color: #d4d4d4; }"
@@ -42,56 +39,187 @@ _READONLY_STYLE = (
     "QLineEdit { background: #2a2a2a; color: #888; border: 1px solid #3a3a3a;"
     " border-radius: 3px; padding: 3px 6px; }"
 )
-_INPUT_STYLE = (
-    "QLineEdit { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
-    " border-radius: 3px; padding: 3px 6px; }"
-    "QLineEdit:focus { border-color: #4da6ff; }"
-)
-_INPUT_EMPTY_STYLE = (
-    "QLineEdit { background: #3c2020; color: #d4d4d4; border: 1px solid #884444;"
-    " border-radius: 3px; padding: 3px 6px; }"
-    "QLineEdit:focus { border-color: #ff6666; }"
-)
-_BTN_BROWSE = (
-    "QPushButton { background: #3c3c3c; color: #aaa; border: 1px solid #555;"
-    " border-radius: 3px; padding: 3px 8px; }"
-    "QPushButton:hover { background: #4a4a4a; color: #d4d4d4; }"
+_BTN_STYLE = (
+    "QPushButton { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
+    " border-radius: 3px; padding: 3px 10px; font-size: 11px; }"
+    "QPushButton:hover { background: #4a4a4a; border-color: #4da6ff; }"
+    "QPushButton:disabled { color: #555; border-color: #444; }"
 )
 
-
-def _dir_row(parent: QWidget, line_edit: QLineEdit) -> QHBoxLayout:
-    row = QHBoxLayout()
-    row.setSpacing(4)
-    row.addWidget(line_edit)
-    btn = QPushButton("찾아보기")
-    btn.setFixedWidth(70)
-    btn.setStyleSheet(_BTN_BROWSE)
-
-    def _browse() -> None:
-        current = line_edit.text().strip()
-        folder = QFileDialog.getExistingDirectory(
-            parent, "폴더 선택", current or str(Path.home())
-        )
-        if folder:
-            line_edit.setText(folder)
-            line_edit.editingFinished.emit()
-
-    btn.clicked.connect(_browse)
-    row.addWidget(btn)
-    return row
+# Filter priority for sweep: prefer high-contrast, wide-band filters first
+_FILTER_PRIORITY = ["IR", "R", "G", "B", "CH4"]
 
 
-class Step03Panel(BasePanel):
-    STEP_ID   = "03"
-    TITLE_KEY = "step03.title"
-    DESC_KEY  = "step03.desc"
+# ── Background worker ──────────────────────────────────────────────────────────
+
+class _WarpSweepWorker(QThread):
+    """Sweep warp_scale values and find the sharpest de-rotated stack.
+
+    Signals:
+        finished(best_scale, confidence, message)
+            confidence: "high" | "low" | "error"
+    """
+    finished = Signal(float, str, str)
+
+    def __init__(
+        self,
+        quality_dir: Path,
+        input_dir: Path,
+        filters: list[str],
+        period_hours: float,
+    ) -> None:
+        super().__init__()
+        self._quality_dir  = quality_dir
+        self._input_dir    = input_dir
+        self._filters      = filters
+        self._period_hours = period_hours
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_ts(s: str) -> datetime:
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+    def _pick_filter(self) -> str | None:
+        """Return the first usable filter from priority list, then any available."""
+        # Try user's filters in priority order
+        for filt in _FILTER_PRIORITY:
+            if filt in self._filters:
+                csv_path = self._quality_dir / f"{filt}_ranking.csv"
+                if csv_path.exists():
+                    return filt
+        # Fall back to any CSV present in the quality dir
+        for csv_path in sorted(self._quality_dir.glob("*_ranking.csv")):
+            return csv_path.stem.replace("_ranking", "")
+        return None
+
+    def _load_window(self, filt: str, win_min: int = 30) -> list[dict]:
+        csv_path = self._quality_dir / f"{filt}_ranking.csv"
+        rows: list[dict] = []
+        with open(csv_path, newline="") as f:
+            for r in csv.DictReader(f):
+                # Try input_dir first, then quality_dir parent
+                stem = r["stem"]
+                tif = self._input_dir / f"{stem}.tif"
+                if not tif.exists():
+                    tif = self._quality_dir.parent / f"{stem}.tif"
+                if tif.exists():
+                    rows.append({
+                        "path":       tif,
+                        "timestamp":  self._parse_ts(r["timestamp"]),
+                        "norm_score": float(r["norm_score"]),
+                    })
+        if not rows:
+            return []
+        rows.sort(key=lambda r: r["norm_score"], reverse=True)
+        t_ref = rows[0]["timestamp"]
+        return [r for r in rows
+                if abs((r["timestamp"] - t_ref).total_seconds()) <= win_min * 60]
+
+    @staticmethod
+    def _lap_sharpness(img: np.ndarray, cx: float, cy: float, radius: float) -> float:
+        import cv2
+        lap = cv2.Laplacian(img.astype(np.float32), cv2.CV_32F, ksize=3)
+        h, w = img.shape
+        yy, xx = np.mgrid[0:h, 0:w]
+        mask = (xx - cx) ** 2 + (yy - cy) ** 2 < (radius * 0.85) ** 2
+        vals = lap[mask]
+        return float(np.var(vals)) if vals.size else 0.0
+
+    # ── main ──────────────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        try:
+            self._sweep()
+        except Exception as exc:
+            self.finished.emit(0.80, "error", f"오류: {exc}")
+
+    def _sweep(self) -> None:
+        from pipeline.modules import image_io
+        from pipeline.modules.derotation import spherical_derotation_warp, find_disk_center
+
+        # ── pick filter ───────────────────────────────────────────────────────
+        filt = self._pick_filter()
+        if filt is None:
+            self.finished.emit(0.80, "error",
+                               "Step 3 데이터가 없습니다. Step 3을 먼저 실행하세요.")
+            return
+
+        # ── load frames ───────────────────────────────────────────────────────
+        window = self._load_window(filt)
+        if len(window) < 2:
+            self.finished.emit(0.80, "error",
+                               f"{filt} 필터 프레임이 부족합니다 (최소 2개 필요).")
+            return
+
+        dt_secs = [(r["timestamp"] - window[0]["timestamp"]).total_seconds()
+                   for r in window]
+
+        imgs: list[np.ndarray] = []
+        for r in window:
+            img = image_io.read_tif(r["path"])
+            if img.ndim == 3:
+                img = img.mean(axis=2).astype(np.float32)
+            imgs.append(img)
+
+        ref_img = imgs[0]
+        cx, cy, radius, _, _ = find_disk_center(ref_img)
+
+        # ── sweep ─────────────────────────────────────────────────────────────
+        scales = np.arange(0.0, 1.55, 0.1)
+        sharpness_values: list[float] = []
+
+        for scale in scales:
+            warped = [
+                spherical_derotation_warp(
+                    img, dt, cx, cy, radius,
+                    period_hours=self._period_hours,
+                    scale=float(scale),
+                    flip_direction=False,
+                    pole_pa_deg=0.0,
+                )
+                for img, dt in zip(imgs, dt_secs)
+            ]
+            stack = np.mean(warped, axis=0).astype(np.float32)
+            sharpness_values.append(self._lap_sharpness(stack, cx, cy, radius))
+
+        # ── evaluate result ───────────────────────────────────────────────────
+        best_idx   = int(np.argmax(sharpness_values))
+        best_scale = float(scales[best_idx])
+        base_sharp = sharpness_values[0]
+        max_sharp  = sharpness_values[best_idx]
+
+        if base_sharp > 1e-12:
+            improvement_pct = (max_sharp - base_sharp) / base_sharp * 100.0
+        else:
+            improvement_pct = 0.0
+
+        if improvement_pct < 3.0:
+            confidence = "low"
+            msg = (f"최적값 {best_scale:.2f} ({filt} 기준) — "
+                   f"개선 {improvement_pct:.1f}% (시잉 불량, 차이 미미)")
+        else:
+            confidence = "high"
+            msg = (f"최적값 {best_scale:.2f} ({filt} 기준) — "
+                   f"스택 선명도 +{improvement_pct:.1f}%")
+
+        self.finished.emit(best_scale, confidence, msg)
+
+
+# ── Panel ──────────────────────────────────────────────────────────────────────
+
+class Step04Panel(BasePanel):
+    STEP_ID   = "04"
+    TITLE_KEY = "step04.title"
+    DESC_KEY  = "step04.desc"
     OPTIONAL  = False
 
-    # Emitted on editingFinished so downstream panels (05+) refresh immediately.
-    dirs_changed = Signal()
-
     def __init__(self, parent: QWidget | None = None) -> None:
-        self._output_dir: Path | None = None
+        self._output_dir:    Path | None = None
+        self._input_dir:     Path | None = None
+        self._filters:       list[str]   = []
+        self._period_hours:  float       = 9.9281
+        self._sweep_worker:  _WarpSweepWorker | None = None
         super().__init__(parent)
 
     # ── BasePanel interface ───────────────────────────────────────────────────
@@ -104,64 +232,61 @@ class Step03Panel(BasePanel):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        # TIF input dir (editable — user can override cascade value)
+        # Folder display (auto-derived, read-only)
         self._input_lbl = QLineEdit()
-        self._input_lbl.setStyleSheet(_INPUT_EMPTY_STYLE)
-        self._input_lbl.setPlaceholderText("Lucky Stacking TIF 폴더")
-        self._input_lbl.textChanged.connect(self._on_input_changed)
-        self._input_lbl.editingFinished.connect(self.dirs_changed)
-        lbl_in = QLabel(S("step03.input_dir"))
-        lbl_in.setToolTip(S("step03.input_dir.tooltip"))
-        fl.addRow(lbl_in, _dir_row(self, self._input_lbl))
+        self._input_lbl.setReadOnly(True)
+        self._input_lbl.setStyleSheet(_READONLY_STYLE)
+        lbl_in = QLabel(S("step04.input_dir"))
+        lbl_in.setToolTip(S("step04.input_dir.tooltip"))
+        fl.addRow(lbl_in, self._input_lbl)
+
+        self._quality_lbl = QLineEdit()
+        self._quality_lbl.setReadOnly(True)
+        self._quality_lbl.setStyleSheet(_READONLY_STYLE)
+        lbl_q = QLabel(S("step04.quality_dir"))
+        lbl_q.setToolTip(S("step04.quality_dir.tooltip"))
+        fl.addRow(lbl_q, self._quality_lbl)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
         self._output_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_out = QLabel(S("step03.output_dir"))
-        lbl_out.setToolTip(S("step03.output_dir.tooltip"))
+        lbl_out = QLabel(S("step04.output_dir"))
+        lbl_out.setToolTip(S("step04.output_dir.tooltip"))
         fl.addRow(lbl_out, self._output_lbl)
 
-        # Window frames
-        self._window_frames = QSpinBox()
-        self._window_frames.setStyleSheet(_INT_SPINBOX_STYLE)
-        self._window_frames.setRange(1, 20)
-        self._window_frames.setSingleStep(1)
-        self._window_frames.setValue(3)
-        self._window_frames.setToolTip(S("step03.window_frames.tooltip"))
-        lbl_win = QLabel(S("step03.window_frames"))
-        lbl_win.setToolTip(S("step03.window_frames.tooltip"))
-        fl.addRow(lbl_win, self._window_frames)
+        # Warp scale
+        self._warp_scale = QDoubleSpinBox()
+        self._warp_scale.setStyleSheet(_SPINBOX_STYLE)
+        self._warp_scale.setRange(0.0, 2.0)
+        self._warp_scale.setDecimals(2)
+        self._warp_scale.setSingleStep(0.01)
+        self._warp_scale.setValue(0.80)
+        self._warp_scale.setToolTip(S("step04.warp_scale.tooltip"))
+        lbl_warp = QLabel(S("step04.warp_scale"))
+        lbl_warp.setToolTip(S("step04.warp_scale.tooltip"))
+        fl.addRow(lbl_warp, self._warp_scale)
 
-        # Cycle seconds
-        self._cycle_seconds = QSpinBox()
-        self._cycle_seconds.setStyleSheet(_INT_SPINBOX_STYLE)
-        self._cycle_seconds.setRange(10, 600)
-        self._cycle_seconds.setSingleStep(15)
-        self._cycle_seconds.setValue(225)
-        self._cycle_seconds.setToolTip(S("step03.cycle_seconds.tooltip"))
-        self._lbl_cyc = QLabel(S("step03.cycle_seconds"))
-        self._lbl_cyc.setToolTip(S("step03.cycle_seconds.tooltip"))
-        fl.addRow(self._lbl_cyc, self._cycle_seconds)
+        # ── Auto-sweep button row ─────────────────────────────────────────────
+        sweep_widget = QWidget()
+        sweep_widget.setStyleSheet("background: transparent;")
+        sweep_layout = QHBoxLayout(sweep_widget)
+        sweep_layout.setContentsMargins(0, 0, 0, 0)
+        sweep_layout.setSpacing(8)
 
-        # n_windows
-        self._n_windows = QSpinBox()
-        self._n_windows.setStyleSheet(_INT_SPINBOX_STYLE)
-        self._n_windows.setRange(1, 10)
-        self._n_windows.setSingleStep(1)
-        self._n_windows.setValue(1)
-        self._n_windows.setToolTip(S("step03.n_windows.tooltip"))
-        lbl_nwin = QLabel(S("step03.n_windows"))
-        lbl_nwin.setToolTip(S("step03.n_windows.tooltip"))
-        fl.addRow(lbl_nwin, self._n_windows)
+        self._sweep_btn = QPushButton(S("step04.sweep_btn"))
+        self._sweep_btn.setStyleSheet(_BTN_STYLE)
+        self._sweep_btn.setFixedWidth(130)
+        self._sweep_btn.setToolTip(S("step04.sweep_btn.tooltip"))
+        self._sweep_btn.clicked.connect(self._on_sweep_clicked)
 
-        # Allow overlap checkbox
-        self._allow_overlap = QCheckBox()
-        self._allow_overlap.setStyleSheet(_CHECK_STYLE)
-        self._allow_overlap.setChecked(False)
-        self._allow_overlap.setToolTip(S("step03.allow_overlap.tooltip"))
-        lbl_overlap = QLabel(S("step03.allow_overlap"))
-        lbl_overlap.setToolTip(S("step03.allow_overlap.tooltip"))
-        fl.addRow(lbl_overlap, self._allow_overlap)
+        self._sweep_result = QLabel("")
+        self._sweep_result.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
+        self._sweep_result.setWordWrap(True)
+
+        sweep_layout.addWidget(self._sweep_btn)
+        sweep_layout.addWidget(self._sweep_result, 1)
+
+        fl.addRow("", sweep_widget)
 
         # Min quality threshold
         self._min_quality = QDoubleSpinBox()
@@ -170,85 +295,143 @@ class Step03Panel(BasePanel):
         self._min_quality.setDecimals(2)
         self._min_quality.setSingleStep(0.05)
         self._min_quality.setValue(0.05)
-        self._min_quality.setToolTip(S("step03.min_quality.tooltip"))
-        lbl_mq = QLabel(S("step03.min_quality"))
-        lbl_mq.setToolTip(S("step03.min_quality.tooltip"))
+        self._min_quality.setToolTip(S("step04.min_quality.tooltip"))
+        lbl_mq = QLabel(S("step04.min_quality"))
+        lbl_mq.setToolTip(S("step04.min_quality.tooltip"))
         fl.addRow(lbl_mq, self._min_quality)
+
+        # Normalize brightness
+        self._normalize = QCheckBox()
+        self._normalize.setStyleSheet(_CHECK_STYLE)
+        self._normalize.setChecked(False)
+        self._normalize.setToolTip(S("step04.normalize.tooltip"))
+        lbl_norm = QLabel(S("step04.normalize"))
+        lbl_norm.setToolTip(S("step04.normalize.tooltip"))
+        fl.addRow(lbl_norm, self._normalize)
 
         idx = self._form_layout.count() - 1
         self._form_layout.insertWidget(idx, form_widget)
 
     def get_config_updates(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "input_dir":                self._input_lbl.text().strip(),
-            "window_frames":            self._window_frames.value(),
-            "cycle_seconds":            self._cycle_seconds.value(),
-            "n_windows":                self._n_windows.value(),
-            "allow_overlap":            self._allow_overlap.isChecked(),
-            "min_quality_threshold_03": self._min_quality.value(),
+            "warp_scale":            self._warp_scale.value(),
+            "min_quality_threshold": self._min_quality.value(),
+            "normalize_brightness":  self._normalize.isChecked(),
         }
         out_text = self._output_lbl.text().strip()
         if out_text:
             result["output_dir"] = str(Path(out_text).parent)
         return result
 
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        from gui.validation import ValidationIssue, count_files
+        issues = []
+        if not batch_mode:
+            input_dir = config.get("input_dir", "").strip()
+            if not input_dir or not count_files(input_dir, "*.tif", "*.TIF"):
+                issues.append(ValidationIssue("error", "TIF 입력 파일이 없습니다."))
+        rotation_period = float(config.get("rotation_period", 0.0))
+        if rotation_period <= 0:
+            issues.append(ValidationIssue(
+                "error",
+                "행성 자전 주기가 설정되지 않았습니다. 설정 화면에서 Rotation Period를 입력하세요.",
+            ))
+        horizons_id = str(config.get("horizons_id", "")).strip()
+        if not horizons_id:
+            issues.append(ValidationIssue(
+                "warning",
+                "Horizons ID가 설정되지 않았습니다. 위치 보정이 비활성화됩니다.",
+            ))
+        return issues
+
     def load_session(self, data: dict[str, Any]) -> None:
         inp = data.get("input_dir", "")
         out = data.get("output_dir", "")
-        self._input_lbl.blockSignals(True)
-        self._input_lbl.setText(inp)
-        self._input_lbl.blockSignals(False)
-        self._update_input_style(inp)
+        if inp:
+            self._input_lbl.setText(inp)
+            self._input_dir = Path(inp)
         if out:
-            self._output_lbl.setText(str(Path(out) / "step03_quality"))
+            p = Path(out)
+            if hasattr(self, "_quality_lbl"):
+                self._quality_lbl.setText(str(p / "step03_quality"))
+            self._output_lbl.setText(str(p / "step04_derotated"))
+            self._output_dir = p
 
-        is_color = data.get("camera_mode", "mono") == "color"
-        if is_color:
-            self._lbl_cyc.setText(S("step03.cycle_seconds_color"))
-            self._cycle_seconds.setToolTip(S("step03.cycle_seconds_color.tooltip"))
-            self._lbl_cyc.setToolTip(S("step03.cycle_seconds_color.tooltip"))
-            if not data.get("cycle_seconds"):
-                self._cycle_seconds.setValue(45)
-        else:
-            self._lbl_cyc.setText(S("step03.cycle_seconds"))
-            self._cycle_seconds.setToolTip(S("step03.cycle_seconds.tooltip"))
-            self._lbl_cyc.setToolTip(S("step03.cycle_seconds.tooltip"))
-        # New key: window_frames. Old keys: window_cycles, window_seconds (convert on load).
-        if "window_frames" in data:
-            self._window_frames.setValue(int(data["window_frames"]))
-        elif "window_cycles" in data:
-            self._window_frames.setValue(int(data["window_cycles"]))
-        else:
-            old_ws = int(data.get("window_seconds", 900))
-            old_cs = int(data.get("cycle_seconds", 270))
-            self._window_frames.setValue(max(1, round(old_ws / old_cs)))
-        self._cycle_seconds.setValue(int(data.get("cycle_seconds", 225)))
-        self._n_windows.setValue(int(data.get("n_windows", 1)))
-        self._allow_overlap.setChecked(bool(data.get("allow_overlap", False)))
-        # Support both old key (top_fraction) and new key
-        mq = data.get("min_quality_threshold_03",
-                      data.get("min_quality_threshold_04",
-                               data.get("top_fraction", 0.05)))
-        self._min_quality.setValue(float(mq))
+        # Store for sweep worker
+        filters_str = data.get("filters", "IR,R,G,B,CH4")
+        self._filters = [f.strip() for f in filters_str.split(",") if f.strip()]
+        self._period_hours = float(data.get("rotation_period", 9.9281))
 
-    # ── Slots ─────────────────────────────────────────────────────────────────
+        self._warp_scale.setValue(float(data.get("warp_scale", 0.80)))
+        self._min_quality.setValue(float(data.get("min_quality_threshold", 0.05)))
+        self._normalize.setChecked(bool(data.get("normalize_brightness", False)))
 
-    def _on_input_changed(self, text: str) -> None:
-        self._update_input_style(text)
-
-    def _update_input_style(self, text: str) -> None:
-        if text.strip():
-            self._input_lbl.setStyleSheet(_INPUT_STYLE)
-        else:
-            self._input_lbl.setStyleSheet(_INPUT_EMPTY_STYLE)
+        self._update_sweep_btn_state()
 
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
             return []
-        step_dir = self._output_dir / "step03_quality"
+        step_dir = self._output_dir / "step04_derotated"
         if not step_dir.exists():
             return []
-        return sorted(step_dir.glob("*.csv"))
+        paths = sorted(step_dir.rglob("*.tif"))
+        return paths[:8]
 
     def set_output_dir(self, path: Path | str) -> None:
         self._output_dir = Path(path) if path else None
+
+    # ── Sweep helpers ─────────────────────────────────────────────────────────
+
+    def _quality_dir(self) -> Path | None:
+        if self._output_dir is None:
+            return None
+        q = self._output_dir / "step03_quality"
+        return q if q.exists() else None
+
+    def _update_sweep_btn_state(self) -> None:
+        if not hasattr(self, "_sweep_btn"):
+            return
+        enabled = self._quality_dir() is not None
+        self._sweep_btn.setEnabled(enabled)
+        if not enabled:
+            self._sweep_result.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
+            self._sweep_result.setText(S("step04.sweep_wait"))
+
+    # ── Slots ─────────────────────────────────────────────────────────────────
+
+    def _on_sweep_clicked(self) -> None:
+        qdir = self._quality_dir()
+        if qdir is None or self._input_dir is None:
+            return
+
+        self._sweep_btn.setEnabled(False)
+        self._sweep_btn.setText(S("step04.sweeping"))
+        self._sweep_result.setStyleSheet("QLabel { color: #888; font-size: 11px; }")
+        self._sweep_result.setText("")
+
+        self._sweep_worker = _WarpSweepWorker(
+            quality_dir=qdir,
+            input_dir=self._input_dir,
+            filters=self._filters,
+            period_hours=self._period_hours,
+        )
+        self._sweep_worker.finished.connect(self._on_sweep_finished)
+        self._sweep_worker.start()
+
+    def _on_sweep_finished(self, best_scale: float, confidence: str, msg: str) -> None:
+        self._sweep_btn.setEnabled(True)
+        self._sweep_btn.setText(S("step04.sweep_btn"))
+
+        if confidence == "error":
+            color = "#e06c75"   # red
+        elif confidence == "low":
+            color = "#e5c07b"   # orange/yellow
+            self._warp_scale.setValue(best_scale)
+        else:
+            color = "#98c379"   # green
+            self._warp_scale.setValue(best_scale)
+
+        self._sweep_result.setStyleSheet(
+            f"QLabel {{ color: {color}; font-size: 11px; }}"
+        )
+        self._sweep_result.setText(msg)

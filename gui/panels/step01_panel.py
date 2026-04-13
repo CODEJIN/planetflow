@@ -207,6 +207,16 @@ class Step01Panel(BasePanel):
             )
             self._preview.set_input_dir(ser_dir or None)
 
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        from gui.validation import ValidationIssue, count_files
+        issues = []
+        ser_dir = config.get("ser_input_dir", "").strip()
+        if not ser_dir:
+            issues.append(ValidationIssue("error", "SER 입력 폴더가 설정되지 않았습니다."))
+        elif not batch_mode and not count_files(ser_dir, "*.ser", "*.SER"):
+            issues.append(ValidationIssue("error", f"SER 파일이 없습니다: {ser_dir}"))
+        return issues
+
     def output_paths(self) -> list[Path]:
         step1_out = self._output_step1.text().strip() if hasattr(self, "_output_step1") else ""
         if step1_out:

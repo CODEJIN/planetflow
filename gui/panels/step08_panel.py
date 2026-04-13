@@ -33,8 +33,8 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
-from gui.panels.step06_panel import _make_wavelet_row
-from gui.panels.step03_panel import (
+from gui.panels.step05_panel import _make_wavelet_row
+from gui.panels.step06_panel import (
     _SpecRow,
     _BTN_ADD,
     _BTN_SMALL,
@@ -266,6 +266,36 @@ class _Step08MonoWidget(QWidget):
             "series_amounts":               [s.value() for s in self._series_wavelet_spins],
             "series_composite_specs":       series_specs,
         }
+
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        from gui.validation import ValidationIssue, count_files, filter_files_in_dir
+        issues = []
+        specs = config.get("series_composite_specs") or config.get("composite_specs") or []
+        if not specs:
+            issues.append(ValidationIssue("error", "시계열 합성 스펙이 비어있습니다."))
+        if not batch_mode:
+            input_dir = config.get("input_dir", "").strip()
+            if not input_dir or not count_files(input_dir, "*.tif", "*.TIF"):
+                issues.append(ValidationIssue("error", "TIF 입력 파일이 없습니다."))
+            elif specs:
+                needed_filters: set[str] = set()
+                for spec in specs:
+                    for role in ("R", "G", "B", "L"):
+                        fname = spec.get(role, "")
+                        if fname:
+                            needed_filters.add(fname)
+                stack_n = int(config.get("stack_window_n", 3))
+                for filt in sorted(needed_filters):
+                    n = filter_files_in_dir(input_dir, filt)
+                    if not n:
+                        issues.append(ValidationIssue(
+                            "error", f"필터 '{filt}' TIF 파일이 없습니다: {input_dir}",
+                        ))
+                    elif stack_n > n:
+                        issues.append(ValidationIssue(
+                            "error", f"필터 '{filt}': stack_window_n({stack_n}) > 파일 수({n})",
+                        ))
+        return issues
 
     def load_session(self, data: dict[str, Any]) -> None:
         out = data.get("output_dir", "")
@@ -550,6 +580,11 @@ class Step08Panel(BasePanel):
         if self._is_color:
             return self._color_widget.output_paths()
         return self._mono_widget.output_paths()
+
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        if self._is_color:
+            return []  # color mode: series_composite_specs 불필요
+        return self._mono_widget.validate(config, batch_mode)
 
     def set_output_dir(self, path: Path | str) -> None:
         self._output_dir = Path(path) if path else None

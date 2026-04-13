@@ -158,6 +158,19 @@ class Step10Panel(BasePanel):
                 gamma=float(data.get("gamma", 0.9)),
             )
 
+    def validate(self, config: dict, batch_mode: bool = False) -> list:
+        from gui.validation import ValidationIssue, count_files
+        issues = []
+        if not batch_mode:
+            out_base = config.get("output_dir", "").strip()
+            input_path = str(Path(out_base) / "step06_rgb_composite") if out_base else ""
+            if not count_files(input_path, "*.png", "*.PNG"):
+                issues.append(ValidationIssue(
+                    "error",
+                    "RGB 합성 PNG가 없습니다. Step 6을 먼저 실행하세요.",
+                ))
+        return issues
+
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
             return []
