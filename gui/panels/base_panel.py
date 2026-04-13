@@ -179,7 +179,7 @@ class BasePanel(QWidget):
             from gui.validation import ValidationIssue, count_files
             issues = []
             if not count_files(config.get("input_dir", ""), "*.tif", "*.TIF"):
-                issues.append(ValidationIssue("error", "입력 TIF 파일이 없습니다."))
+                issues.append(ValidationIssue("error", S("validate.no_tif_input")))
             return issues
         """
         return []

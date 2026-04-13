@@ -132,7 +132,7 @@ class _WarpSweepWorker(QThread):
         try:
             self._sweep()
         except Exception as exc:
-            self.finished.emit(0.80, "error", f"오류: {exc}")
+            self.finished.emit(0.80, "error", S("sweep.error.generic", e=exc))
 
     def _sweep(self) -> None:
         from pipeline.modules import image_io
@@ -141,15 +141,13 @@ class _WarpSweepWorker(QThread):
         # ── pick filter ───────────────────────────────────────────────────────
         filt = self._pick_filter()
         if filt is None:
-            self.finished.emit(0.80, "error",
-                               "Step 3 데이터가 없습니다. Step 3을 먼저 실행하세요.")
+            self.finished.emit(0.80, "error", S("sweep.error.no_step3"))
             return
 
         # ── load frames ───────────────────────────────────────────────────────
         window = self._load_window(filt)
         if len(window) < 2:
-            self.finished.emit(0.80, "error",
-                               f"{filt} 필터 프레임이 부족합니다 (최소 2개 필요).")
+            self.finished.emit(0.80, "error", S("sweep.error.filter_insufficient", f=filt))
             return
 
         dt_secs = [(r["timestamp"] - window[0]["timestamp"]).total_seconds()
@@ -196,12 +194,10 @@ class _WarpSweepWorker(QThread):
 
         if improvement_pct < 3.0:
             confidence = "low"
-            msg = (f"최적값 {best_scale:.2f} ({filt} 기준) — "
-                   f"개선 {improvement_pct:.1f}% (시잉 불량, 차이 미미)")
+            msg = S("sweep.result.low", scale=best_scale, filt=filt, pct=improvement_pct)
         else:
             confidence = "high"
-            msg = (f"최적값 {best_scale:.2f} ({filt} 기준) — "
-                   f"스택 선명도 +{improvement_pct:.1f}%")
+            msg = S("sweep.result.high", scale=best_scale, filt=filt, pct=improvement_pct)
 
         self.finished.emit(best_scale, confidence, msg)
 
@@ -325,23 +321,18 @@ class Step04Panel(BasePanel):
 
     def validate(self, config: dict, batch_mode: bool = False) -> list:
         from gui.validation import ValidationIssue, count_files
+        from gui.i18n import S
         issues = []
         if not batch_mode:
             input_dir = config.get("input_dir", "").strip()
             if not input_dir or not count_files(input_dir, "*.tif", "*.TIF"):
-                issues.append(ValidationIssue("error", "TIF 입력 파일이 없습니다."))
+                issues.append(ValidationIssue("error", S("validate.no_tif_input")))
         rotation_period = float(config.get("rotation_period", 0.0))
         if rotation_period <= 0:
-            issues.append(ValidationIssue(
-                "error",
-                "행성 자전 주기가 설정되지 않았습니다. 설정 화면에서 Rotation Period를 입력하세요.",
-            ))
+            issues.append(ValidationIssue("error", S("validate.no_rotation_period")))
         horizons_id = str(config.get("horizons_id", "")).strip()
         if not horizons_id:
-            issues.append(ValidationIssue(
-                "warning",
-                "Horizons ID가 설정되지 않았습니다. 위치 보정이 비활성화됩니다.",
-            ))
+            issues.append(ValidationIssue("warning", S("validate.no_horizons_id")))
         return issues
 
     def load_session(self, data: dict[str, Any]) -> None:

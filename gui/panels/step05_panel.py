@@ -207,10 +207,7 @@ class Step05Panel(BasePanel):
             out_base = config.get("output_dir", "").strip()
             input_path = str(Path(out_base) / "step04_derotated") if out_base else ""
             if not count_files(input_path, "*.tif", "*.TIF"):
-                issues.append(ValidationIssue(
-                    "error",
-                    "De-rotation 결과 TIF가 없습니다. Step 4를 먼저 실행하세요.",
-                ))
+                issues.append(ValidationIssue("error", S("validate.no_derotation_tif")))
         return issues
 
     def load_session(self, data: dict[str, Any]) -> None:

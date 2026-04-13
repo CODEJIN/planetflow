@@ -272,11 +272,11 @@ class _Step08MonoWidget(QWidget):
         issues = []
         specs = config.get("series_composite_specs") or config.get("composite_specs") or []
         if not specs:
-            issues.append(ValidationIssue("error", "시계열 합성 스펙이 비어있습니다."))
+            issues.append(ValidationIssue("error", S("validate.no_series_specs")))
         if not batch_mode:
             input_dir = config.get("input_dir", "").strip()
             if not input_dir or not count_files(input_dir, "*.tif", "*.TIF"):
-                issues.append(ValidationIssue("error", "TIF 입력 파일이 없습니다."))
+                issues.append(ValidationIssue("error", S("validate.no_tif_input")))
             elif specs:
                 needed_filters: set[str] = set()
                 for spec in specs:
@@ -289,11 +289,11 @@ class _Step08MonoWidget(QWidget):
                     n = filter_files_in_dir(input_dir, filt)
                     if not n:
                         issues.append(ValidationIssue(
-                            "error", f"필터 '{filt}' TIF 파일이 없습니다: {input_dir}",
+                            "error", S("validate.no_filter_tif", f=filt, d=input_dir),
                         ))
                     elif stack_n > n:
                         issues.append(ValidationIssue(
-                            "error", f"필터 '{filt}': stack_window_n({stack_n}) > 파일 수({n})",
+                            "error", S("validate.stack_window_too_large", f=filt, n=stack_n, count=n),
                         ))
         return issues
 

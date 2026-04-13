@@ -108,10 +108,7 @@ class Step09Panel(BasePanel):
             out_base = config.get("output_dir", "").strip()
             input_path = str(Path(out_base) / "step08_series") if out_base else ""
             if not count_files(input_path, "*.png", "*.PNG", "*.tif", "*.TIF"):
-                issues.append(ValidationIssue(
-                    "error",
-                    "시계열 합성 결과가 없습니다. Step 8을 먼저 실행하세요.",
-                ))
+                issues.append(ValidationIssue("error", S("validate.no_series_result")))
         return issues
 
     def output_paths(self) -> list[Path]:

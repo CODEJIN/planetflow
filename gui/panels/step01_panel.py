@@ -50,7 +50,7 @@ def _dir_row(parent: QWidget, line_edit: QLineEdit) -> QHBoxLayout:
     def _browse():
         current = line_edit.text().strip()
         folder = QFileDialog.getExistingDirectory(
-            parent, "폴더 선택", current or str(Path.home())
+            parent, S("dialog.folder_select"), current or str(Path.home())
         )
         if folder:
             line_edit.setText(folder)
@@ -114,7 +114,7 @@ class Step01Panel(BasePanel):
         # Output directory
         self._output_step1 = QLineEdit()
         self._output_step1.setStyleSheet(_INPUT_STYLE)
-        self._output_step1.setPlaceholderText("자동 설정됩니다")
+        self._output_step1.setPlaceholderText(S("placeholder.auto_set"))
         self._output_step1.textEdited.connect(self._on_output_manually_edited)
         self._output_step1.editingFinished.connect(self.dirs_changed)
         lbl_out = QLabel(S("step01.output_dir"))
@@ -212,9 +212,9 @@ class Step01Panel(BasePanel):
         issues = []
         ser_dir = config.get("ser_input_dir", "").strip()
         if not ser_dir:
-            issues.append(ValidationIssue("error", "SER 입력 폴더가 설정되지 않았습니다."))
+            issues.append(ValidationIssue("error", S("validate.no_ser_dir")))
         elif not batch_mode and not count_files(ser_dir, "*.ser", "*.SER"):
-            issues.append(ValidationIssue("error", f"SER 파일이 없습니다: {ser_dir}"))
+            issues.append(ValidationIssue("error", S("validate.no_ser_files", d=ser_dir)))
         return issues
 
     def output_paths(self) -> list[Path]:

@@ -109,9 +109,9 @@ class _Worker(QObject):
             win_dir = _pick_first_window(self._step06_dir)
             if win_dir is None:
                 msg = (
-                    "윈도우 없음: Step 5를 먼저 실행해 주세요."
+                    S("preview.no_windows")
                     if self._step06_dir.is_dir()
-                    else "Step 5 출력 폴더를 찾을 수 없습니다."
+                    else S("preview.step5_not_found")
                 )
                 self.error.emit(msg)
                 return
@@ -119,7 +119,7 @@ class _Worker(QObject):
             def _load(filt: str) -> np.ndarray:
                 p = win_dir / f"{filt}_master.png"
                 if not p.exists():
-                    raise FileNotFoundError(f"{filt}_master.png 없음 ({win_dir.name})")
+                    raise FileNotFoundError(S("preview.no_master_png", f=filt, w=win_dir.name))
                 img = image_io.read_png(p)          # float32 [0,1], (H,W) or (H,W,3)
                 if img.ndim == 3:
                     img = img.mean(axis=2).astype(np.float32)

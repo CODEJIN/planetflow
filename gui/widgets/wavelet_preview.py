@@ -271,9 +271,7 @@ class WaveletPreviewWidget(QWidget):
             self._input_dir = None
 
         if self._input_dir is None:
-            self._status_lbl.setText(
-                "입력 폴더에 TIF 파일을 설정하면 미리보기가 활성화됩니다."
-            )
+            self._status_lbl.setText(S("preview.status.tif"))
         elif self.isVisible():
             # Already on screen — render immediately
             self.schedule_update(100)
@@ -380,7 +378,7 @@ class WaveletPreviewWidget(QWidget):
         self._running = False
         self._thread  = None
         self._worker  = None
-        self._status_lbl.setText(f"오류: {msg}")
+        self._status_lbl.setText(S("preview.error", msg=msg))
         if self._pending:
             self._pending = False
 

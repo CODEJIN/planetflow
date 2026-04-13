@@ -282,7 +282,7 @@ class SerPreviewWidget(QWidget):
             self._input_dir = None
 
         if self._input_dir is None:
-            self._status_lbl.setText("SER 입력 폴더를 설정하면 미리보기가 활성화됩니다.")
+            self._status_lbl.setText(S("preview.status.ser"))
         elif self.isVisible():
             self.schedule_update(100)
 
@@ -314,9 +314,9 @@ class SerPreviewWidget(QWidget):
         ser = _pick_ser(self._input_dir)
         if ser is None:
             if not self._input_dir.is_dir():
-                self._status_lbl.setText("SER 입력 폴더를 설정하면 미리보기가 활성화됩니다.")
+                self._status_lbl.setText(S("preview.status.ser"))
             else:
-                self._status_lbl.setText(f"SER 파일 없음: {self._input_dir}")
+                self._status_lbl.setText(S("preview.no_ser", d=self._input_dir))
             return
 
         self._running = True
@@ -360,6 +360,6 @@ class SerPreviewWidget(QWidget):
         self._running = False
         self._thread  = None
         self._worker  = None
-        self._status_lbl.setText(f"오류: {msg}")
+        self._status_lbl.setText(S("preview.error", msg=msg))
         if self._pending:
             self._pending = False

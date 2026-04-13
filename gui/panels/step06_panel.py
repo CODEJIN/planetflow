@@ -351,15 +351,12 @@ class _Step06MonoWidget(QWidget):
         issues = []
         specs = config.get("composite_specs") or []
         if not specs:
-            issues.append(ValidationIssue("error", "합성 스펙이 비어있습니다."))
+            issues.append(ValidationIssue("error", S("validate.no_composite_specs")))
         if not batch_mode:
             out_base = config.get("output_dir", "").strip()
             input_path = str(Path(out_base) / "step05_wavelet_master") if out_base else ""
             if not count_files(input_path, "*.png", "*.PNG"):
-                issues.append(ValidationIssue(
-                    "error",
-                    "웨이블릿 마스터 PNG가 없습니다. Step 5를 먼저 실행하세요.",
-                ))
+                issues.append(ValidationIssue("error", S("validate.no_wavelet_png")))
             elif specs and input_path:
                 for spec in specs:
                     for role in ("R", "G", "B", "L"):
@@ -367,7 +364,7 @@ class _Step06MonoWidget(QWidget):
                         if fname and not count_files(input_path, f"*{fname}*.png", f"*{fname}*.PNG"):
                             issues.append(ValidationIssue(
                                 "error",
-                                f"필터 '{fname}' PNG 파일이 {input_path}에 없습니다.",
+                                S("validate.no_filter_png", f=fname, d=input_path),
                             ))
         return issues
 

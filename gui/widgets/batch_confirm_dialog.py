@@ -25,21 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# ── Step metadata ─────────────────────────────────────────────────────────────
-
-# (step_id, short_name, long_name) — must match _STEP_DEFS in main_window.py
-_STEP_META = [
-    ("01", "PIPP",      "PIPP 전처리"),
-    ("02", "Lucky\nStack", "Lucky Stacking"),
-    ("03", "품질\n평가",   "품질 평가"),
-    ("04", "드로\n테이션", "De-rotation 스태킹"),
-    ("05", "웨이\n블릿",   "웨이블릿 마스터"),
-    ("06", "RGB\n합성",   "RGB 합성"),
-    ("07", "미리\n보기",  "웨이블릿 미리보기"),
-    ("08", "시계\n열",    "시계열 RGB 합성"),
-    ("09", "GIF",        "애니메이션 GIF"),
-    ("10", "요약\n그리드", "요약 그리드"),
-]
+from gui.i18n import S
 
 # ── Node colors ───────────────────────────────────────────────────────────────
 
@@ -129,7 +115,7 @@ class _StepNode(QWidget):
     def _build_tooltip(self) -> None:
         lines: list[str] = [self._long_name]
         if self._state == "skip":
-            lines.append("(건너뜀)")
+            lines.append(S("batch.node.skipped"))
         else:
             if self._out:
                 lines.append(f"→ {self._out}")
@@ -165,7 +151,7 @@ class BatchConfirmDialog(QDialog):
         issues: dict[str, list] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("일괄 실행 확인")
+        self.setWindowTitle(S("batch.dialog.title"))
         self.setModal(True)
         self.setMinimumWidth(820)
 
@@ -240,16 +226,16 @@ class BatchConfirmDialog(QDialog):
 
         # Legend
         legend = QLabel(
-            '<span style="color:#4caf50">●</span> 실행 예정'
-            '　<span style="color:#444">●</span> 건너뜀'
-            '　<span style="color:#f44336">●</span> 오류 (실행 불가)'
-            '　<span style="color:#ffc107">●</span> 경고'
+            f'<span style="color:#4caf50">●</span> {S("batch.legend.run")}'
+            f'　<span style="color:#444">●</span> {S("batch.legend.skip")}'
+            f'　<span style="color:#f44336">●</span> {S("batch.legend.error")}'
+            f'　<span style="color:#ffc107">●</span> {S("batch.legend.warning")}'
         )
         legend.setStyleSheet("color: #666; font-size: 10px;")
         layout.addWidget(legend)
 
         if self._has_errors:
-            err_lbl = QLabel("⛔  검증 오류가 있어 실행할 수 없습니다. 해당 스텝 설정을 확인해주세요.")
+            err_lbl = QLabel(f"⛔  {S('batch.error_banner')}")
             err_lbl.setStyleSheet(
                 "color: #ef9a9a; font-size: 11px;"
                 " background: #3a1010; border: 1px solid #f44336;"
@@ -264,7 +250,7 @@ class BatchConfirmDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
-        ok_btn.setText("실행")
+        ok_btn.setText(S("batch.btn.run"))
         ok_btn.setEnabled(not self._has_errors)
         if self._has_errors:
             ok_btn.setStyleSheet("color: #555; background: #2a2a2a;")
@@ -274,7 +260,7 @@ class BatchConfirmDialog(QDialog):
                 " border: 1px solid #4a9030; border-radius: 4px; padding: 4px 16px; }"
                 "QPushButton:hover { background: #3a7a25; }"
             )
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText(S("batch.btn.cancel"))
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -282,11 +268,9 @@ class BatchConfirmDialog(QDialog):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_META_LOOKUP = {sid: (short, long) for sid, short, long in _STEP_META}
-
 
 def _step_names(step_id: str) -> tuple[str, str]:
-    return _META_LOOKUP.get(step_id, (step_id, f"Step {step_id}"))
+    return S(f"step.short.{step_id}"), S(f"step.long.{step_id}")
 
 
 def _hline() -> QFrame:

@@ -63,14 +63,14 @@ def _dir_row(parent: QWidget, line_edit: QLineEdit) -> QHBoxLayout:
     row = QHBoxLayout()
     row.setSpacing(4)
     row.addWidget(line_edit)
-    btn = QPushButton("찾아보기")
+    btn = QPushButton(S("btn.browse"))
     btn.setFixedWidth(70)
     btn.setStyleSheet(_BTN_BROWSE)
 
     def _browse() -> None:
         current = line_edit.text().strip()
         folder = QFileDialog.getExistingDirectory(
-            parent, "폴더 선택", current or str(Path.home())
+            parent, S("dialog.folder_select"), current or str(Path.home())
         )
         if folder:
             line_edit.setText(folder)
@@ -107,7 +107,7 @@ class Step03Panel(BasePanel):
         # TIF input dir (editable — user can override cascade value)
         self._input_lbl = QLineEdit()
         self._input_lbl.setStyleSheet(_INPUT_EMPTY_STYLE)
-        self._input_lbl.setPlaceholderText("Lucky Stacking TIF 폴더")
+        self._input_lbl.setPlaceholderText(S("step03.input_dir.placeholder"))
         self._input_lbl.textChanged.connect(self._on_input_changed)
         self._input_lbl.editingFinished.connect(self.dirs_changed)
         lbl_in = QLabel(S("step03.input_dir"))
@@ -198,11 +198,11 @@ class Step03Panel(BasePanel):
         input_dir = config.get("input_dir", "").strip()
         if not batch_mode:
             if not input_dir:
-                issues.append(ValidationIssue("error", "TIF 입력 폴더가 설정되지 않았습니다."))
+                issues.append(ValidationIssue("error", S("validate.no_tif_dir")))
                 return issues
             n_tif = count_files(input_dir, "*.tif", "*.TIF")
             if not n_tif:
-                issues.append(ValidationIssue("error", f"TIF 파일이 없습니다: {input_dir}"))
+                issues.append(ValidationIssue("error", S("validate.no_tif_files", d=input_dir)))
                 return issues
             window_frames = int(config.get("window_frames", 3))
             n_windows     = int(config.get("n_windows", 1))
@@ -210,15 +210,14 @@ class Step03Panel(BasePanel):
             if required > n_tif:
                 issues.append(ValidationIssue(
                     "error",
-                    f"파일 수 부족: {window_frames} 프레임 × {n_windows} 윈도우 = {required}개 필요, "
-                    f"현재 {n_tif}개",
+                    S("validate.files_insufficient",
+                      wf=window_frames, nw=n_windows, req=required, n=n_tif),
                 ))
         threshold = float(config.get("min_quality_threshold_03", 0.05))
         if threshold > 0.5:
             issues.append(ValidationIssue(
                 "warning",
-                f"최소 품질 임계값({threshold:.2f})이 매우 높습니다. "
-                "대부분의 프레임이 제외될 수 있습니다.",
+                S("validate.high_threshold", t=threshold),
             ))
         return issues
 

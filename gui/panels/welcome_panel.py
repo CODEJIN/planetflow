@@ -17,19 +17,8 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 
-# Step definitions: (step_id, short display name)
-_STEP_SHORT = [
-    ("01", "PIPP"),
-    ("02", "Lucky\nStack"),
-    ("03", "품질\n평가"),
-    ("04", "드로\n테이션"),
-    ("05", "웨이\n블릿"),
-    ("06", "RGB\n합성"),
-    ("07", "미리\n보기"),
-    ("08", "시계\n열"),
-    ("09", "GIF"),
-    ("10", "요약\n그리드"),
-]
+# Step IDs for the pipeline status display
+_STEP_IDS = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"]
 
 _STATUS_COLOR = {
     "success": ("#2d6b30", "#4caf50", "#a5d6a7"),  # bg, border, text
@@ -113,8 +102,8 @@ class WelcomePanel(QWidget):
         grid.setSpacing(6)
         grid.setContentsMargins(0, 0, 0, 0)
 
-        for i, (step_id, abbr) in enumerate(_STEP_SHORT):
-            dot = QLabel(abbr)
+        for i, step_id in enumerate(_STEP_IDS):
+            dot = QLabel(S(f"step.short.{step_id}"))
             dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
             dot.setFixedSize(86, 42)
             dot.setWordWrap(False)
@@ -127,9 +116,9 @@ class WelcomePanel(QWidget):
 
         # Legend
         legend = QLabel(
-            '<span style="color:#4caf50">●</span> 완료'
-            '　<span style="color:#f44336">●</span> 오류'
-            '　<span style="color:#3c3c3c">●</span> 미실행'
+            f'<span style="color:#4caf50">●</span> {S("welcome.legend.done")}'
+            f'　<span style="color:#f44336">●</span> {S("welcome.legend.error")}'
+            f'　<span style="color:#3c3c3c">●</span> {S("welcome.legend.idle")}'
         )
         legend.setAlignment(Qt.AlignmentFlag.AlignCenter)
         legend.setStyleSheet(

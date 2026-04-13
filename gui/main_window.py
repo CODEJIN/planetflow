@@ -742,7 +742,7 @@ class MainWindow(QMainWindow):
 
         output_dir = self._session_data.get("output_dir", "")
         self._output_dir_label.setText(S("label.output", d=output_dir) if output_dir else "")
-        QMessageBox.information(self, "설정", S("msg.settings_saved"))
+        QMessageBox.information(self, S("msg.dialog.settings"), S("msg.settings_saved"))
 
     def _on_run_step(self, step_id: str) -> None:
         """Run a single step, with pre-flight validation."""
@@ -758,12 +758,12 @@ class MainWindow(QMainWindow):
                 msg = "\n".join(f"⛔ {e.message}" for e in errors)
                 if warnings:
                     msg += "\n\n" + "\n".join(f"⚠ {w.message}" for w in warnings)
-                QMessageBox.critical(self, "실행 불가", msg)
+                QMessageBox.critical(self, S("msg.dialog.run_blocked"), msg)
                 return
             if warnings:
                 msg = "\n".join(f"⚠ {w.message}" for w in warnings)
                 ret = QMessageBox.warning(
-                    self, "경고", msg + "\n\n계속 실행하시겠습니까?",
+                    self, S("msg.dialog.warning"), msg + "\n\n" + S("msg.run_confirm_warn"),
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
                 )
                 if ret != QMessageBox.Yes:
@@ -832,23 +832,23 @@ class MainWindow(QMainWindow):
         """Check that the starting input folder has the expected files."""
         if start_from == "01":
             path_str = d.get("ser_input_dir", "").strip()
-            label = "Step 1 SER 폴더"
+            label = S("batch.label.step1_ser")
             patterns = ("*.ser", "*.SER")
         elif start_from == "02":
             path_str = (d.get("step02_ser_dir", "") or d.get("ser_input_dir", "")).strip()
-            label = "Step 2 SER 폴더"
+            label = S("batch.label.step2_ser")
             patterns = ("*.ser", "*.SER")
         else:
             path_str = d.get("input_dir", "").strip()
-            label = "Step 3 TIF 폴더"
+            label = S("batch.label.step3_tif")
             patterns = ("*.tif", "*.TIF")
 
         if not path_str:
-            return False, "입력 폴더 없음", f"{label}를 설정해주세요."
+            return False, S("batch.no_folder.title"), S("batch.no_folder.msg", label=label)
         p = Path(path_str)
         files = [f for pat in patterns for f in p.glob(pat)]
         if not p.exists() or not files:
-            return False, "입력 파일 없음", f"{label}에 파일이 없습니다:\n{path_str}"
+            return False, S("batch.no_files.title"), S("batch.no_files.msg", label=label, path=path_str)
         return True, "", ""
 
     def _build_batch_steps(self, start_from: str) -> list[str]:
@@ -883,12 +883,12 @@ class MainWindow(QMainWindow):
             )
             p = Path(inp_path)
             n = len([f for pat in ("*.ser", "*.SER") for f in p.glob(pat)])
-            inp_summary = f"입력: {inp_path}  (SER × {n})"
+            inp_summary = S("batch.input.ser", path=inp_path, n=n)
         else:
             inp_path = d.get("input_dir", "")
             p = Path(inp_path)
             n = len([f for pat in ("*.tif", "*.TIF") for f in p.glob(pat)])
-            inp_summary = f"입력: {inp_path}  (TIF × {n})"
+            inp_summary = S("batch.input.tif", path=inp_path, n=n)
 
         out_base = d.get("output_dir", "")
 
@@ -1172,9 +1172,8 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
-            "정보",
-            f"{S('app.title')}\n\n행성 촬영 파이프라인 GUI\n\n"
-            "단계별 처리를 자동화하는 도구입니다.",
+            S("app.about.title"),
+            f"{S('app.title')}\n\n{S('app.about.body')}",
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802

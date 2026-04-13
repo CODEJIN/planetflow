@@ -200,7 +200,7 @@ class SettingsPanel(QWidget):
         self._lang_combo = QComboBox()
         self._lang_combo.setStyleSheet(_COMBO_STYLE)
         self._lang_combo.setToolTip(S("settings.language.tooltip"))
-        self._lang_combo.addItem("한국어", "ko")
+        self._lang_combo.addItem(S("lang.korean"), "ko")
         self._lang_combo.addItem("English", "en")
         fl.addRow(_lbl(S("settings.language"), S("settings.language.tooltip")), self._lang_combo)
 
@@ -221,7 +221,7 @@ class SettingsPanel(QWidget):
         self._max_workers.setRange(0, _cpu_n)
         self._max_workers.setValue(0)
         self._max_workers.setFixedWidth(100)
-        self._max_workers.setSpecialValueText(f"자동 ({_cpu_n}코어)")
+        self._max_workers.setSpecialValueText(S("settings.max_workers.auto", n=_cpu_n))
         self._max_workers.setToolTip(_tip_wk)
         wk_row = QHBoxLayout()
         wk_row.setSpacing(4)

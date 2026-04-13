@@ -205,9 +205,10 @@ class _Worker(QObject):
 
             size_counts = Counter(sz for _, _, sz in aps)
             size_str = " ".join(f"{sz}px×{cnt}" for sz, cnt in sorted(size_counts.items()))
-            status = (
-                f"AP: {len(aps)}개  [{size_str}] · 반경: {disk_radius:.0f}px · "
-                f"프레임 {mid_idx + 1}/{total} · {self._path.name}"
+            status = S(
+                "preview.ap_info",
+                n=len(aps), size=size_str, r=disk_radius,
+                i=mid_idx + 1, t=total, name=self._path.name,
             )
 
             oh, ow = overlay.shape[:2]
@@ -248,11 +249,11 @@ class LuckyStackPreviewWidget(QWidget):
         root.setContentsMargins(0, 4, 0, 0)
         root.setSpacing(4)
 
-        self._header_lbl = QLabel("AP 그리드 미리보기")
+        self._header_lbl = QLabel(S("preview.ap_header"))
         self._header_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
         root.addWidget(self._header_lbl)
 
-        self._status_lbl = QLabel("SER 입력 폴더를 설정하면 미리보기가 활성화됩니다.")
+        self._status_lbl = QLabel(S("preview.status.ser"))
         self._status_lbl.setStyleSheet(_STATUS_STYLE)
         self._status_lbl.setWordWrap(True)
         root.addWidget(self._status_lbl)
@@ -264,11 +265,7 @@ class LuckyStackPreviewWidget(QWidget):
         self._img_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         root.addWidget(self._img_lbl)
 
-        self._legend_lbl = QLabel(
-            '<span style="color:#3cf064">○</span> AP 크기 (소→대: 녹→황)'
-            '　<span style="color:#50a0ff">■</span> 중앙 AP 패치'
-            '　<span style="color:#00d2ff">○</span> 디스크 경계'
-        )
+        self._legend_lbl = QLabel(S("preview.ap_legend"))
         self._legend_lbl.setStyleSheet("font-size: 9px; color: #888;")
         root.addWidget(self._legend_lbl)
         root.addStretch()
@@ -276,7 +273,10 @@ class LuckyStackPreviewWidget(QWidget):
     # ── Public API ──────────────────────────────────────────────────────────────
 
     def retranslate(self) -> None:
-        self._header_lbl.setText("AP 그리드 미리보기")
+        self._header_lbl.setText(S("preview.ap_header"))
+        self._legend_lbl.setText(S("preview.ap_legend"))
+        if self._input_dir is None:
+            self._status_lbl.setText(S("preview.status.ser"))
 
     def set_input_dir(self, folder) -> None:
         if folder:
@@ -285,7 +285,7 @@ class LuckyStackPreviewWidget(QWidget):
             self._input_dir = None
 
         if self._input_dir is None:
-            self._status_lbl.setText("SER 입력 폴더를 설정하면 미리보기가 활성화됩니다.")
+            self._status_lbl.setText(S("preview.status.ser"))
         elif self.isVisible():
             self.schedule_update(150)
 
@@ -333,16 +333,16 @@ class LuckyStackPreviewWidget(QWidget):
         ser = _pick_ser(self._input_dir)
         if ser is None:
             msg = (
-                "SER 입력 폴더를 설정하면 미리보기가 활성화됩니다."
+                S("preview.status.ser")
                 if not self._input_dir.is_dir()
-                else f"SER 파일 없음: {self._input_dir}"
+                else S("preview.no_ser", d=self._input_dir)
             )
             self._status_lbl.setText(msg)
             return
 
         self._running = True
         self._pending = False
-        self._status_lbl.setText(f"렌더링 중…  {ser.name}")
+        self._status_lbl.setText(S("preview.rendering_ser", f=ser.name))
 
         worker = _Worker(
             ser,
@@ -381,6 +381,6 @@ class LuckyStackPreviewWidget(QWidget):
         self._running = False
         self._thread  = None
         self._worker  = None
-        self._status_lbl.setText(f"오류: {msg}")
+        self._status_lbl.setText(S("preview.error", msg=msg))
         if self._pending:
             self._pending = False

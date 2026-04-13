@@ -247,10 +247,7 @@ class Step07Panel(BasePanel):
         if not batch_mode:
             input_dir = config.get("input_dir", "").strip()
             if not input_dir or not count_files(input_dir, "*.tif", "*.TIF"):
-                issues.append(ValidationIssue(
-                    "error",
-                    "TIF 입력 파일이 없습니다. Step 2 (Lucky Stacking)를 먼저 실행하세요.",
-                ))
+                issues.append(ValidationIssue("error", S("validate.no_tif_lucky")))
         return issues
 
     def output_paths(self) -> list[Path]:
