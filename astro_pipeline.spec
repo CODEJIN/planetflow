@@ -207,24 +207,50 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name="AstroPipeline",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=not IS_WINDOWS,   # Linux: ELF 디버그 심볼 제거 (크기 ~20% 절감)
-    upx=False,              # Qt 바이너리 UPX 충돌 위험 → 비활성화
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon="gui/icons/app_icon.ico" if IS_WINDOWS else None,
-)
+if IS_WINDOWS:
+    # ── Windows: onefile (PE/DLL 포맷은 ELF alignment 이슈 없음) ────────────
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name="AstroPipeline",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon="gui/icons/app_icon.ico",
+    )
+else:
+    # ── Linux: onefile, strip=False ──────────────────────────────────────────
+    # strip=True 가 OpenBLAS ELF segment alignment 패딩을 제거해서 깨뜨릴 수 있음
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name="AstroPipeline",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=None,
+    )

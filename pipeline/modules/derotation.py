@@ -218,12 +218,18 @@ def _to_luminance(image: np.ndarray) -> np.ndarray:
 def find_disk_center(
     image: np.ndarray,
     margin_factor: float = 0.10,
+    fixed_threshold: int = 0,
 ) -> Tuple[float, float, float, float, float]:
     """Locate planet disk via ellipse fitting.
 
     Args:
-        image:         2-D float [0, 1] image.
-        margin_factor: Margin below Otsu threshold to include dim limb pixels.
+        image:           2-D float [0, 1] image.
+        margin_factor:   Margin below Otsu threshold to include dim limb pixels.
+                         Ignored when fixed_threshold > 0.
+        fixed_threshold: Fixed brightness threshold (0–255). When > 0, skips
+                         Otsu and uses this value directly — matches AS!4
+                         _stabilization_planet_threshold=20 for consistent
+                         disk detection across frames.
 
     Returns:
         (cx, cy, semi_major, semi_minor, angle_deg) — ellipse parameters.
@@ -231,9 +237,12 @@ def find_disk_center(
     """
     # Convert to uint8 for thresholding
     arr8 = np.clip(image * 255, 0, 255).astype(np.uint8)
-    thresh_val, _ = cv2.threshold(arr8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # Apply threshold with small downward margin (include dim limb)
-    effective_thresh = max(1, int(thresh_val * (1.0 - margin_factor)))
+    if fixed_threshold > 0:
+        effective_thresh = int(fixed_threshold)
+    else:
+        thresh_val, _ = cv2.threshold(arr8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Apply threshold with small downward margin (include dim limb)
+        effective_thresh = max(1, int(thresh_val * (1.0 - margin_factor)))
     _, binary = cv2.threshold(arr8, effective_thresh, 255, cv2.THRESH_BINARY)
 
     # Morphological closing to fill gaps in the disk
@@ -463,6 +472,7 @@ def limb_center_align(
     ref_cy: float,
     target_lum: np.ndarray,
     max_shift_px: float = 15.0,
+    fixed_threshold: int = 0,
 ) -> Tuple[float, float]:
     """Compute sub-pixel translation shift using disk limb center alignment.
 
@@ -492,7 +502,7 @@ def limb_center_align(
         aligns with (ref_cx, ref_cy).
     """
     try:
-        cx, cy, semi_a, *_ = find_disk_center(target_lum)
+        cx, cy, semi_a, *_ = find_disk_center(target_lum, fixed_threshold=fixed_threshold)
         if semi_a < 5:
             return 0.0, 0.0
         dx = float(ref_cx - cx)

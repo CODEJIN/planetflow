@@ -329,13 +329,39 @@ class LuckyStackConfig:
     # Matches AS!4 default (25%) for fair comparison.
     top_percent: float = 0.25
     reference_n_frames: int = 50     # top frames mean-stacked as initial reference
+    # reference_midpoint_percentage: percentile of quality distribution to centre the
+    # reference window on (0 = top frames, 75 = 75th-percentile frames).
+    # AS!4 uses reference_midpoint_percentage=75: frames that are "solidly good"
+    # (not lucky outliers) make a more representative reference for phase correlation.
+    # try49 confirmed: midpoint=75 gives highest correlation with AS!4 output (0.9844).
+    reference_midpoint_percentage: int = 75
+    # reference_percent: use this fraction of total frames for the reference stack
+    # (0.0 = use reference_n_frames instead). e.g. 0.5 = top 50% of all frames.
+    # AS!4 uses reference_num_frames=5394 on a 10341-frame IR file ≈ 52%.
+    # try49 baseline: 0.0 (reference_n_frames=50 with midpoint=75 gave best correlation).
+    reference_percent: float = 0.0
     min_frames: int = 20
+    # Quality scoring metric for frame selection.
+    # "laplacian"      — Laplacian variance (legacy, CV ~1.4% on poor seeing).
+    # "gradient"       — Tenengrad global (mean squared Sobel, ksize=3).
+    # "local_gradient" — Local Tenengrad at AP patch positions (default).
+    #                    Matches AS!4 quality_type=Gradient+local; CV ~4-6%.
+    #                    Generates AP grid from middle frame in Phase 0.5 so
+    #                    no AS3 file is required. Strongly recommended for
+    #                    poor-seeing data where global scorers fail to
+    #                    discriminate frames (260415 analysis: CV 1.4%→4.4%).
+    score_metric: str = "local_gradient"
+    # Sobel kernel size for local gradient quality scoring (score_frames_local).
+    # ksize=3: standard, fastest. ksize=5 or 7: more noise-robust (wider kernel).
+    # Matches AS!4 quality_gradient_noise_robust=3 when set to 5 or 7.
+    # Default: 3 (backward-compatible).
+    quality_gradient_ksize: int = 3
 
     # AP grid — matched to AS!4 (AP Size=64, Min Bright=50/255≈0.196)
     # AS!4 uses 64px APs: Jupiter's belt/zone features span 20-50 px, so 64px
     # patches contain entire features → more stable phase correlation than 32px.
     ap_size: int = 64
-    ap_step: int = 16                # 16 px step → ~127 APs; 4:1 size/step ratio
+    ap_step: int = 0                 # 0 = auto (ap_size // 2). 명시적 값 지정 시 그대로 사용.
     ap_search_range: int = 20
     ap_min_contrast: float = 0.01    # minimum patch RMS contrast (reject uniform sky)
     ap_min_brightness: float = 0.196 # minimum patch mean brightness (≈ AS!4 Min Bright 50/255)
@@ -353,24 +379,31 @@ class LuckyStackConfig:
     # ap_kr_sigma: Gaussian KR smoothing sigma; 64px covers sparse AP gaps across
     #   a ~200px disk (vs legacy 14.4px which was sized for ~122 dense APs).
     # ap_candidate_step: dense candidate search step before NMS (pixels).
-    use_adaptive_ap: bool = True
+    # try49 베이스라인: uniform 64px grid (adaptive는 6~9개만 생성, AS!4 수준 안됨)
+    use_adaptive_ap: bool = False
+    # Multi-scale AP grid matching AS!4 double_ap_grid: 64px + 96px + 192px layers.
+    # Overrides use_adaptive_ap when True (implies use_adaptive_ap=False path +
+    # multi-size triples → adaptive warp map KR).
+    use_double_ap_grid: bool = False
+    # Minimum-sufficient-size multi-scale AP grid (try64).
+    # Candidate grid at ap_size//2 spacing; for each position tries ap_size, ap_size*2, ...
+    # up to disk_radius — uses the smallest size meeting ap_min_contrast.
+    # Overrides use_adaptive_ap and use_double_ap_grid.
+    use_multiscale_ap: bool = False
     ap_kr_sigma: float = 64.0        # KR sigma for adaptive warp maps (px)
     ap_candidate_step: int = 8       # candidate grid search step (px)
 
     # Stacking
     quality_weight_power: float = 3.0    # raised 2.0→3.0: stronger suppression of marginal frames
 
-    # Sigma-clipping: 2-pass stacking that rejects outlier pixels per-frame.
-    # Pass 1 accumulates normally and computes per-pixel mean/std.
-    # Pass 2 re-warps each frame (from cached shifts) and rejects pixels where
-    # |pixel − mean| > sigma_clip_kappa × std before re-accumulating.
-    # This removes cosmic-ray hits, satellite trails, and seeing spikes that
-    # fall in the same sky position across multiple frames.
-    # 3.0 = conservative (keeps ~99.7% of good pixels under Gaussian noise).
-    # 0.0 = disabled (use pass-1 result only; saves processing time).
-    sigma_clip_kappa: float = 0.0    # disabled: sigma-clipping hurts lucky stacking
-    # (seeing variation dominates per-pixel variance, causing good high-contrast
-    #  frames to be clipped as "outliers" vs the blurry pass-1 mean)
+    # Sigma-clipping: extra pass after n_iterations stacking that rejects
+    # outlier pixels per-frame.  Uses the final stacked result as reference:
+    # re-warps all frames, computes per-pixel mean/std, then discards pixels
+    # where |pixel − mean| > sigma_clip_kappa × std before nanmean.
+    # Visually confirmed sharper than plain stacking (260407 overnight test).
+    # Memory cost: one additional (N, H, W) float32 array (~800 MB for 25%).
+    sigma_clip: bool = False         # enable sigma-clipping post-pass
+    sigma_clip_kappa: float = 2.0    # k-sigma threshold (2.0 = overnight test value)
 
     # Iterative refinement: use the first-pass stack as reference for a second pass.
     # The stacked result has ~√N better SNR than a single frame, so AP shifts on the
@@ -384,16 +417,131 @@ class LuckyStackConfig:
     # 0 = auto (all logical cores); 1 = single-threaded (no fork overhead).
     n_workers: int = 0
 
+    # SER-level parallelism: number of SER files to process simultaneously.
+    # Each SER uses (n_workers // n_ser_parallel) frame workers internally.
+    # 0 = auto (cpu_count // 4); 1 = sequential (default, safe for low-RAM systems).
+    n_ser_parallel: int = 1
+
     # Post-stack sub-pixel smoothing.
     # GaussianBlur(sigma) applied to the final stacked image BEFORE wavelet sharpening.
     # Suppresses interpolation aliasing from INTER_LINEAR remap that concentrates at
     # wavelet level-1 (1-2px) and is amplified 29× by the sharpening step.
     # σ=0.9: CH4 noise 5.6×→1.1× vs AS!4, L2 (2-4px real detail) 87% preserved.
-    # 0.0 = disabled (legacy behaviour, pre-try05).
-    stack_blur_sigma: float = 0.9
+    # 0.0 = disabled. try44 confirmed: removing blur gives 2.1× Laplacian variance.
+    # Default changed to 0.0 (try44/49 baseline).
+    stack_blur_sigma: float = 0.0
+
+    # cv2.remap interpolation mode for the combined global+local warp.
+    # INTER_LINEAR (1): bilinear — fast, introduces ~0.5px blur.
+    # INTER_CUBIC  (2): bicubic — sharper, recommended when stack_blur_sigma=0.
+    # INTER_LANCZOS4 (8): sharpest, highest quality but slower.
+    # Default changed to INTER_CUBIC (try44 confirmed: 1.36× Laplacian variance vs LINEAR).
+    remap_interpolation: int = 2  # cv2.INTER_CUBIC
+
+    # stabilization_planet_threshold: fixed brightness threshold (0–255) for planet
+    # disk detection in limb_center_align(). 0 = use Otsu adaptive threshold (default).
+    # AS!4 uses _stabilization_planet_threshold=20 (≈7.8% of full scale) for consistent
+    # disk edge detection across frames regardless of background brightness variation.
+    stabilization_planet_threshold: int = 0
+
+    # ── try53: QSF sub-pixel peak refinement ──────────────────────────────────
+    # When True, replaces cv2.phaseCorrelate with manual FFT cross-correlation +
+    # 2D quadratic surface fitting (QSF) on the 3×3 neighborhood of the
+    # correlation peak for sub-pixel accuracy. AS!4 uses QSF internally.
+    # try58 confirmed: per_ap_selection + QSF = 46.7% Laplacian (best result).
+    # Default: True (try58 baseline).
+    use_qsf: bool = True
+
+    # ── try54: CoG (Centre-of-Gravity) global alignment ───────────────────────
+    # When True, replaces limb_center_align() ellipse fitting with image-moments
+    # brightness-weighted centroid (cv2.moments) for global per-frame stabilization.
+    # AS!4 calls this "Planet CoG" stabilization. Potentially more robust than
+    # ellipse fitting when the limb is partially clipped or poorly defined.
+    # Default: False (use limb_center_align ellipse fitting).
+    cog_align: bool = False
+
+    # ── try55: Noise Robust pre-scoring blur ───────────────────────────────────
+    # GaussianBlur applied ONLY before gradient quality computation in
+    # score_frames_local(). Does NOT affect the stacked image.
+    # 0 = disabled. 1 = σ0.5px, 2 = σ1.0px, 3 = σ1.5px (matches AS!4 NR=3).
+    # AS!4 uses this before quality gradient computation to reduce noise impact
+    # on frame scoring without blurring the stack itself.
+    # Default: 0 (disabled — try55 baseline is σ0).
+    quality_noise_robust: int = 0
+
+    # ── try56: Per-AP independent frame selection ──────────────────────────────
+    # When True, computes per-AP quality scores for each frame during stacking,
+    # builds a 2D quality weight map via Gaussian KR, and accumulates with
+    # spatially varying weights. Different image regions are accumulated with
+    # different per-region quality weights, matching AS!4's independent AP frame
+    # selection. Requires local_gradient scoring to generate per-AP scores.
+    # Runs in both sequential and parallel paths (n_workers > 1 supported).
+    # try56 confirmed: 45.8% Laplacian. try58 (+QSF): 46.7%.
+    # Superseded by use_fourier_quality (try69: 66.4%). Default: False.
+    per_ap_selection: bool = False
+
+    # ── try68: True per-AP independent stacking ───────────────────────────────
+    # For each AP, independently select the best sub-frames by LOCAL quality at
+    # that AP position, then stack only those patches. Different APs use different
+    # frame subsets — the core of true lucky imaging.
+    # per_ap_stack_sub_percent: fraction of globally-selected frames used per AP
+    #   (0.5 = top 50% of pre-selected pool → effectively top 12.5% globally)
+    use_per_ap_stack: bool = False
+    per_ap_stack_sub_percent: float = 0.5
+
+    # ── try69: Fourier-domain quality-weighted stacking (Mackay 2013) ──────────
+    # use_fourier_quality: weight each frame's contribution per spatial frequency
+    #   by |FFT(frame)|^fourier_quality_power — frames sharper at freq f get more
+    #   weight at that frequency. No spatial patch boundaries.
+    use_fourier_quality: bool = True   # try69 BEST: 66.4% (was 46.7% with per_ap_selection)
+    fourier_quality_power: float = 1.0
+
+    # ── try57: Patch blending (PSS style) ─────────────────────────────────────
+    # When True, replaces the KR warp field + single cv2.remap with per-AP patch
+    # accumulation: for each AP and frame, extract the warped patch and accumulate
+    # with a Gaussian window mask. The final image is the normalized per-pixel sum
+    # of all AP contributions. Matches PlanetarySystemStacker's patch blending,
+    # which avoids the KR interpolation artifacts at sparse AP boundaries.
+    # Default: False (use KR warp field + single remap).
+    use_patch_blend: bool = False
+
+    # ── AS!4 greedy PDS AP grid (session-wide) ────────────────────────────────
+    # When True, generates APs via greedy Poisson Disk Sampling (raster scan)
+    # matching AS!4's exact placement algorithm (reverse-engineered, 96-100% match).
+    # Three independent layers: s, round(s×1.5/8)×8, s×3.
+    # min_dist per layer = round(ap_size × 35/64).
+    # In session-wide mode (step02): APs are generated once from the reference SER
+    # and shared across all SERs (with per-SER disk offset correction).
+    use_as4_ap_grid: bool = False
+    # Reference filter for session-wide AP generation.
+    # Priority when empty (auto): IR > R > G > B > CH4 > color.
+    # Set explicitly (e.g. "IR") to force a specific filter.
+    ap_reference_filter: str = ""
+
+    # try62: scikit-image DFT upsampling for sub-pixel AP shift (0.1px precision).
+    # Uses phase_cross_correlation(upsample_factor=10) instead of cv2.phaseCorrelate
+    # for the per-AP local shift estimation step.  Confidence gating still uses
+    # phaseCorrelate (more reliable for rejection), then refines with DFT upsampling.
+    # PSS SubpixelRegistration mode equivalent.
+    # Default: False (use cv2.phaseCorrelate or QSF).
+    use_pcc_upsample: bool = False
+
+    # try63: Thin Plate Spline warp interpolation instead of Gaussian KR.
+    # TPS passes EXACTLY through each reliable AP's measured shift (no dilution),
+    # whereas KR smooths/averages them with a Gaussian kernel (sigma=ap_kr_sigma).
+    # Coverage mask (same Gaussian density as KR) prevents wild TPS extrapolation
+    # in the sky / border regions outside the AP convex hull.
+    # tps_smoothing=0.0 → exact interpolation; >0 → regularized (outlier robust).
+    # Default: False (use KR).
+    use_tps: bool = False
+    tps_smoothing: float = 0.0
 
     # Experimental — see docstring
     intra_video_derotate: bool = False
+
+    def __post_init__(self) -> None:
+        if self.ap_step <= 0:
+            self.ap_step = self.ap_size // 2
 
 
 # ── Step 1: PIPP preprocessing ────────────────────────────────────────────────

@@ -39,12 +39,15 @@ Return value::
 from __future__ import annotations
 
 import json
+import multiprocessing as _mp
+import threading as _threading
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor, as_completed as _as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from pipeline.config import PipelineConfig
 from pipeline.modules import image_io
-from pipeline.modules.lucky_stack import lucky_stack_ser
+from pipeline.modules.lucky_stack import lucky_stack_ser, compute_session_aps_from_ser
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -52,6 +55,7 @@ from pipeline.modules.lucky_stack import lucky_stack_ser
 def run(
     config: PipelineConfig,
     progress_callback=None,
+    cancel_event=None,
 ) -> Dict[str, Dict]:
     """Process all SER files found in the step01 output directory.
 
@@ -126,22 +130,87 @@ def run(
 
     print(f"  Found {len(ser_files)} SER file(s) in {ser_dir}")
 
+    # ── Session-wide AS4 AP pre-computation ──────────────────────────────────
+    cfg = config.lucky_stack
+    _session_aps = None
+    _session_ref_cx = 0.0
+    _session_ref_cy = 0.0
+
+    if getattr(cfg, "use_as4_ap_grid", False):
+        ref_ser = _pick_reference_ser(ser_files, getattr(cfg, "ap_reference_filter", ""))
+        if ref_ser is not None:
+            print(f"  [Step2] Session AP reference: {ref_ser.name}", flush=True)
+            try:
+                _session_aps, _session_ref_cx, _session_ref_cy, _ref_r = \
+                    compute_session_aps_from_ser(ref_ser, cfg)
+                from collections import Counter as _Ctr
+                _c = _Ctr(sz for _, _, sz in _session_aps)
+                print(
+                    f"  [Step2] Session APs: {len(_session_aps)} pts "
+                    + " ".join(f"{sz}px×{_c[sz]}" for sz in sorted(_c))
+                    + f"  (ref disk cx={_session_ref_cx:.0f} cy={_session_ref_cy:.0f} r={_ref_r:.0f}px)",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"  [Step2] WARNING: Session AP computation failed ({_e}) — falling back to per-SER grid.", flush=True)
+                _session_aps = None
+        else:
+            print("  [Step2] WARNING: No suitable reference SER found — falling back to per-SER grid.", flush=True)
+
     # ── Per-file processing ───────────────────────────────────────────────────
     results: Dict[str, Dict] = {}
     n_files = len(ser_files)
 
-    for file_idx, ser_path in enumerate(ser_files):
+    n_ser_parallel = int(getattr(cfg, "n_ser_parallel", 1))
+    if n_ser_parallel <= 0:
+        n_ser_parallel = max(1, _mp.cpu_count() // 4)
+    n_ser_parallel = min(n_ser_parallel, n_files)
+
+    _file_counter = [0]          # completed file count (for progress mapping)
+    _counter_lock = _threading.Lock()
+
+    def _run_one(file_idx_and_path):
+        file_idx, ser_path = file_idx_and_path
+        if cancel_event is not None and cancel_event.is_set():
+            print(f"\n  [CANCELLED] Skipping {ser_path.name}", flush=True)
+            return ser_path.stem, {"input_frames": 0, "stacked_frames": 0, "output_path": None}
         print(f"\n  [{file_idx+1}/{n_files}] {ser_path.name}", flush=True)
 
         def _file_prog(done: int, total: int) -> None:
             if progress_callback is not None:
-                # Map intra-file progress into the overall file range
-                overall_done = file_idx * total + done
+                with _counter_lock:
+                    completed = _file_counter[0]
+                overall_done  = completed * total + done
                 overall_total = n_files * total
                 progress_callback(overall_done, overall_total)
 
-        result = _process_one(ser_path, out_dir, config, progress_callback=_file_prog)
-        results[ser_path.stem] = result
+        result = _process_one(
+            ser_path, out_dir, config,
+            progress_callback=_file_prog,
+            session_aps=_session_aps,
+            session_ref_cx=_session_ref_cx,
+            session_ref_cy=_session_ref_cy,
+            cancel_event=cancel_event,
+        )
+        with _counter_lock:
+            _file_counter[0] += 1
+        return ser_path.stem, result
+
+    if n_ser_parallel > 1:
+        print(f"  [Step2] Processing {n_files} SER files with {n_ser_parallel} parallel workers", flush=True)
+        with _ThreadPoolExecutor(max_workers=n_ser_parallel) as executor:
+            futs = {executor.submit(_run_one, (i, p)): p
+                    for i, p in enumerate(ser_files)}
+            for fut in _as_completed(futs):
+                stem, result = fut.result()
+                results[stem] = result
+    else:
+        for file_idx, ser_path in enumerate(ser_files):
+            if cancel_event is not None and cancel_event.is_set():
+                print("  [CANCELLED] Stopping SER processing.", flush=True)
+                break
+            stem, result = _run_one((file_idx, ser_path))
+            results[stem] = result
 
     # ── Summary ───────────────────────────────────────────────────────────────
     total_in = sum(r["input_frames"] for r in results.values())
@@ -154,6 +223,41 @@ def run(
     return results
 
 
+# ── Reference SER selection for session-wide AP sharing ──────────────────────
+
+_FILTER_PRIORITY = ["IR", "R", "G", "B", "CH4", "color"]
+
+
+def _pick_reference_ser(ser_files: List[Path], forced_filter: str = "") -> Optional[Path]:
+    """Return the best reference SER for session-wide AP generation.
+
+    If forced_filter is set, pick from SERs matching that filter only.
+    Otherwise use priority order: IR > R > G > B > CH4 > color.
+    Among candidates with the same filter, pick the temporally central one
+    (middle of sorted list) as most representative of the session.
+    """
+    if forced_filter:
+        candidates = [f for f in ser_files if forced_filter.upper() in f.stem.upper()]
+        if not candidates:
+            candidates = ser_files
+    else:
+        candidates = None
+        for flt in _FILTER_PRIORITY:
+            matched = [f for f in ser_files if f"-{flt}-" in f.stem or f"_{flt}_" in f.stem
+                       or f.stem.upper().endswith(f"-{flt.upper()}")
+                       or f"-{flt.upper()}-" in f.stem.upper()]
+            if matched:
+                candidates = matched
+                break
+        if candidates is None:
+            candidates = ser_files
+
+    if not candidates:
+        return None
+    # Pick temporally central SER (sorted filenames encode timestamps)
+    return sorted(candidates)[len(candidates) // 2]
+
+
 # ── Per-file processing ───────────────────────────────────────────────────────
 
 def _process_one(
@@ -161,6 +265,10 @@ def _process_one(
     out_dir: Optional[Path],
     config: PipelineConfig,
     progress_callback=None,
+    session_aps=None,
+    session_ref_cx: float = 0.0,
+    session_ref_cy: float = 0.0,
+    cancel_event=None,
 ) -> Dict:
     """Run lucky stacking on a single SER file.
 
@@ -170,7 +278,14 @@ def _process_one(
     stem = ser_path.stem
 
     try:
-        stacked, log = lucky_stack_ser(ser_path, cfg, progress_callback=progress_callback)
+        stacked, log = lucky_stack_ser(
+            ser_path, cfg,
+            progress_callback=progress_callback,
+            session_aps=session_aps,
+            session_ref_cx=session_ref_cx,
+            session_ref_cy=session_ref_cy,
+            cancel_event=cancel_event,
+        )
     except Exception as exc:
         print(f"\n  ERROR processing {ser_path.name}: {exc}")
         return {

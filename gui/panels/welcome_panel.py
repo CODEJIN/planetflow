@@ -1,10 +1,13 @@
 """Welcome / home panel — shown on startup instead of Settings."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QPainter
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -17,6 +20,14 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 
+# Logo path — works both in development and PyInstaller frozen builds
+_HERE = Path(__file__).parent
+_LOGO_PATH = str(
+    (Path(sys._MEIPASS) / "gui" / "icons" / "logo_planetflow.svg")
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+    else _HERE.parent / "icons" / "logo_planetflow.svg"
+)
+
 # Step IDs for the pipeline status display
 _STEP_IDS = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"]
 
@@ -27,6 +38,22 @@ _STATUS_COLOR = {
     "skipped": ("#2a2a2a", "#555",    "#666"),
     "":        ("#282828", "#3c3c3c", "#555"),
 }
+
+class _SvgWidget(QWidget):
+    """Transparent SVG renderer — no background fill, so the card surface shows through."""
+
+    def __init__(self, path: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._renderer = QSvgRenderer(path, self)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._renderer.render(p)
+        p.end()
+
 
 _BTN_PRIMARY = (
     "QPushButton { background: #2d5a1b; color: #b8f5a0; border: 1px solid #4a9030;"
@@ -62,26 +89,24 @@ class WelcomePanel(QWidget):
 
         # Centre card
         card = QWidget()
-        card.setFixedWidth(580)
+        card.setFixedWidth(620)
         card.setStyleSheet(
             "background: #252526; border: 1px solid #3c3c3c; border-radius: 8px;"
         )
         card_layout = QVBoxLayout(card)
-        card_layout.setSpacing(18)
-        card_layout.setContentsMargins(40, 32, 40, 32)
+        card_layout.setSpacing(16)
+        card_layout.setContentsMargins(40, 28, 40, 28)
 
-        # Title
-        title = QLabel(S("app.title"))
-        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("color: #e8e8e8; background: transparent; border: none;")
-        card_layout.addWidget(title)
+        # PlanetFlow logo (SVG, 4:1 aspect → 512×128)
+        logo = _SvgWidget(_LOGO_PATH)
+        logo.setFixedSize(512, 128)
+        card_layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Subtitle
         self._subtitle_lbl = QLabel(S("welcome.subtitle"))
         self._subtitle_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._subtitle_lbl.setStyleSheet(
-            "color: #777; font-size: 12px; background: transparent; border: none;"
+            "color: #666; font-size: 11px; background: transparent; border: none;"
         )
         card_layout.addWidget(self._subtitle_lbl)
 

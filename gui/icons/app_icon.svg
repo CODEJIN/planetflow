@@ -1,34 +1,59 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- Dark background circle -->
+  <!-- Dark space background -->
   <circle cx="32" cy="32" r="32" fill="#1a1a2e"/>
 
+  <defs>
+    <radialGradient id="pg" cx="38%" cy="30%" r="66%">
+      <stop offset="0%"   stop-color="#f5e2a8"/>
+      <stop offset="18%"  stop-color="#d4943a"/>
+      <stop offset="48%"  stop-color="#9a5220"/>
+      <stop offset="82%"  stop-color="#6b3210"/>
+      <stop offset="100%" stop-color="#471c06"/>
+    </radialGradient>
+    <radialGradient id="ag" cx="50%" cy="50%" r="50%">
+      <stop offset="78%"  stop-color="#c07820" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#c07820" stop-opacity="0.28"/>
+    </radialGradient>
+    <linearGradient id="rg" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#c0a068" stop-opacity="0.05"/>
+      <stop offset="25%"  stop-color="#c0a068" stop-opacity="0.70"/>
+      <stop offset="75%"  stop-color="#c0a068" stop-opacity="0.70"/>
+      <stop offset="100%" stop-color="#c0a068" stop-opacity="0.05"/>
+    </linearGradient>
+    <clipPath id="pc"><circle cx="32" cy="32" r="21"/></clipPath>
+  </defs>
+
   <!-- Stars -->
-  <circle cx="10" cy="12" r="1.2" fill="white" opacity="0.8"/>
-  <circle cx="54" cy="8"  r="0.9" fill="white" opacity="0.6"/>
-  <circle cx="58" cy="22" r="1.1" fill="white" opacity="0.7"/>
-  <circle cx="6"  cy="44" r="0.8" fill="white" opacity="0.5"/>
-  <circle cx="14" cy="52" r="1.0" fill="white" opacity="0.6"/>
-  <circle cx="52" cy="50" r="1.3" fill="white" opacity="0.8"/>
-  <circle cx="48" cy="14" r="0.7" fill="white" opacity="0.5"/>
+  <circle cx="10" cy="12" r="1.2" fill="white" opacity="0.75"/>
+  <circle cx="54" cy="8"  r="0.9" fill="white" opacity="0.55"/>
+  <circle cx="58" cy="22" r="1.0" fill="white" opacity="0.65"/>
+  <circle cx="6"  cy="44" r="0.8" fill="white" opacity="0.50"/>
+  <circle cx="52" cy="50" r="1.2" fill="white" opacity="0.75"/>
+  <circle cx="48" cy="14" r="0.7" fill="white" opacity="0.50"/>
 
-  <!-- Saturn ring (tilted ellipse, clipped) -->
-  <ellipse cx="32" cy="32" rx="24" ry="7" fill="none"
-           stroke="#c8a96e" stroke-width="3.5" opacity="0.85"/>
+  <!-- Ring: back arc -->
+  <path d="M 1 32 A 31 6.5 0 0 0 63 32"
+        fill="none" stroke="url(#rg)" stroke-width="3" opacity="0.55"/>
 
-  <!-- Planet body -->
-  <circle cx="32" cy="32" r="13" fill="#e8c16a"/>
+  <!-- Planet -->
+  <circle cx="32" cy="32" r="21" fill="url(#pg)"/>
+  <g clip-path="url(#pc)">
+    <rect x="11" y="14" width="42" height="4"  fill="#7a4820" opacity="0.50"/>
+    <rect x="11" y="19" width="42" height="3"  fill="#c89048" opacity="0.44"/>
+    <rect x="11" y="23" width="42" height="5"  fill="#572c10" opacity="0.68"/>
+    <rect x="11" y="29" width="42" height="6"  fill="#e8c07a" opacity="0.37"/>
+    <rect x="11" y="35" width="42" height="5"  fill="#693414" opacity="0.72"/>
+    <rect x="11" y="41" width="42" height="3"  fill="#d49d48" opacity="0.44"/>
+    <rect x="11" y="45" width="42" height="4"  fill="#572c10" opacity="0.58"/>
+    <!-- Great Red Spot -->
+    <ellipse cx="25" cy="37" rx="5"  ry="2.8" fill="#8a200e" opacity="0.88"/>
+    <ellipse cx="25" cy="37" rx="3"  ry="1.6" fill="#a8281a" opacity="0.72"/>
+    <!-- Specular highlight -->
+    <ellipse cx="24" cy="22" rx="11" ry="7"   fill="white"   opacity="0.055"/>
+  </g>
+  <circle cx="32" cy="32" r="21" fill="url(#ag)"/>
 
-  <!-- Planet shading / bands -->
-  <ellipse cx="32" cy="28" rx="13" ry="4" fill="#d4a84a" opacity="0.5"/>
-  <ellipse cx="32" cy="36" rx="13" ry="3" fill="#c89640" opacity="0.4"/>
-
-  <!-- Limb darkening -->
-  <circle cx="32" cy="32" r="13" fill="none"
-          stroke="#8a5a10" stroke-width="1.5" opacity="0.3"/>
-
-  <!-- Ring occluded by planet — white cap to hide ring behind planet -->
-  <circle cx="32" cy="32" r="13" fill="#1a1a2e" opacity="0"/>
-  <!-- Front ring arc (in front of planet) -->
-  <path d="M 8 32 Q 20 39 32 39 Q 44 39 56 32" fill="none"
-        stroke="#c8a96e" stroke-width="3.5" opacity="0.85"/>
+  <!-- Ring: front arc -->
+  <path d="M 1 32 A 31 6.5 0 0 1 63 32"
+        fill="none" stroke="url(#rg)" stroke-width="3" opacity="0.72"/>
 </svg>

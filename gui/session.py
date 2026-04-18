@@ -32,8 +32,12 @@ _DEFAULTS: dict[str, Any] = {
     "lucky_top_percent":  0.25,
     "lucky_ap_size":      64,
     "lucky_n_iterations": 2,
+    "lucky_sigma_clip":       False,
+    "lucky_use_as4_ap_grid":  False,
+    "lucky_fourier_power":    1.0,
     "lucky_n_workers":    0,   # kept for migration compat; UI uses global_max_workers
     "global_max_workers": 0,   # 0=auto (all cores); Step 1 caps at 4, Step 2 uses all
+    "lucky_n_ser_parallel": 1, # SER-level parallelism; 0=auto (cpu//4)
     "save_mono_frames": False,
     # Which optional steps are enabled (01=PIPP off by default; 02=LuckyStack on)
     "enabled_steps":    {"01": False, "02": True,  "03": True, "04": True,

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,7 @@ class StepRunner(QThread):
     step_finished = Signal(str, bool, object)
     progress      = Signal(str, int, int)   # step_id, current, total
     all_done      = Signal()
+    cancelled     = Signal()               # emitted after all_done when aborted
 
     def __init__(
         self,
@@ -115,10 +117,12 @@ class StepRunner(QThread):
         self._steps   = steps
         self._results: dict[str, Any] = dict(prior_results or {})
         self._abort   = False
+        self._cancel_event = threading.Event()
 
     def abort(self) -> None:
-        """Request graceful stop after the current step finishes."""
+        """Request graceful stop; signals cancel_event for in-progress steps."""
         self._abort = True
+        self._cancel_event.set()
 
     # ── QThread.run ────────────────────────────────────────────────────────────
 
@@ -143,6 +147,8 @@ class StepRunner(QThread):
             sys.stdout = old_stdout
 
         self.all_done.emit()
+        if self._abort:
+            self.cancelled.emit()
 
     # ── internal ───────────────────────────────────────────────────────────────
 
@@ -168,7 +174,8 @@ class StepRunner(QThread):
             if step_id == "01":
                 r = mods["01"].run(cfg, progress_callback=pcb)
             elif step_id == "02":
-                r = mods["02"].run(cfg, progress_callback=pcb)
+                r = mods["02"].run(cfg, progress_callback=pcb,
+                                   cancel_event=self._cancel_event)
             elif step_id == "03":
                 r = mods["03"].run(cfg, progress_callback=pcb)
             elif step_id == "04":

@@ -106,7 +106,7 @@ def main() -> None:
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "AstroImaging.AstroPipeline"
+                "PlanetFlow.PlanetFlow"
             )
         except Exception:
             pass
@@ -119,7 +119,7 @@ def main() -> None:
     i18n.load(lang)
 
     app = AstroApp(sys.argv)
-    app.setApplicationName("AstroPipeline")
+    app.setApplicationName("PlanetFlow")
     app.setOrganizationName("AstroImaging")
     app.setPalette(_build_dark_palette())
     app.setStyle("Fusion")   # Fusion base style lets our dark palette take full effect

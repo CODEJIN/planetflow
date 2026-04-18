@@ -12,6 +12,8 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -43,9 +45,9 @@ _BTN_BROWSE = (
     "QPushButton:hover { background: #4a4a4a; color: #d4d4d4; }"
 )
 _SPINBOX_STYLE = (
-    "QSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
+    "QSpinBox, QDoubleSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
     " border-radius: 3px; padding: 3px 6px; }"
-    "QSpinBox:focus { border-color: #4da6ff; }"
+    "QSpinBox:focus, QDoubleSpinBox:focus { border-color: #4da6ff; }"
 )
 
 
@@ -179,6 +181,70 @@ class Step02Panel(BasePanel):
         iter_row.addStretch()
         fl.addRow(lbl_iter, iter_row)
 
+        # ── sigma_clip ────────────────────────────────────────────────────────
+        _chk_style = ("QCheckBox { color: #d4d4d4; }"
+                      "QCheckBox::indicator:checked"
+                      " { background: #4da6ff; border-color: #4da6ff; }"
+                      "QCheckBox::indicator:unchecked"
+                      " { background: #2a2a2a; border-color: #555; }")
+        self._sigma_clip = QCheckBox()
+        self._sigma_clip.setChecked(False)
+        self._sigma_clip.setStyleSheet(_chk_style)
+        lbl_sigma = QLabel(S("step02.sigma_clip"))
+        lbl_sigma.setToolTip(S("step02.sigma_clip.tooltip"))
+        self._sigma_clip.setToolTip(S("step02.sigma_clip.tooltip"))
+        sigma_row = QHBoxLayout()
+        sigma_row.setSpacing(4)
+        sigma_row.addWidget(self._sigma_clip)
+        sigma_row.addStretch()
+        fl.addRow(lbl_sigma, sigma_row)
+
+        # ── fourier_quality_power ─────────────────────────────────────────────
+        self._fourier_power = QDoubleSpinBox()
+        self._fourier_power.setStyleSheet(_SPINBOX_STYLE)
+        self._fourier_power.setRange(0.5, 3.0)
+        self._fourier_power.setSingleStep(0.5)
+        self._fourier_power.setDecimals(1)
+        self._fourier_power.setValue(1.0)
+        self._fourier_power.setFixedWidth(80)
+        lbl_fourier = QLabel(S("step02.fourier_quality_power"))
+        lbl_fourier.setToolTip(S("step02.fourier_quality_power.tooltip"))
+        self._fourier_power.setToolTip(S("step02.fourier_quality_power.tooltip"))
+        fourier_row = QHBoxLayout()
+        fourier_row.setSpacing(4)
+        fourier_row.addWidget(self._fourier_power)
+        fourier_row.addStretch()
+        fl.addRow(lbl_fourier, fourier_row)
+
+        # ── n_ser_parallel ────────────────────────────────────────────────────
+        self._n_ser_parallel = QSpinBox()
+        self._n_ser_parallel.setStyleSheet(_SPINBOX_STYLE)
+        self._n_ser_parallel.setRange(0, 32)
+        self._n_ser_parallel.setValue(1)
+        self._n_ser_parallel.setFixedWidth(80)
+        lbl_ser_par = QLabel(S("step02.n_ser_parallel"))
+        lbl_ser_par.setToolTip(S("step02.n_ser_parallel.tooltip"))
+        self._n_ser_parallel.setToolTip(S("step02.n_ser_parallel.tooltip"))
+        ser_par_row = QHBoxLayout()
+        ser_par_row.setSpacing(4)
+        ser_par_row.addWidget(self._n_ser_parallel)
+        ser_par_row.addStretch()
+        fl.addRow(lbl_ser_par, ser_par_row)
+
+        # ── use_as4_ap_grid ───────────────────────────────────────────────────
+        self._use_as4_ap_grid = QCheckBox()
+        self._use_as4_ap_grid.setChecked(False)
+        self._use_as4_ap_grid.setStyleSheet(_chk_style)
+        self._use_as4_ap_grid.toggled.connect(self._on_as4_grid_toggled)
+        lbl_as4 = QLabel(S("step02.use_as4_ap_grid"))
+        lbl_as4.setToolTip(S("step02.use_as4_ap_grid.tooltip"))
+        self._use_as4_ap_grid.setToolTip(S("step02.use_as4_ap_grid.tooltip"))
+        as4_row = QHBoxLayout()
+        as4_row.setSpacing(4)
+        as4_row.addWidget(self._use_as4_ap_grid)
+        as4_row.addStretch()
+        fl.addRow(lbl_as4, as4_row)
+
         left_layout.addWidget(form_widget)
         left_layout.addStretch()
         main_hlayout.addWidget(left_widget, 1)
@@ -192,11 +258,15 @@ class Step02Panel(BasePanel):
 
     def get_config_updates(self) -> dict[str, Any]:
         return {
-            "step02_ser_dir":     self._ser_dir.text().strip(),
-            "step02_output_dir":  self._output_step2.text().strip(),
-            "lucky_top_percent":  self._top_percent.value() / 100.0,
-            "lucky_ap_size":      self._ap_size.value(),
-            "lucky_n_iterations": self._n_iterations.value(),
+            "step02_ser_dir":         self._ser_dir.text().strip(),
+            "step02_output_dir":      self._output_step2.text().strip(),
+            "lucky_top_percent":      self._top_percent.value() / 100.0,
+            "lucky_ap_size":          self._ap_size.value(),
+            "lucky_n_iterations":     self._n_iterations.value(),
+            "lucky_sigma_clip":       self._sigma_clip.isChecked(),
+            "lucky_use_as4_ap_grid":  self._use_as4_ap_grid.isChecked(),
+            "lucky_fourier_power":    self._fourier_power.value(),
+            "lucky_n_ser_parallel":   self._n_ser_parallel.value(),
         }
 
     def load_session(self, data: dict[str, Any]) -> None:
@@ -228,11 +298,17 @@ class Step02Panel(BasePanel):
         self._top_percent.setValue(int(round(top_pct * 100)))
         self._ap_size.setValue(int(data.get("lucky_ap_size", 64)))
         self._n_iterations.setValue(int(data.get("lucky_n_iterations", 1)))
+        self._sigma_clip.setChecked(bool(data.get("lucky_sigma_clip", False)))
+        self._use_as4_ap_grid.setChecked(bool(data.get("lucky_use_as4_ap_grid", False)))
+        self._fourier_power.setValue(float(data.get("lucky_fourier_power", 1.0)))
+        self._n_ser_parallel.setValue(int(data.get("lucky_n_ser_parallel", 1)))
 
         # Sync preview
         if hasattr(self, "_preview"):
             self._preview.set_input_dir(ser_value or None)
-            self._preview.set_params(ap_size=int(data.get("lucky_ap_size", 64)))
+            _ap_sz = int(data.get("lucky_ap_size", 64))
+            self._preview.set_params(ap_size=_ap_sz, ap_step=_ap_sz // 2)
+            self._preview.set_use_as4_ap_grid(bool(data.get("lucky_use_as4_ap_grid", False)))
 
     def validate(self, config: dict, batch_mode: bool = False) -> list:
         from gui.validation import ValidationIssue, count_files
@@ -266,7 +342,12 @@ class Step02Panel(BasePanel):
     def _on_ap_params_changed(self) -> None:
         if not hasattr(self, "_preview") or not hasattr(self, "_ap_size"):
             return
-        self._preview.set_params(ap_size=self._ap_size.value())
+        _ap_sz = self._ap_size.value()
+        self._preview.set_params(ap_size=_ap_sz, ap_step=_ap_sz // 2)
+
+    def _on_as4_grid_toggled(self, checked: bool) -> None:
+        if hasattr(self, "_preview"):
+            self._preview.set_use_as4_ap_grid(checked)
 
     def _on_ser_editing_finished(self) -> None:
         """On focus-out / Enter: update output dir and emit dirs_changed."""

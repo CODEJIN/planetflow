@@ -1,4 +1,4 @@
-# Planetary Imaging Post-Processing Pipeline — User Guide
+# PlanetFlow — User Guide
 
 ---
 
@@ -103,6 +103,7 @@ Each step panel has the following buttons at the bottom:
 | Button | Description |
 |--------|-------------|
 | **▶ Run** | Executes only the current step. |
+| **⏹ Stop** | Appears while a step is running. Sends a cancellation signal to all active threads. The button changes to **"Stopping..."** immediately and then to **"Stopped ✓"** (green border) once all threads have truly halted. Resets automatically after 2.5 seconds. |
 | **Next Step →** | After running, automatically navigates to the next step panel. Not available on Step 10. |
 
 ---
@@ -177,9 +178,9 @@ The preview automatically refreshes when ROI size or minimum diameter changes.
 ## 5. Step 02 — Lucky Stacking
 
 ![Step 02 panel](images_en/step02.png)
-*Figure 5-1: Step 02 panel — Lucky Stacking configuration*
+*Figure 5-1: Step 02 panel — Lucky Stacking configuration (Left: controls, Right: AP grid preview)*
 
-Selects the best frames from SER files and stacks them into TIF files. Processing is fully automated within the pipeline — no external program required. When Step 01 is enabled, its SER output folder is automatically connected as input.
+Selects the best frames from SER files and stacks them into TIF files using **Fourier-domain quality-weighted stacking**. Processing is fully automated within the pipeline — no external program required. When Step 01 is enabled, its SER output folder is automatically connected as input.
 
 > **Optional Step**: If TIF stacks have already been created by an external tool, skip this step and specify the folder directly in Step 03.
 
@@ -190,12 +191,41 @@ Selects the best frames from SER files and stacks them into TIF files. Processin
 | **SER Input Folder** | (Required) | — | Folder containing the SER files to Lucky Stack. When Step 01 is enabled, the Step 01 output folder is connected automatically. Browse with the `...` button or type the path directly. |
 | **Output Folder** | Auto-set | — | Folder where Lucky Stacking result TIF files are saved. Automatically set to `step02_lucky_stack` relative to the SER input folder. |
 | **Top Frame % (%)** | 25 % | 5–100 % (step 5) | Only the top N% of frames by quality score are used for stacking. Lower value = stricter selection (sharper result, lower noise); higher value = more frames included (higher SNR). Use 10–25% on nights of good seeing, 50–75% on nights of poor seeing. |
-| **AP Size (px)** | 64 | 32–128 (step 32) | Alignment Point size. The size of the sub-region used as the alignment reference. **64px = default (recommended)**. 32px = finer alignment (slower), 128px = broader reference area (faster). |
-| **Iterations** | 2 | 1–3 | Number of Lucky Stacking iterations. Each iteration refines the AP alignment reference using the previous stack result. 2 iterations is recommended for a good quality/speed balance. |
+| **AP Size (px)** | 64 | 32–128 (step 32) | Alignment Point size. Size of the sub-region used for local shift estimation. **64px = default (recommended)**. 32px = finer local alignment (slower), 128px = broader reference area (faster). |
+| **Iterations** | 1 | 1–2 | Number of Lucky Stacking iterations. Each iteration refines the AP alignment reference using the previous stack result. **1** = default (fast); **2** = higher accuracy at ~2× processing time. |
+| **σ-clip** | Off | — | Enables a sigma-clipping post-pass after the main stack. Re-warps all selected frames to the final reference and discards pixels that deviate more than κσ from the per-pixel mean. Significantly reduces cosmic-ray hits and hot-pixel residuals at the cost of ~2× processing time. |
+| **Fourier Quality Power** | 1.0 | 0.5–3.0 (step 0.5) | Exponent applied to each frame's Fourier amplitude when computing per-frequency weights: `w = │FFT│^power`. **1.0** = linear weighting (default, recommended), **0.5** = gentler weighting (more frames contribute equally, closer to uniform average), **2.0+** = only the sharpest frames dominate. For most sessions, keep this at 1.0. |
+| **SER Parallel Workers** | 1 | 0–32 | Number of SER files to process simultaneously. **0** = auto (cpu_count ÷ 4). **1** = sequential (default, safe for low-RAM systems). When set above 1, each SER gets `n_workers ÷ n_ser_parallel` internal frame-level threads so total CPU usage stays bounded. **Warning: high values multiply RAM usage** (each SER loads its full frame buffer independently). |
+| **AS!4 AP Grid** | Off | — | When enabled, AP positions are generated using the same greedy Poisson-disc sampling (PDS) algorithm as AutoStakkert!4: three-tier radial density with denser coverage at the disc centre. When disabled, a uniform grid is used. The right-panel preview updates immediately when toggled. |
 
-### 5.2 Live Preview
+### 5.2 AP Grid Preview
 
-The right panel shows the first frame from the selected SER folder along with the AP (Alignment Point) grid overlay. The grid refreshes automatically when AP size is changed.
+The right panel shows the first frame from the selected SER folder overlaid with the AP (Alignment Point) grid.
+
+- **AP (uniform)**: uniform grid, spacing = AP size ÷ 2.
+- **AP (AS!4 PDS)**: three-layer Poisson-disc grid matching AutoStakkert!4 density — denser at the disc centre, sparser at the limb.
+
+The preview refreshes automatically when AP size changes or the AS!4 AP Grid checkbox is toggled.
+
+### 5.3 Stacking Algorithm
+
+Lucky Stacking uses **Fourier-domain quality-weighted stacking**:
+
+1. Each selected frame `n` is globally shift-aligned to the reference.
+2. Its 2-D FFT `F_n(f)` is computed.
+3. At each spatial frequency `f`, the frame contributes with weight `w_n(f) = │F_n(f)│^power`.
+4. The final image is reconstructed via IFFT of the weighted-average spectrum.
+
+Frames that are sharper (higher Fourier amplitude at high frequencies due to good seeing) automatically contribute more at those frequencies — a per-frequency lucky selection without hard spatial patch boundaries.
+
+**Parallelism model** (e.g., 32 cores, 4 SER parallel):
+```
+Total thread budget = n_workers (default: all cores)
+SER-level:  4 SER files processed simultaneously
+Frame-level: each SER uses n_workers ÷ 4 = 8 threads
+Peak active threads = 4 × 8 = 32 = n_workers
+```
+Both σ-clip warping and Fourier chunk accumulation use the same per-SER thread pool (sequentially within one SER, but overlapping across SER files).
 
 ---
 
@@ -388,7 +418,6 @@ Applies wavelet sharpening to TIF files output by Step 02 Lucky Stacking and con
 |-----------|---------|-------|-------------|
 | **Input Folder** | Auto-set | — | Automatically set to the Step 02 Lucky Stacking TIF folder. |
 | **Output Base Folder** | (Required) | — | Parent folder where all step results are saved. Input/output folders for Steps 07 and beyond are automatically configured under this directory. |
-| **Border Taper (px)** | 0 | 0–100 (step 5) | Applies a soft fade to image edges. 0 = disabled (recommended). |
 
 ### 10.2 Wavelet Levels (L1–L6)
 

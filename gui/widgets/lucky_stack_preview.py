@@ -108,13 +108,15 @@ class _Worker(QObject):
         ap_step: int,
         ap_min_brightness: float,
         ap_min_contrast: float,
+        use_as4_ap_grid: bool = False,
     ) -> None:
         super().__init__()
-        self._path      = ser_path
-        self._ap_size   = ap_size
-        self._ap_step   = ap_step
-        self._min_bright = ap_min_brightness
-        self._min_cont  = ap_min_contrast
+        self._path           = ser_path
+        self._ap_size        = ap_size
+        self._ap_step        = ap_step
+        self._min_bright     = ap_min_brightness
+        self._min_cont       = ap_min_contrast
+        self._use_as4_ap_grid = use_as4_ap_grid
 
     @Slot()
     def run(self) -> None:
@@ -122,7 +124,9 @@ class _Worker(QObject):
             from collections import Counter
             from pipeline.modules import ser_io
             from pipeline.modules.derotation import find_disk_center
-            from pipeline.modules.lucky_stack import generate_adaptive_ap_grid, LuckyStackConfig
+            from pipeline.modules.lucky_stack import (
+                generate_ap_grid, generate_as4_ap_grid, LuckyStackConfig,
+            )
 
             with ser_io.SERReader(self._path) as reader:
                 total   = int(reader.header["FrameCount"])
@@ -140,16 +144,22 @@ class _Worker(QObject):
             cx, cy, semi_a, semi_b, angle_deg = find_disk_center(gray)
             disk_radius = semi_a  # semi_major is the larger (equatorial) axis
 
-            # Generate adaptive AP grid (try14+: LoG energy + cross-size NMS)
-            # ap_size is the *minimum* AP size; actual sizes are auto-selected per location.
             cfg = LuckyStackConfig(
                 ap_size           = self._ap_size,
+                ap_step           = self._ap_step,
                 ap_min_brightness = self._min_bright,
                 ap_min_contrast   = self._min_cont,
-                use_adaptive_ap   = True,
             )
-            aps = generate_adaptive_ap_grid(cx, cy, disk_radius, gray, cfg)
-            # aps: List[Tuple[int, int, int]] → (ax, ay, ap_size)
+
+            if self._use_as4_ap_grid:
+                # AS!4 greedy PDS: returns (ax, ay, ap_size) triples already
+                aps = generate_as4_ap_grid(cx, cy, disk_radius, gray, cfg)
+                grid_label = "AP (AS!4 PDS)"
+            else:
+                # Uniform grid: returns (ax, ay) pairs → add ap_size
+                raw_aps = generate_ap_grid(cx, cy, disk_radius, gray, cfg)
+                aps = [(ax, ay, cfg.ap_size) for ax, ay in raw_aps]
+                grid_label = "AP (uniform)"
 
             # ── Draw overlay ──────────────────────────────────────────────────
             overlay, scale = _fit_to(disp.copy(), _PANEL_SIZE)
@@ -200,8 +210,8 @@ class _Worker(QObject):
             font  = cv2.FONT_HERSHEY_SIMPLEX
             fsc   = 0.38
             thick = 1
-            cv2.putText(overlay, "AP (adaptive)", (4, 14), font, fsc, (60, 240, 100), thick, cv2.LINE_AA)
-            cv2.putText(overlay, "Disk",          (4, 26), font, fsc, (0, 210, 255),  thick, cv2.LINE_AA)
+            cv2.putText(overlay, grid_label, (4, 14), font, fsc, (60, 240, 100), thick, cv2.LINE_AA)
+            cv2.putText(overlay, "Disk",     (4, 26), font, fsc, (0, 210, 255),  thick, cv2.LINE_AA)
 
             size_counts = Counter(sz for _, _, sz in aps)
             size_str = " ".join(f"{sz}px×{cnt}" for sz, cnt in sorted(size_counts.items()))
@@ -227,9 +237,10 @@ class LuckyStackPreviewWidget(QWidget):
         super().__init__(parent)
         self._input_dir: Optional[Path] = None
         self._ap_size:          int   = 64
-        self._ap_step:          int   = 16
+        self._ap_step:          int   = self._ap_size // 2
         self._ap_min_brightness: float = 0.196
         self._ap_min_contrast:   float = 0.01
+        self._use_as4_ap_grid:  bool  = False
 
         self._running = False
         self._pending = False
@@ -309,6 +320,11 @@ class LuckyStackPreviewWidget(QWidget):
         if changed:
             self.schedule_update()
 
+    def set_use_as4_ap_grid(self, enabled: bool) -> None:
+        if self._use_as4_ap_grid != enabled:
+            self._use_as4_ap_grid = enabled
+            self.schedule_update()
+
     def schedule_update(self, delay: int = 500) -> None:
         if self._input_dir is None:
             return
@@ -350,6 +366,7 @@ class LuckyStackPreviewWidget(QWidget):
             self._ap_step,
             self._ap_min_brightness,
             self._ap_min_contrast,
+            self._use_as4_ap_grid,
         )
         thread = QThread(self)
         worker.moveToThread(thread)

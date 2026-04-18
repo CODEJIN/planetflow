@@ -224,7 +224,7 @@ class Step05Panel(BasePanel):
         if hasattr(self, "_preview"):
             self._preview.set_params(
                 amounts=amounts, levels=6, power=1.0,
-                auto_params=True,
+                auto_params=False,
             )
 
     def output_paths(self) -> list[Path]:
@@ -250,6 +250,6 @@ class Step05Panel(BasePanel):
             amounts=[s.value() for s in self._wavelet_spins],
             levels=6,
             power=1.0,
-            auto_params=True,
+            auto_params=False,
         )
         self._preview.schedule_update()

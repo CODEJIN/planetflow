@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar,
                                 QPushButton, QScrollArea, QSizePolicy,
@@ -38,7 +38,8 @@ class BasePanel(QWidget):
       - ``output_paths()`` → list[Path] of output files (unused in UI now)
     """
 
-    run_requested = Signal(str)   # step_id
+    run_requested  = Signal(str)   # step_id
+    stop_requested = Signal()      # user clicked Stop
 
     STEP_ID    : str  = ""
     TITLE_KEY  : str  = ""
@@ -50,6 +51,7 @@ class BasePanel(QWidget):
         super().__init__(parent)
         self._status = "idle"
         self._run_start_time: float | None = None
+        self._cancelling = False
         self._build_skeleton()
         self.build_form()
 
@@ -120,6 +122,17 @@ class BasePanel(QWidget):
         )
         self._btn_run.clicked.connect(lambda: self.run_requested.emit(self.STEP_ID))
         btn_row.addWidget(self._btn_run)
+
+        self._btn_stop = QPushButton(S("btn.stop"))
+        self._btn_stop.setFixedHeight(32)
+        self._btn_stop.setStyleSheet(
+            "QPushButton { background: #6a2d2d; color: white; border-radius: 5px; font-weight: bold; }"
+            "QPushButton:hover { background: #9c4040; }"
+            "QPushButton:disabled { background: #3a2a2a; color: #777; }"
+        )
+        self._btn_stop.clicked.connect(self._on_stop_clicked)
+        self._btn_stop.hide()
+        btn_row.addWidget(self._btn_stop)
 
         self._btn_next = QPushButton(S("btn.next"))
         self._btn_next.setFixedHeight(32)
@@ -205,25 +218,62 @@ class BasePanel(QWidget):
         )
 
     def set_running(self, running: bool) -> None:
-        self._btn_run.setEnabled(not running)
-        self._btn_next.setEnabled(not running)
         if running:
+            self._cancelling = False
             self._run_start_time = time.monotonic()
-            # Start in indeterminate mode; set_progress() switches to determinate
+            self._btn_run.setEnabled(False)
+            self._btn_next.setEnabled(False)
+            self._btn_stop.setText(S("btn.stop"))
+            self._btn_stop.setEnabled(True)
+            self._btn_stop.setStyleSheet(
+                "QPushButton { background: #6a2d2d; color: white; border-radius: 5px; font-weight: bold; }"
+                "QPushButton:hover { background: #9c4040; }"
+                "QPushButton:disabled { background: #3a2a2a; color: #777; }"
+            )
+            self._btn_stop.show()
             self._progress_bar.setRange(0, 0)
             self._progress_bar.setTextVisible(False)
             self._progress_bar.setFixedHeight(4)
             self._progress_bar.show()
             self._time_label.setText("")
         else:
+            # Always clean up progress bar
             self._run_start_time = None
             self._progress_bar.hide()
             self._time_label.hide()
-            # Reset for next run
             self._progress_bar.setRange(0, 0)
             self._progress_bar.setValue(0)
             self._progress_bar.setTextVisible(False)
             self._progress_bar.setFixedHeight(4)
+            if not self._cancelling:
+                # Normal completion: re-enable controls, hide stop button
+                self._btn_run.setEnabled(True)
+                self._btn_next.setEnabled(True)
+                self._btn_stop.hide()
+
+    def _on_stop_clicked(self) -> None:
+        self._cancelling = True
+        self._btn_stop.setText(S("btn.stopping"))
+        self._btn_stop.setEnabled(False)
+        self.stop_requested.emit()
+
+    def on_cancelled(self) -> None:
+        """Called when the runner has truly finished all threads after a stop request."""
+        self._cancelling = False
+        self._btn_stop.setText(S("btn.stopped"))
+        self._btn_stop.setStyleSheet(
+            "QPushButton { background: #1a4a2d; color: #5cff88; border: 1px solid #5cff88;"
+            " border-radius: 5px; font-weight: bold; }"
+        )
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.show()
+        self.set_status("idle")
+        QTimer.singleShot(2500, self._reset_after_cancel)
+
+    def _reset_after_cancel(self) -> None:
+        self._btn_stop.hide()
+        self._btn_run.setEnabled(True)
+        self._btn_next.setEnabled(True)
 
     def set_progress(self, current: int, total: int) -> None:
         """Switch progress bar to determinate mode and update value."""

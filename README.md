@@ -1,9 +1,8 @@
 # PlanetFlow
-[![DOI](https://zenodo.org/badge/1205747035.svg)](https://doi.org/10.5281/zenodo.19556083)
 
 **Planetary imaging post-processing pipeline with GUI**
 
-AstroPipeline is a desktop application for processing planetary observation data captured as SER video files. It automates the full post-processing workflow — from raw frame sorting through wavelet sharpening, de-rotation stacking, multi-channel compositing, and animated GIF export — all from a single PySide6 GUI.
+PlanetFlow is a desktop application for processing planetary observation data captured as SER video files. It automates the full post-processing workflow — from raw frame sorting through wavelet sharpening, de-rotation stacking, multi-channel compositing, and animated GIF export — all from a single PySide6 GUI.
 
 Supports both **monochrome cameras** (filter wheel, multi-filter SER) and **color cameras** (single Bayer sensor, continuous capture).
 
@@ -23,9 +22,11 @@ Supports both **monochrome cameras** (filter wheel, multi-filter SER) and **colo
 - **Auto white balance + chromatic aberration correction** for color camera mode (Steps 06 & 08)
 - **Time-series animation**: sliding-window stacking with quality weighting + animated GIF export
 - **Summary contact sheet**: all windows × composites in a single image
-- **Live preview widgets**: wavelet (Steps 05 & 07), RGB composite (Step 06), levels (Step 10), color correction (Step 06 color)
+- **Live preview widgets**: wavelet (Steps 05 & 07), RGB composite (Step 06), levels (Step 10), color correction (Step 06 color), AP grid (Step 02)
 - **Bilingual UI**: Korean / English (switchable at runtime)
 - **Standalone executable**: ships as a single binary via PyInstaller (no Python required)
+- **Lucky Stacking (Step 02)**: Fourier-domain quality-weighted stacking, AS!4-compatible PDS AP grid, σ-clip post-pass, multi-level parallelism (SER-level + frame-level ThreadPool)
+- **Graceful pipeline stop**: Stop button on every step panel — confirms when all threads have truly halted
 
 ---
 
@@ -34,7 +35,7 @@ Supports both **monochrome cameras** (filter wheel, multi-filter SER) and **colo
 | Step | Name | Description |
 |------|------|-------------|
 | 01 | PIPP Preprocessing | Reject clipped/deformed frames, center-align, crop to square ROI (Optional) |
-| 02 | Lucky Stacking | Select best SER frames by quality score and stack to TIF (Optional) |
+| 02 | Lucky Stacking | Fourier-quality-weighted stacking with AS!4-compatible AP grid, σ-clip, and multi-core parallelism (Optional) |
 | 03 | Quality Assessment | Score each TIF; find optimal time windows across all filters |
 | 04 | De-rotation Stack | Spherical-warp de-rotation + quality-weighted mean stack; warp-scale auto-tune |
 | 05 | Wavelet Master | Final wavelet sharpening on de-rotated master stacks with limb feathering |
@@ -69,8 +70,8 @@ PySide6
 ## Installation
 
 ```bash
-git clone https://github.com/<your-username>/AstroPipeline.git
-cd AstroPipeline
+git clone https://github.com/<your-username>/PlanetFlow.git
+cd PlanetFlow
 pip install -r requirements.txt
 ```
 
@@ -102,14 +103,14 @@ No Python installation required on the target machine.
 
 ```bash
 ./build_linux.sh
-# Output: dist/AstroPipeline
+# Output: dist/PlanetFlow
 ```
 
 ### Windows
 
 ```bat
 build_windows.bat
-:: Output: dist\AstroPipeline.exe
+:: Output: dist\PlanetFlow.exe
 ```
 
 Both scripts use a shared PyInstaller spec (`astro_pipeline.spec`) that collects all scientific library dependencies automatically.

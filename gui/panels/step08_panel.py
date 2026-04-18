@@ -14,7 +14,6 @@ from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -208,7 +207,7 @@ class _Step08MonoWidget(QWidget):
         col_hdr_layout = QHBoxLayout(col_hdr)
         col_hdr_layout.setContentsMargins(0, 0, 0, 2)
         col_hdr_layout.setSpacing(4)
-        for txt, w in [("", 20), (S("spec.col.name"), 90), (S("spec.col.r_channel"), 84), (S("spec.col.g_channel"), 84), (S("spec.col.b_channel"), 84), (S("spec.col.l_channel"), 84), ("", 24)]:
+        for txt, w in [(S("spec.col.name"), 90), (S("spec.col.r_channel"), 84), (S("spec.col.g_channel"), 84), (S("spec.col.b_channel"), 84), (S("spec.col.l_channel"), 84), ("", 24)]:
             lbl = QLabel(txt)
             lbl.setFixedWidth(w)
             lbl.setStyleSheet("color: #666; font-size: 10px;")
@@ -224,7 +223,6 @@ class _Step08MonoWidget(QWidget):
         scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         root.addWidget(scroll)
 
-        self._spec_radio_group = QButtonGroup(self)
         for spec in _DEFAULT_SERIES_SPECS:
             self._add_spec_row(spec)
 
@@ -331,8 +329,6 @@ class _Step08MonoWidget(QWidget):
         saved_specs = data.get("series_composite_specs") or data.get("composite_specs")
         if saved_specs:
             for row in list(self._spec_rows):
-                if hasattr(self, "_spec_radio_group"):
-                    self._spec_radio_group.removeButton(row._radio)
                 row.setParent(None)
                 row.deleteLater()
             self._spec_rows.clear()
@@ -354,16 +350,12 @@ class _Step08MonoWidget(QWidget):
         row = _SpecRow(self._available_filters, spec, parent=self._spec_container)
         row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         row._btn_del.clicked.connect(lambda _, r=row: self._remove_spec_row(r))
+        row._radio.setVisible(False)
+        row._radio.setMaximumWidth(0)
         self._spec_rows.append(row)
         self._spec_vbox.addWidget(row)
-        if hasattr(self, "_spec_radio_group"):
-            self._spec_radio_group.addButton(row._radio)
-            if len(self._spec_rows) == 1:
-                row._radio.setChecked(True)
 
     def _remove_spec_row(self, row: _SpecRow) -> None:
-        if hasattr(self, "_spec_radio_group"):
-            self._spec_radio_group.removeButton(row._radio)
         if row in self._spec_rows:
             self._spec_rows.remove(row)
         row.setParent(None)

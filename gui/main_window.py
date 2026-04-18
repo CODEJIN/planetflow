@@ -939,6 +939,11 @@ class MainWindow(QMainWindow):
         runner.step_finished.connect(self._on_step_finished)
         runner.progress.connect(self._on_step_progress)
         runner.all_done.connect(self._on_all_done)
+        runner.cancelled.connect(self._on_cancelled)
+        # Connect stop buttons of all panels to this runner
+        for panel in self._step_panels.values():
+            if hasattr(panel, "stop_requested"):
+                panel.stop_requested.connect(runner.abort)
 
     def _on_step_progress(self, step_id: str, current: int, total: int) -> None:
         panel = self._step_panels.get(step_id)
@@ -1018,6 +1023,21 @@ class MainWindow(QMainWindow):
     def _on_all_done(self) -> None:
         self._btn_run_all.setEnabled(True)
         self._status_label.setText(S("app.status.ready"))
+        # Disconnect stop buttons from finished runner to avoid stale connections
+        if self._runner:
+            for panel in self._step_panels.values():
+                if hasattr(panel, "stop_requested"):
+                    try:
+                        panel.stop_requested.disconnect(self._runner.abort)
+                    except RuntimeError:
+                        pass
+
+    def _on_cancelled(self) -> None:
+        """Runner finished after a stop request — confirm to all visible panels."""
+        for panel in self._step_panels.values():
+            if hasattr(panel, "on_cancelled") and hasattr(panel, "_cancelling"):
+                if panel._cancelling:
+                    panel.on_cancelled()
 
     # ── Config builder ────────────────────────────────────────────────────────
 
@@ -1040,10 +1060,14 @@ class MainWindow(QMainWindow):
         _global_workers = int(d.get("global_max_workers", 0))
 
         lucky_stack = LuckyStackConfig(
-            top_percent  = float(d.get("lucky_top_percent", 0.25)),
-            ap_size      = int(d.get("lucky_ap_size", 64)),
-            n_iterations = int(d.get("lucky_n_iterations", 2)),
-            n_workers    = _global_workers,   # Step 2 uses all available cores
+            top_percent           = float(d.get("lucky_top_percent", 0.25)),
+            ap_size               = int(d.get("lucky_ap_size", 64)),
+            n_iterations          = int(d.get("lucky_n_iterations", 2)),
+            n_workers             = _global_workers,   # Step 2 uses all available cores
+            n_ser_parallel        = int(d.get("lucky_n_ser_parallel", 1)),
+            sigma_clip            = bool(d.get("lucky_sigma_clip", False)),
+            use_as4_ap_grid       = bool(d.get("lucky_use_as4_ap_grid", False)),
+            fourier_quality_power = float(d.get("lucky_fourier_power", 1.0)),
         )
 
         pipp = PippConfig(

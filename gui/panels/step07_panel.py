@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QSlider,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -25,11 +24,6 @@ _SPINBOX_STYLE = (
     "QDoubleSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
     " border-radius: 3px; padding: 3px 6px; }"
     "QDoubleSpinBox:focus { border-color: #4da6ff; }"
-)
-_INT_SPINBOX_STYLE = (
-    "QSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
-    " border-radius: 3px; padding: 3px 6px; }"
-    "QSpinBox:focus { border-color: #4da6ff; }"
 )
 _READONLY_STYLE = (
     "QLineEdit { background: #2a2a2a; color: #888; border: 1px solid #3a3a3a;"
@@ -178,24 +172,6 @@ class Step07Panel(BasePanel):
                     self._wavelet_spins.append(spin)
             wav_layout.addLayout(pair)
         left_layout.addWidget(wavelet_widget)
-
-        # Border taper
-        taper_widget = QWidget()
-        taper_widget.setStyleSheet("background: transparent;")
-        taper_form = QFormLayout(taper_widget)
-        taper_form.setContentsMargins(0, 4, 0, 0)
-        taper_form.setSpacing(8)
-        taper_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        self._border_taper = QSpinBox()
-        self._border_taper.setStyleSheet(_INT_SPINBOX_STYLE)
-        self._border_taper.setRange(0, 100)
-        self._border_taper.setSingleStep(5)
-        self._border_taper.setValue(0)
-        lbl_taper = QLabel(S("step07.border_taper"))
-        lbl_taper.setToolTip(S("step07.border_taper.tooltip"))
-        taper_form.addRow(lbl_taper, self._border_taper)
-        left_layout.addWidget(taper_widget)
         left_layout.addStretch()
 
         main_hlayout.addWidget(left_widget, 1)
@@ -213,7 +189,6 @@ class Step07Panel(BasePanel):
     def get_config_updates(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "preview_amounts": [s.value() for s in self._wavelet_spins],
-            "border_taper_px": self._border_taper.value(),
         }
         out_text = self._output_lbl.text().strip()
         if out_text:
@@ -236,7 +211,6 @@ class Step07Panel(BasePanel):
         amounts = data.get("preview_amounts", _WAVELET_DEFAULTS)
         for spin, val in zip(self._wavelet_spins, amounts):
             spin.setValue(float(val))
-        self._border_taper.setValue(int(data.get("border_taper_px", 0)))
 
         if hasattr(self, "_preview"):
             self._preview.set_params(amounts=amounts, levels=6, power=1.0)

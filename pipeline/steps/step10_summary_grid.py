@@ -75,6 +75,11 @@ def _get_font(size: int) -> ImageFont.ImageFont:
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        # Windows system fonts
+        "C:/Windows/Fonts/malgun.ttf",    # Malgun Gothic — Korean support
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/calibri.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
     ]
     for path in candidates:
         if Path(path).exists():
@@ -82,7 +87,10 @@ def _get_font(size: int) -> ImageFont.ImageFont:
                 return ImageFont.truetype(path, size)
             except Exception:
                 continue
-    return ImageFont.load_default()
+    try:
+        return ImageFont.load_default(size=size)  # Pillow >= 10
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def _text_size(
