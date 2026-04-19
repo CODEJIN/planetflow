@@ -189,7 +189,7 @@ class CompositeConfig:
         CompositeSpec("CH4-G-IR", R="CH4", G="G", B="IR"),
     ])
     align_channels: bool = True      # phase-correlation alignment between channels
-    max_shift_px: float = 5.0        # max allowed alignment shift; larger → ignored (0 = no clamp)
+    max_shift_px: float = 15.0       # max allowed alignment shift; larger → ignored (0 = no clamp)
     # Colour-channel stretch mode (applied to R, G, B before compositing):
     #   "joint"       – same lo/hi computed from all colour channels combined;
     #                   preserves natural colour ratios (recommended, matches GIMP)
@@ -230,7 +230,7 @@ class CompositeConfig:
     #   this fraction of the per-filter maximum are excluded from the stack.
     #   0.0 = accept all frames.
     stack_window_n: int = 3
-    stack_min_quality: float = 0.0
+    stack_min_quality: float = 0.05
 
     # Save per-filter monochrome frames alongside the composites (Step 8).
     # When True each filter's de-rotated grayscale image is saved as
@@ -245,7 +245,7 @@ class CompositeConfig:
 
 
 
-# ── Step 11: Summary contact sheet ────────────────────────────────────────────
+# ── Step 10: Summary contact sheet ────────────────────────────────────────────
 
 @dataclass
 class SummaryGridConfig:
@@ -270,13 +270,13 @@ class SummaryGridConfig:
     top_margin_px: int = 44       # top margin for title bar
     black_point: float = 0.04     # clip below this value (darkens background)
     white_point: float = 1.0      # clip above this value
-    gamma: float = 1.0            # gamma correction (1.0 = linear/no change)
+    gamma: float = 0.9            # gamma correction (1.0 = linear/no change)
     font_size: int = 20           # label font size in pixels
     title_font_size: int = 24     # title font size in pixels (0 = no title)
     time_format: str = "%H%M"     # strftime format for row labels (e.g. "1233")
 
 
-# ── Step 10: Animated GIF ─────────────────────────────────────────────────────
+# ── Step 09: Animated GIF ─────────────────────────────────────────────────────
 
 @dataclass
 class GifConfig:
@@ -350,7 +350,16 @@ class LuckyStackConfig:
     #                    no AS3 file is required. Strongly recommended for
     #                    poor-seeing data where global scorers fail to
     #                    discriminate frames (260415 analysis: CV 1.4%→4.4%).
-    score_metric: str = "local_gradient"
+    # "log_disk"       — Laplacian of Gaussian variance on planet disk.
+    #                    Matches AS!4 "lapl3" quality metric (LoG sigma=3).
+    #                    Spearman corr with AS!4 scores: 0.74 vs 0.006 (local_gradient).
+    #                    log_disk_sigma / log_disk_threshold 파라미터로 조정.
+    # try84 confirmed: log_disk visually better detail than try80 (local_gradient)
+    score_metric: str = "log_disk"
+
+    # LoG disk scoring 파라미터 (score_metric="log_disk" 시 사용)
+    log_disk_sigma: float = 3.0      # GaussianBlur sigma before Laplacian
+    log_disk_threshold: float = 0.25 # disk mask brightness threshold (normalized)
     # Sobel kernel size for local gradient quality scoring (score_frames_local).
     # ksize=3: standard, fastest. ksize=5 or 7: more noise-robust (wider kernel).
     # Matches AS!4 quality_gradient_noise_robust=3 when set to 5 or 7.
@@ -411,7 +420,7 @@ class LuckyStackConfig:
     # Sweep result: n_iterations=2 → ratio=1.056 vs AS!4 (31 s).
     #               n_iterations=3 → ratio=1.099 but slightly noisier (45 s).
     # 1 = single pass (fast); 2 = one refinement pass (recommended).
-    n_iterations: int = 2
+    n_iterations: int = 1
 
     # Parallelism: number of CPU workers for the frame stacking loop.
     # 0 = auto (all logical cores); 1 = single-threaded (no fork overhead).
@@ -495,6 +504,26 @@ class LuckyStackConfig:
     #   weight at that frequency. No spatial patch boundaries.
     use_fourier_quality: bool = True   # try69 BEST: 66.4% (was 46.7% with per_ap_selection)
     fourier_quality_power: float = 1.0
+
+    # ── try73: Fourier spectral SNR masking ───────────────────────────────────
+    # After weighted averaging, suppress frequencies where frames disagree.
+    # snr(f) = mean(|F_n(f)|) / std(|F_n(f)|).  mask = tanh(snr / threshold).
+    # threshold=1.0: SNR=1→76% pass, SNR=0.5→46% pass. Requires n_workers=1.
+    fourier_snr_mask: bool = False
+    fourier_snr_threshold: float = 1.0
+
+    # ── try74: Fourier high-frequency rolloff ────────────────────────────────
+    # Gaussian low-pass applied to output spectrum. sigma_f in normalized freq
+    # units (0=DC, 0.5=Nyquist). 0.0 = disabled.
+    # try80 confirmed best: sigma=0.20 (Noise%=1.0%, Detail%=11.6%, Pearson=0.9956)
+    fourier_rolloff_sigma: float = 0.20
+
+    # ── try75: Fourier noise floor subtraction ───────────────────────────────
+    # Estimate per-frequency noise floor from bottom-25% quality frames.
+    # Subtract before computing quality weights: max(|F| - floor, 0)^power.
+    # Prevents noisy frames from gaining weight at noise-dominated frequencies.
+    # Requires n_workers=1.
+    fourier_noise_floor: bool = False
 
     # ── try57: Patch blending (PSS style) ─────────────────────────────────────
     # When True, replaces the KR warp field + single cv2.remap with per-AP patch

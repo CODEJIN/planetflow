@@ -47,6 +47,12 @@ Raw SER Videos (from Firecapture)
          │
          ▼
 [Step 02] Lucky Stacking         ← SER → TIF stacking (Optional)
+         │    │
+         │    ├──→ [Step 07] Wavelet Preview       ← TIF → Sharpened PNG (Optional)
+         │    │
+         │    └──→ [Step 08] Time-Series Composite ← Step 02 TIF-based per-epoch compositing (Optional)
+         │              │
+         │              └──→ [Step 09] Animated GIF ← Rotation time-series animation (Optional)
          │
          ▼
 [Step 03] Quality Assessment     ← Optimal time window detection (Required)
@@ -59,24 +65,15 @@ Raw SER Videos (from Firecapture)
          │
          ▼
 [Step 06] RGB Composite (Master) ← Filter channel compositing (Required)
-         │    │
-         │    └──→ [Step 10] Summary Grid  (Optional)
          │
-         ▼
-[Step 07] Wavelet Preview        ← TIF → Sharpened PNG (Optional)
-         │
-         ▼
-[Step 08] Time-Series Composite  ← Step 07 PNG-based per-epoch compositing (Optional)
-         │
-         ▼
-[Step 09] Animated GIF           ← Rotation time-series animation (Optional)
+         └──→ [Step 10] Summary Grid  (Optional)
 ```
 
 ---
 
 ## 2. Main Window Layout
 
-![Main window overall layout](images_en/run_all.png)
+![welcome](./images_en/welcome.png)
 *Figure 2-1: Main window overall layout*
 
 ### 2.1 Left Sidebar
@@ -183,6 +180,9 @@ The preview automatically refreshes when ROI size or minimum diameter changes.
 Selects the best frames from SER files and stacks them into TIF files using **Fourier-domain quality-weighted stacking**. Processing is fully automated within the pipeline — no external program required. When Step 01 is enabled, its SER output folder is automatically connected as input.
 
 > **Optional Step**: If TIF stacks have already been created by an external tool, skip this step and specify the folder directly in Step 03.
+> Currently, the quality of the TIF extracted with AS!4 is superior to the internal lucky stacking method.
+![tif_with_as!4_base](./images/TIF_with_AS!4_base.png)
+![tif_with_step02_base](./images/TIF_Step02_base.png)
 
 ### 5.1 Parameters
 
@@ -281,8 +281,6 @@ Stacks frames within the optimal windows detected in Step 03, correcting for pla
 
 ### 7.2 Warp Scale Auto-Tune
 
-<!-- TODO: Insert Step 04 panel screenshot (auto-tune button highlighted) -->
-
 The **"▶ Auto-tune scale"** button inside the panel sweeps warp scale values and automatically finds the value that maximises stack sharpness (Laplacian variance), based on Step 03 data.
 
 - Only becomes active after Step 03 has been run.
@@ -318,13 +316,7 @@ Same structure as Step 07, but **stronger values can be safely used** since it's
 | **L5** | 0 | 0 | Not recommended |
 | **L6** | 0 | 0 | Not recommended |
 
-### 8.2 Limb Feather Factor (edge_feather_factor)
-
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| **Limb feather factor** | 2.0 | 0.0–8.0 (step 0.5) | Controls the width of the wavelet attenuation zone near the disc limb. Feather width at level L = 2^L × factor (px). **0.0** = no feathering (full sharpening to the limb, ringing risk), **2.0** = default (recommended), **8.0** = wide feather (some attenuation inside the disc). **Applies only to Step 05 master sharpening.** Step 08 time-series frame feathering is set independently in the Step 08 panel. |
-
-### 8.3 Live Preview
+### 8.2 Live Preview
 
 The right panel shows a live wavelet sharpening preview that refreshes automatically as you adjust the sliders.
 
@@ -408,9 +400,9 @@ In color camera mode, **automatic white balance (WB) + chromatic aberration (CA)
 ![Step 07 panel](images_en/step07.png)
 *Figure 10-1: Step 07 panel — Wavelet sharpening configuration*
 
-Applies wavelet sharpening to TIF files output by Step 02 Lucky Stacking and converts them to PNG format. These PNGs are used as source data for Step 08 time-series compositing.
+Applies wavelet sharpening to TIF files output by Step 02 Lucky Stacking and converts them to PNG format. Used for visual preview and inspection purposes.
 
-> **Optional Step**: Run this step when time-series compositing (Step 08) is needed.
+> **Optional Step**: Run this step when you want to visually inspect wavelet sharpening results before proceeding.
 
 ### 10.1 Parameters
 
@@ -438,20 +430,19 @@ Applies wavelet sharpening to TIF files output by Step 02 Lucky Stacking and con
 
 ## 11. Step 08 — Time-Series RGB Composite
 
-![Step 08 panel](images_en/step08.png)
-*Figure 11-1: Step 08 panel — Time-series composite settings*
-
-Uses **wavelet preview PNGs from Step 07** to create time-series RGB composite images at different epochs. Used for planetary rotation time-series analysis and GIF animation.
+Uses **Step 02 Lucky Stacking TIF files** to create time-series RGB composite images at different epochs. Applies sliding-window stacking and its own wavelet sharpening independently from Step 07. Used for planetary rotation time-series analysis and GIF animation.
 
 > **Optional Step**: Skip if time-series compositing is not needed.
 
-> **Important**: Step 08 uses its **own independent composite specs** — it does not re-use Step 06 settings. It composites directly from Step 07 PNGs, not from Step 06 output.
+> **Important**: Step 08 uses its **own independent composite specs** — it does not re-use Step 06 settings. It reads Step 02 TIF files directly and applies its own wavelet sharpening, independent of Step 07.
 
 The parameters shown differ depending on camera mode.
 
 ---
 
 ### 11.A Mono Camera Mode
+![Step 08 mono panel](images_en/step08_mono.png)
+*Figure 11-1: Step 08 mono panel — Time-series composite settings*
 
 #### 11.A.1 Parameters
 
@@ -471,7 +462,6 @@ Independent wavelet sharpening settings applied to each time-series frame. Separ
 | Level | Default | Description |
 |-------|---------|-------------|
 | L1–L6 | [200, 200, 200, 0, 0, 0] | Same structure as Step 05. Applied only to time-series frames. |
-| **Limb feather factor** | 2.0 | Set independently from Step 05's `edge_feather_factor`. |
 
 #### 11.A.3 Series Composite Specs (Independent from Step 06)
 
@@ -482,8 +472,8 @@ Default specs: RGB, IR-RGB, CH4-G-IR (same as Step 06 defaults)
 ---
 
 ### 11.B Color Camera Mode
-
-<!-- TODO: Insert Step 08 color mode panel screenshot -->
+![Step 08 color panel](images_en/step08_color.png)
+*Figure 11-2: Step 08 color panel — Time-series composite settings*
 
 In color camera mode, continuous COLOR channel frames are stacked using a sliding window.
 

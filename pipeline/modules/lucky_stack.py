@@ -183,6 +183,59 @@ def score_frames_local(
     return scores
 
 
+# ── 1c. LoG disk quality scoring (AS!4 "lapl3" 방식) ─────────────────────────
+
+def score_frames_log_disk(
+    reader: SERReader,
+    cfg: LuckyStackConfig,
+    score_step: int = 2,
+    progress_callback=None,
+) -> np.ndarray:
+    """Laplacian of Gaussian variance on planet disk — AS!4 'lapl3' 방식.
+
+    AS!4가 내부적으로 사용하는 Laplacian 품질 지표를 역공학:
+      1. 프레임 정규화 (float32 [0,1])
+      2. GaussianBlur(sigma=log_disk_sigma) 적용
+      3. Laplacian 계산
+      4. 디스크 마스크(brightness > log_disk_threshold) 내 variance 반환
+
+    score_correlation.py 분석 결과:
+      - Spearman(AS!4) = 0.74  vs  local_gradient = 0.006
+      - 최적 파라미터: sigma=3.0, threshold=0.25
+
+    Returns:
+        float32 array of length FrameCount; higher = sharper.
+    """
+    n_frames: int = reader.header["FrameCount"]
+    sigma: float = float(getattr(cfg, "log_disk_sigma", 3.0))
+    thr: float   = float(getattr(cfg, "log_disk_threshold", 0.25))
+
+    sampled_idx: List[int] = list(range(0, n_frames, score_step))
+    sampled_scores: List[float] = []
+
+    for i, idx in enumerate(sampled_idx):
+        raw = reader.get_frame(idx)
+        f = raw.astype(np.float32) / raw.max()
+        mask = f > thr
+        if mask.sum() < 50:
+            sampled_scores.append(0.0)
+        else:
+            blurred = cv2.GaussianBlur(f, (0, 0), sigma)
+            lap = cv2.Laplacian(blurred, cv2.CV_32F, ksize=3)
+            sampled_scores.append(float(lap[mask].var()))
+
+        if progress_callback is not None and i % 50 == 0:
+            progress_callback(idx, n_frames)
+
+    scores = np.interp(
+        np.arange(n_frames, dtype=np.float32),
+        np.array(sampled_idx, dtype=np.float32),
+        np.array(sampled_scores, dtype=np.float32),
+    ).astype(np.float32)
+
+    return scores
+
+
 # ── 2. Reference frame construction ───────────────────────────────────────────
 
 def build_reference_frame(
@@ -1161,6 +1214,9 @@ def _per_ap_independent_stack(
     _power  = float(cfg.quality_weight_power)
     _stab_thresh = int(getattr(cfg, "stabilization_planet_threshold", 0))
     _interp = getattr(cfg, "remap_interpolation", cv2.INTER_CUBIC)
+    _score_metric = str(getattr(cfg, "score_metric", "local_gradient"))
+    _log_sigma    = float(getattr(cfg, "log_disk_sigma", 3.0))
+    _log_thr      = float(getattr(cfg, "log_disk_threshold", 0.25))
 
     # ── Pass 1: global alignment + per-AP score matrix ────────────────────────
     global_shifts = np.zeros((n_sel, 2), dtype=np.float32)   # (dx_g, dy_g)
@@ -1211,9 +1267,22 @@ def _per_ap_independent_stack(
                 if ay - half < 0 or ay + half > H or ax - half < 0 or ax + half > W:
                     continue
                 patch = aligned[ay - half: ay + half, ax - half: ax + half]
-                gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=_ksize)
-                gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=_ksize)
-                score_matrix[i, j] = float((gx ** 2 + gy ** 2).max())
+                if _score_metric == "log_disk":
+                    pf = patch.astype(np.float32)
+                    pm = float(pf.max())
+                    if pm > 1e-9:
+                        pf /= pm
+                    mask_p = pf > _log_thr
+                    if mask_p.sum() < 5:
+                        score_matrix[i, j] = 0.0
+                    else:
+                        bl = cv2.GaussianBlur(pf, (0, 0), _log_sigma)
+                        lp = cv2.Laplacian(bl, cv2.CV_32F, ksize=3)
+                        score_matrix[i, j] = float(lp[mask_p].var())
+                else:
+                    gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=_ksize)
+                    gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=_ksize)
+                    score_matrix[i, j] = float((gx ** 2 + gy ** 2).max())
 
             if progress_callback and i % 100 == 0:
                 progress_callback(i, n_sel * 2)
@@ -1299,6 +1368,16 @@ def _per_ap_independent_stack(
     result = np.where(weight > 1e-12, accum / weight, 0.0).astype(np.float32)
     result = np.clip(result, 0.0, 1.0)
 
+    # Optional Fourier rolloff (low-pass noise suppression)
+    _rolloff_sig = float(getattr(cfg, "fourier_rolloff_sigma", 0.0))
+    if _rolloff_sig > 0.0:
+        F  = np.fft.fft2(result.astype(np.float64))
+        fy = np.fft.fftfreq(H)[:, None]
+        fx = np.fft.fftfreq(W)[None, :]
+        rolloff = np.exp(-0.5 * (np.sqrt(fy ** 2 + fx ** 2) / _rolloff_sig) ** 2)
+        result  = np.fft.ifft2(F * rolloff).real.astype(np.float32)
+        result  = np.clip(result, 0.0, 1.0)
+
     stats = {
         "n_stacked":            n_sel,
         "n_global_only_frames": 0,
@@ -1369,6 +1448,7 @@ def _fourier_quality_stack(
     cfg,
     progress_callback=None,
     cancel_event=None,
+    precomputed_noise_floor: "np.ndarray | None" = None,
 ) -> Tuple[np.ndarray, Dict]:
     """Fourier-domain quality-weighted stacking.
 
@@ -1391,14 +1471,40 @@ def _fourier_quality_stack(
     _use_score   = bool(getattr(cfg, "per_ap_selection", False))
     _score_power = float(getattr(cfg, "quality_weight_power", 1.0))
 
+    # ── Noise-reduction options (require n_workers=1) ──────────────────────
+    _snr_mask       = bool(getattr(cfg, "fourier_snr_mask", False))
+    _snr_thresh     = float(getattr(cfg, "fourier_snr_threshold", 1.0))
+    _rolloff_sig    = float(getattr(cfg, "fourier_rolloff_sigma", 0.0))
+    _noise_floor_en = bool(getattr(cfg, "fourier_noise_floor", False))
+
     n_workers   = int(getattr(cfg, "n_workers", 1))
     if n_workers <= 0:
         n_workers = _mp.cpu_count()
     n_ser = max(1, int(getattr(cfg, "n_ser_parallel", 1)))
     n_workers = max(1, n_workers // n_ser)
 
+    if n_workers > 1 and (_snr_mask or _rolloff_sig > 0.0 or _noise_floor_en):
+        print("  [Fourier] snr_mask/rolloff/noise_floor require n_workers=1 — disabling", flush=True)
+        _snr_mask = _noise_floor_en = False
+        _rolloff_sig = 0.0
+
+    # ── B: Rolloff mask (compute once) ────────────────────────────────────
+    _rolloff_mask: np.ndarray | None = None
+    if _rolloff_sig > 0.0:
+        fy = np.fft.fftfreq(H)[:, None]
+        fx = np.fft.fftfreq(W)[None, :]
+        _rolloff_mask = np.exp(-0.5 * ((np.sqrt(fy**2 + fx**2)) / _rolloff_sig) ** 2)
+
+    # ── C: Noise floor — use precomputed (from global bottom-25% frames) ──
+    _noise_floor: "np.ndarray | None" = precomputed_noise_floor if _noise_floor_en else None
+
     accum_F  = np.zeros((H, W), dtype=np.complex128)
     weight_F = np.zeros((H, W), dtype=np.float64)
+
+    # ── A: Extra accumulators for SNR mask ────────────────────────────────
+    if _snr_mask:
+        _sum_abs_F    = np.zeros((H, W), dtype=np.float64)
+        _sum_abs_F_sq = np.zeros((H, W), dtype=np.float64)
 
     # Closure captures all read-only data — no global state needed.
     def _fourier_chunk(chunk_indices: List[int]) -> Tuple[np.ndarray, np.ndarray]:
@@ -1442,17 +1548,40 @@ def _fourier_quality_stack(
                 dx_g, dy_g = subpixel_align(reference, frame)
             aligned = apply_shift(frame, dx_g, dy_g)
             F_n = np.fft.fft2(aligned.astype(np.float64))
+            abs_F = np.abs(F_n)
+
+            # C: subtract noise floor before weighting
+            abs_F_eff = np.maximum(abs_F - _noise_floor, 0.0) if _noise_floor is not None else abs_F
+
             if _use_score:
                 q_scalar = max(float(scores[int(selected_indices[i])]) ** _score_power, 1e-9)
-                w_n = q_scalar * np.abs(F_n) ** power
+                w_n = q_scalar * abs_F_eff ** power
             else:
-                w_n = np.abs(F_n) ** power
+                w_n = abs_F_eff ** power
             accum_F  += w_n * F_n
             weight_F += w_n
+
+            # A: accumulate for SNR mask
+            if _snr_mask:
+                _sum_abs_F    += abs_F
+                _sum_abs_F_sq += abs_F ** 2
+
             if progress_callback and i % 100 == 0:
                 progress_callback(i, n_sel)
 
     output_F = np.where(weight_F > 1e-12, accum_F / weight_F, 0.0)
+
+    # ── A: Apply spectral SNR mask ─────────────────────────────────────────
+    if _snr_mask and n_workers == 1:
+        _mean_abs = _sum_abs_F / n_sel
+        _var_abs  = np.maximum(_sum_abs_F_sq / n_sel - _mean_abs ** 2, 0.0)
+        _snr      = _mean_abs / (np.sqrt(_var_abs) + 1e-9)
+        output_F  = output_F * np.tanh(_snr / _snr_thresh)
+
+    # ── B: Apply rolloff mask ─────────────────────────────────────────────
+    if _rolloff_mask is not None:
+        output_F = output_F * _rolloff_mask
+
     result = np.fft.ifft2(output_F).real.astype(np.float32)
     result = np.clip(result, 0.0, 1.0)
 
@@ -1493,6 +1622,9 @@ def _per_ap_pass1_worker(chunk_indices: List[int]) -> Tuple[np.ndarray, np.ndarr
     n_ap   = len(ap_positions)
     _ksize = int(getattr(cfg, "quality_gradient_ksize", 3))
     _stab  = int(getattr(cfg, "stabilization_planet_threshold", 0))
+    _score_metric = str(getattr(cfg, "score_metric", "local_gradient"))
+    _log_sigma    = float(getattr(cfg, "log_disk_sigma", 3.0))
+    _log_thr      = float(getattr(cfg, "log_disk_threshold", 0.25))
 
     shifts_chunk = np.zeros((len(chunk_indices), 2), dtype=np.float32)
     scores_chunk = np.zeros((len(chunk_indices), n_ap), dtype=np.float32)
@@ -1511,9 +1643,22 @@ def _per_ap_pass1_worker(chunk_indices: List[int]) -> Tuple[np.ndarray, np.ndarr
             if ay - half < 0 or ay + half > H or ax - half < 0 or ax + half > W:
                 continue
             patch = aligned[ay - half: ay + half, ax - half: ax + half]
-            gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=_ksize)
-            gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=_ksize)
-            scores_chunk[li, j] = float((gx ** 2 + gy ** 2).max())
+            if _score_metric == "log_disk":
+                pf = patch.astype(np.float32)
+                pm = float(pf.max())
+                if pm > 1e-9:
+                    pf /= pm
+                mask_p = pf > _log_thr
+                if mask_p.sum() < 5:
+                    scores_chunk[li, j] = 0.0
+                else:
+                    bl = cv2.GaussianBlur(pf, (0, 0), _log_sigma)
+                    lp = cv2.Laplacian(bl, cv2.CV_32F, ksize=3)
+                    scores_chunk[li, j] = float(lp[mask_p].var())
+            else:
+                gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=_ksize)
+                gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=_ksize)
+                scores_chunk[li, j] = float((gx ** 2 + gy ** 2).max())
 
     return shifts_chunk, scores_chunk
 
@@ -1746,6 +1891,7 @@ def apply_warp_and_stack(
     n_workers: int = 1,
     progress_callback=None,
     cancel_event=None,
+    precomputed_noise_floor: "np.ndarray | None" = None,
 ) -> Tuple[np.ndarray, Dict]:
     """Warp and accumulate all selected frames into a quality-weighted stack.
 
@@ -1890,6 +2036,7 @@ def apply_warp_and_stack(
                 disk_cx, disk_cy, disk_radius, ap_positions, cfg,
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
+                precomputed_noise_floor=precomputed_noise_floor,
             )
 
         _use_cog     = bool(getattr(cfg, "cog_align", False))
@@ -2161,7 +2308,19 @@ def lucky_stack_ser(
             _score_metric == "local_gradient"
             and preloaded_ap_positions is not None
         )
-        if _use_local_scoring:
+        if _score_metric == "log_disk":
+            print("  [1/5] LoG disk scoring (AS!4 lapl3 방식)…", end="\r", flush=True)
+            scores = score_frames_log_disk(
+                reader, cfg, score_step=2, progress_callback=_score_prog,
+            )
+            t1 = time.perf_counter()
+            _pu(_SCORE_END)
+            print(
+                f"  [1/5] LoG-disk scored {n_frames} frames  "
+                f"CV={scores.std()/max(scores.mean(),1e-9)*100:.1f}%  ({t1-t0:.1f}s)",
+                flush=True,
+            )
+        elif _use_local_scoring:
             print("  [1/5] Local gradient scoring (AP patches)…", end="\r", flush=True)
             scores = score_frames_local(
                 reader, preloaded_ap_positions, cfg,
@@ -2291,6 +2450,32 @@ def lucky_stack_ser(
             flush=True,
         )
 
+        # ── Phase 3.6: Fourier noise floor pre-pass (global bottom-25%) ──────
+        # Compute mean FFT amplitude from the lowest-quality frames globally.
+        # Uses frames NOT in selected_indices to avoid signal contamination.
+        _precomputed_noise_floor: Optional[np.ndarray] = None
+        if bool(getattr(cfg, "fourier_noise_floor", False)) and bool(getattr(cfg, "use_fourier_quality", False)):
+            _stab_t = int(getattr(cfg, "stabilization_planet_threshold", 0))
+            _noise_sorted_asc = np.argsort(scores)                # ascending quality (worst first)
+            _n_noise = max(1, n_frames // 4)                      # bottom 25% of ALL frames
+            # Exclude frames already in selected_indices to use truly bad frames
+            _sel_set = set(selected_indices.tolist())
+            _noise_cands = [int(i) for i in _noise_sorted_asc if i not in _sel_set]
+            _n_noise = min(_n_noise, len(_noise_cands))
+            if _n_noise > 0:
+                _noise_indices = _noise_cands[:_n_noise]
+                H_img, W_img = reference.shape[:2]
+                _nf_sum = np.zeros((H_img, W_img), dtype=np.float64)
+                print(f"  [3.6] Noise floor: loading {_n_noise} bottom frames…", end="\r", flush=True)
+                for _ni in _noise_indices:
+                    _fr = reader.get_frame(int(_ni)).astype(np.float32) / 255.0
+                    _dx, _dy = limb_center_align(disk_cx, disk_cy, _fr, fixed_threshold=_stab_t)
+                    if abs(_dx) > disk_radius * 0.5 or abs(_dy) > disk_radius * 0.5:
+                        _dx, _dy = subpixel_align(reference, _fr)
+                    _nf_sum += np.abs(np.fft.fft2(apply_shift(_fr, _dx, _dy).astype(np.float64)))
+                _precomputed_noise_floor = _nf_sum / _n_noise
+                print(f"  [3.6] Noise floor computed from {_n_noise} global-bottom frames", flush=True)
+
         stacked: Optional[np.ndarray] = None
         stats: Dict = {}
         t_stack_total = 0.0
@@ -2390,6 +2575,7 @@ def lucky_stack_ser(
                 n_workers=n_workers_use,
                 progress_callback=_prog,
                 cancel_event=cancel_event,
+                precomputed_noise_floor=_precomputed_noise_floor,
             )
             t4 = time.perf_counter()
             t_stack_total += t4 - t3
