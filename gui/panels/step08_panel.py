@@ -191,6 +191,16 @@ class _Step08MonoWidget(QWidget):
         lbl_minq.setToolTip(S("step08.stack_min_quality.tooltip"))
         opt_fl.addRow(lbl_minq, self._stack_min_quality)
 
+        # Satellite composite (multi-rate de-rotation) — independent from step04
+        self._satellite_composite = QCheckBox()
+        self._satellite_composite.setChecked(False)
+        self._satellite_composite.setStyleSheet(_CHK_STYLE)
+        self._satellite_composite.setToolTip(S("step08.satellite_composite.tooltip"))
+        lbl_sat = QLabel(S("step08.satellite_composite"))
+        lbl_sat.setToolTip(S("step08.satellite_composite.tooltip"))
+        from gui.panels.bsp_status import BspStatusRow
+        opt_fl.addRow(lbl_sat, BspStatusRow(self._satellite_composite))
+
         self._save_mono_frames = QCheckBox()
         self._save_mono_frames.setChecked(False)
         self._save_mono_frames.setToolTip(S("step08.save_mono_frames.tooltip"))
@@ -276,17 +286,18 @@ class _Step08MonoWidget(QWidget):
     def get_config_updates(self) -> dict[str, Any]:
         series_specs = [r.to_dict() for r in self._spec_rows if r.to_dict()["name"]]
         return {
-            "global_filter_normalize":      self._global_normalize.isChecked(),
-            "series_scale":                 self._series_scale.value(),
-            "stack_window_n":               self._stack_window_n.value(),
-            "series_cycle_seconds":         self._series_cycle_seconds.value(),
-            "stack_min_quality":            self._stack_min_quality.value(),
-            "save_mono_frames":             self._save_mono_frames.isChecked(),
-            "series_amounts":               [s.value() for s in self._series_wavelet_spins],
-            "series_denoise_amounts":       [s.value() for s in self._series_denoise_spins],
-            "series_composite_specs":       series_specs,
-            "series_stretch_enabled":       self._chk_stretch.isChecked(),
-            "series_saturation_boost":      self._chk_saturation.isChecked(),
+            "global_filter_normalize":        self._global_normalize.isChecked(),
+            "series_satellite_composite_enabled": self._satellite_composite.isChecked(),
+            "series_scale":                   self._series_scale.value(),
+            "stack_window_n":                 self._stack_window_n.value(),
+            "series_cycle_seconds":           self._series_cycle_seconds.value(),
+            "stack_min_quality":              self._stack_min_quality.value(),
+            "save_mono_frames":               self._save_mono_frames.isChecked(),
+            "series_amounts":                 [s.value() for s in self._series_wavelet_spins],
+            "series_denoise_amounts":         [s.value() for s in self._series_denoise_spins],
+            "series_composite_specs":         series_specs,
+            "series_stretch_enabled":         self._chk_stretch.isChecked(),
+            "series_saturation_boost":        self._chk_saturation.isChecked(),
         }
 
     def validate(self, config: dict, batch_mode: bool = False) -> list:
@@ -331,6 +342,9 @@ class _Step08MonoWidget(QWidget):
             self._output_lbl.setText(str(p / "step08_series"))
             self._output_dir = p
         self._global_normalize.setChecked(bool(data.get("global_filter_normalize", True)))
+        self._satellite_composite.setChecked(
+            bool(data.get("series_satellite_composite_enabled", False))
+        )
         self._chk_stretch.setChecked(bool(data.get("series_stretch_enabled", False)))
         self._chk_saturation.setChecked(bool(data.get("series_saturation_boost", True)))
         self._series_scale.setValue(float(data.get("series_scale", 1.00)))
@@ -418,6 +432,8 @@ class _Step08ColorWidget(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        from gui.panels.bsp_status import BspStatusRow
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
@@ -444,6 +460,11 @@ class _Step08ColorWidget(QWidget):
         lbl_out.setToolTip(S("step08.output_dir.tooltip"))
         fl.addRow(lbl_out, self._output_lbl)
 
+        # Prevent folder_widget from expanding vertically when extra height is available
+        # (QStackedWidget sizes to the tallest child; fixed policy keeps folder compact)
+        from PySide6.QtWidgets import QSizePolicy as _QSP
+        folder_widget.setSizePolicy(_QSP.Policy.Preferred, _QSP.Policy.Fixed)
+
         root.addWidget(folder_widget)
 
         # ── Options ───────────────────────────────────────────────────────────
@@ -453,6 +474,33 @@ class _Step08ColorWidget(QWidget):
         opt_fl.setSpacing(10)
         opt_fl.setContentsMargins(0, 0, 0, 0)
         opt_fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        _CHK_STYLE = (
+            "QCheckBox { color: #d4d4d4; font-size: 12px; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #555;"
+            " border-radius: 3px; background: #3c3c3c; }"
+            "QCheckBox::indicator:checked { background: #4da6ff; border-color: #4da6ff; }"
+        )
+        _chk_row_w = QWidget()
+        _chk_row_w.setStyleSheet("background: transparent;")
+        _chk_row = QHBoxLayout(_chk_row_w)
+        _chk_row.setContentsMargins(0, 0, 0, 0)
+        _chk_row.setSpacing(16)
+        self._chk_global_norm = QCheckBox(S("step08.global_normalize_color"))
+        self._chk_global_norm.setStyleSheet(_CHK_STYLE)
+        self._chk_global_norm.setToolTip(S("step08.global_normalize_color.tooltip"))
+        self._chk_global_norm.setChecked(True)
+        _chk_row.addWidget(self._chk_global_norm)
+        self._chk_stretch = QCheckBox(S("step08.stretch_enabled"))
+        self._chk_stretch.setStyleSheet(_CHK_STYLE)
+        self._chk_stretch.setChecked(False)
+        _chk_row.addWidget(self._chk_stretch)
+        self._chk_saturation = QCheckBox(S("step08.saturation_boost"))
+        self._chk_saturation.setStyleSheet(_CHK_STYLE)
+        self._chk_saturation.setChecked(True)
+        _chk_row.addWidget(self._chk_saturation)
+        _chk_row.addStretch()
+        opt_fl.addRow(QLabel(""), _chk_row_w)
 
         self._series_scale = QDoubleSpinBox()
         self._series_scale.setStyleSheet(_DBLSPIN_STYLE)
@@ -496,32 +544,13 @@ class _Step08ColorWidget(QWidget):
         lbl_minq.setToolTip(S("step08.stack_min_quality.tooltip"))
         opt_fl.addRow(lbl_minq, self._stack_min_quality)
 
-        _CHK_STYLE = (
-            "QCheckBox { color: #d4d4d4; font-size: 12px; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #555;"
-            " border-radius: 3px; background: #3c3c3c; }"
-            "QCheckBox::indicator:checked { background: #4da6ff; border-color: #4da6ff; }"
-        )
-        _chk_row_w = QWidget()
-        _chk_row_w.setStyleSheet("background: transparent;")
-        _chk_row = QHBoxLayout(_chk_row_w)
-        _chk_row.setContentsMargins(0, 0, 0, 0)
-        _chk_row.setSpacing(16)
-        self._chk_global_norm = QCheckBox(S("step08.global_normalize_color"))
-        self._chk_global_norm.setStyleSheet(_CHK_STYLE)
-        self._chk_global_norm.setToolTip(S("step08.global_normalize_color.tooltip"))
-        self._chk_global_norm.setChecked(True)
-        _chk_row.addWidget(self._chk_global_norm)
-        self._chk_stretch = QCheckBox(S("step08.stretch_enabled"))
-        self._chk_stretch.setStyleSheet(_CHK_STYLE)
-        self._chk_stretch.setChecked(False)
-        _chk_row.addWidget(self._chk_stretch)
-        self._chk_saturation = QCheckBox(S("step08.saturation_boost"))
-        self._chk_saturation.setStyleSheet(_CHK_STYLE)
-        self._chk_saturation.setChecked(True)
-        _chk_row.addWidget(self._chk_saturation)
-        _chk_row.addStretch()
-        opt_fl.addRow(QLabel(""), _chk_row_w)
+        self._satellite_composite = QCheckBox()
+        self._satellite_composite.setChecked(False)
+        self._satellite_composite.setStyleSheet(_CHK_STYLE)
+        self._satellite_composite.setToolTip(S("step08.satellite_composite.tooltip"))
+        lbl_sat = QLabel(S("step08.satellite_composite"))
+        lbl_sat.setToolTip(S("step08.satellite_composite.tooltip"))
+        opt_fl.addRow(lbl_sat, BspStatusRow(self._satellite_composite))
 
         root.addWidget(opt_widget)
 
@@ -550,18 +579,20 @@ class _Step08ColorWidget(QWidget):
             self._series_denoise_spins.append(dn_spin)
 
         root.addWidget(wav_section)
+        root.addStretch()
 
     def get_config_updates(self) -> dict[str, Any]:
         return {
-            "series_scale":                  self._series_scale.value(),
-            "series_cycle_seconds":          self._series_cycle_seconds.value(),
-            "stack_window_n":                self._stack_window_n.value(),
-            "stack_min_quality":             self._stack_min_quality.value(),
-            "series_amounts":                [s.value() for s in self._series_wavelet_spins],
-            "series_denoise_amounts":        [s.value() for s in self._series_denoise_spins],
-            "series_global_normalize_color": self._chk_global_norm.isChecked(),
-            "series_stretch_enabled":        self._chk_stretch.isChecked(),
-            "series_saturation_boost":       self._chk_saturation.isChecked(),
+            "series_scale":                       self._series_scale.value(),
+            "series_cycle_seconds":               self._series_cycle_seconds.value(),
+            "stack_window_n":                     self._stack_window_n.value(),
+            "stack_min_quality":                  self._stack_min_quality.value(),
+            "series_amounts":                     [s.value() for s in self._series_wavelet_spins],
+            "series_denoise_amounts":             [s.value() for s in self._series_denoise_spins],
+            "series_global_normalize_color":      self._chk_global_norm.isChecked(),
+            "series_stretch_enabled":             self._chk_stretch.isChecked(),
+            "series_saturation_boost":            self._chk_saturation.isChecked(),
+            "series_satellite_composite_enabled": self._satellite_composite.isChecked(),
         }
 
     def load_session(self, data: dict[str, Any]) -> None:
@@ -580,6 +611,9 @@ class _Step08ColorWidget(QWidget):
         self._chk_global_norm.setChecked(bool(data.get("series_global_normalize_color", True)))
         self._chk_stretch.setChecked(bool(data.get("series_stretch_enabled", False)))
         self._chk_saturation.setChecked(bool(data.get("series_saturation_boost", True)))
+        self._satellite_composite.setChecked(
+            bool(data.get("series_satellite_composite_enabled", False))
+        )
         amounts = data.get("series_amounts", _SERIES_WAVELET_DEFAULTS)
         for spin, val in zip(self._series_wavelet_spins, amounts):
             spin.setValue(float(val))

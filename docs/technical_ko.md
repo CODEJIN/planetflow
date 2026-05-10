@@ -379,6 +379,73 @@ map_y  = y − drift × sin(pole_pa_rad)
 2. **사용자 캐시**: `~/.astropipe/horizons_cache.json` — 이전 온라인 조회 결과.
 3. **라이브 Horizons API**: 번들 범위 밖 또는 Custom 행성.
 
+### 위성/그림자 합성 (exp9 방법)
+
+**소스**: `pipeline/steps/step04_derotate_stack.py` → `_apply_satellite_composite()`
+
+**Satellite Composite**를 활성화하면 유로파와 그 그림자를 exp9 다중속도 가우시안 블렌드 방식으로 각 필터 de-rotated TIF에 합성합니다.
+
+```
+각 필터 TIF에 대해:
+    이 필터의 디스크 중심 검출 (disk_cx, disk_cy, disk_sr)
+        │
+        ▼
+    t_center에서의 정규 위성/그림자 위치 조회 (Horizons + Skyfield BSP)
+    → 이 필터 고유의 디스크 좌표계 사용
+        │
+        ▼
+    윈도우 내 전 프레임의 시각별 위성 위치 조회
+        │
+        ▼
+    원본 프레임을 정규 기준 위치에 위성이 정렬되도록 이동-스태킹
+        │
+        ▼
+    위성 스택을 행성 스택에 가우시안 블렌딩
+        │
+        ▼
+    결과를 필터 TIF에 덮어씀
+```
+
+#### 필터별 디스크 좌표계
+
+정규 위성 기준 위치를 **각 필터 고유의 디스크 중심**으로 조회하는 것이 핵심입니다.
+
+De-rotation 후 필터마다 TIF의 디스크 중심이 약간 다른 픽셀 위치에 있을 수 있습니다(SNR이 다른 필터들 간의 독립적 Otsu 임계값 적용으로 인한 서브픽셀 편차). Step 06의 `align_channels()`는 비기준 채널을 기준 채널(IR)의 디스크에 맞춰 이동시킵니다. 이때 모든 필터 TIF에서 위성이 동일한 **절대 픽셀 좌표**에 있다면, 이 디스크 정렬 이동으로 인해 채널마다 위성이 다른 위치에 놓이게 됩니다. 그 결과 IR-RGB와 CH4-G-IR 합성에서 위성 위치가 달라집니다.
+
+각 필터 고유의 디스크 좌표계에서 위성 위치를 계산하면 **디스크 기준 상대 오프셋**이 모든 필터에서 동일해집니다. Step 06의 디스크 정렬 이동이 디스크와 위성을 동일하게 이동시키므로, 최종 합성에서 위성이 모든 채널에서 정확히 같은 위치에 나타납니다.
+
+#### 가우시안 블렌드 공식
+
+```
+alpha(x,y) = exp(−((x−sx)² + (y−sy)²) / (2σ²))
+result      = (1−alpha) × planet_stack + alpha × satellite_stack
+
+sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
+```
+
+| 기호 | 설명 |
+|---|---|
+| `sx, sy` | 윈도우 `center_time`에서의 정규 위성 위치 (이 필터의 좌표계) |
+| `max_motion_px` | 윈도우 내 전 프레임에 걸친 위성의 정규 위치 대비 최대 이동량 |
+| `apparent_radius_px` | Skyfield BSP 역행성 보정(LTT) 에페메리스로 계산한 위성 시반경(픽셀) |
+| `coverage_scale` | 2.5 — exp9 검증: 가장 먼 스트릭 끝점에서 α ≈ 0.92 |
+
+#### Skyfield BSP를 이용한 그림자 검출
+
+그림자 위치 계산에는 JPL NAIF BSP 커널 파일 2종이 필요합니다:
+
+| 파일 | 크기 | URL |
+|---|---|---|
+| `de440s.bsp` | 32 MB | `naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/` |
+| `jup365.bsp` | 1.1 GB | `naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/satellites/` |
+
+저장 경로 우선순위: `PLANETFLOW_SKYFIELD_DIR` 환경변수 → `~/.planetflow/skyfield/` → `/tmp/skyfield/`. 파일이 없지만 인터넷에 연결된 경우 첫 실행 시 `urllib.request.urlretrieve`로 자동 다운로드합니다.
+
+Step 04 / Step 08 패널의 체크박스 옆 **BSP 상태 표시기**(색상 라벨)는 백그라운드 스레드 검사 결과를 반영합니다:
+1. `skyfield` 임포트 시도 — `ImportError`면 빨간색, 체크박스 비활성화 (`pip install skyfield` 필요)
+2. BSP 파일 존재 확인 — 있으면 초록색 (OK)
+3. 인터넷 연결 확인 (`naif.jpl.nasa.gov:443`) — 연결되면 주황색 (파일 목록 + "첫 실행 시 자동 다운로드"); 안되면 빨간색, 체크박스 비활성화
+
 ---
 
 ## 6. Step 05 / 07 — 웨이블릿 선명화

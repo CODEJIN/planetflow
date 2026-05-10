@@ -4,3 +4,4 @@ opencv-python
 tifffile
 Pillow
 PySide6
+skyfield 

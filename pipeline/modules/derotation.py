@@ -55,6 +55,7 @@ import cv2
 import numpy as np
 
 from pipeline.modules import image_io
+from pipeline.modules.wavelet import sharpen as _wavelet_sharpen
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -423,6 +424,185 @@ def spherical_derotation_warp(
     warped = warped_cubic * w_cubic + warped_linear * (1.0 - w_cubic)
 
     return np.clip(warped, 0.0, 1.0)
+
+
+# ── Pole PA auto-detection ────────────────────────────────────────────────────
+
+def auto_detect_pole_pa(
+    frames: List[np.ndarray],
+    dt_sec_list: List[float],
+    cx: float,
+    cy: float,
+    disk_radius_px: float,
+    period_hours: float,
+    warp_scale: float,
+    pa_coarse_step: int = 5,
+    pa_fine_step: int = 1,
+    polar_equatorial_ratio: float = 1.0,
+) -> float:
+    """Auto-detect the image-space pole position angle by maximising stack sharpness.
+
+    Sweeps pole_pa values from -90° to +90° in two passes (coarse then fine)
+    and returns the angle that produces the sharpest (highest Laplacian variance)
+    quality-weighted stack within the planet disk.
+
+    This eliminates the need for manual camera PA entry: the frames themselves
+    carry the true equatorial drift direction, which the sweep recovers by
+    selecting the axis that best aligns surface features across time.
+
+    Args:
+        frames:                List of 2-D float [0,1] images.
+        dt_sec_list:           Time offset (seconds) of each frame relative to
+                               the reference frame.  Same order as *frames*.
+        cx, cy:                Disk centre (pixels).
+        disk_radius_px:        Disk semi-major radius (pixels).
+        period_hours:          Planetary rotation period (hours).
+        warp_scale:            Empirical warp scale factor.
+        pa_coarse_step:        Angular step for the coarse pass (degrees).
+        pa_fine_step:          Angular step for the fine pass (degrees).
+        polar_equatorial_ratio: semi_minor / semi_major; 1.0 = sphere.
+
+    Returns:
+        Best pole_pa_deg (float).
+    """
+    h, w = frames[0].shape[:2]
+    Y, X = np.ogrid[:h, :w]
+    disk_mask = ((X - cx) ** 2 + (Y - cy) ** 2) < (0.75 * disk_radius_px) ** 2
+
+    # Gradient-angle histogram: find dominant gradient direction in the disk.
+    # Jupiter's belts are perpendicular to the rotation axis, so the dominant
+    # gradient direction inside the disk = pole axis direction.
+    #
+    # Critical: wavelet pre-sharpening must isolate belt-boundary gradients
+    # and suppress smooth limb-darkening radial gradients.  Two complementary
+    # scales are combined to stabilise the estimate:
+    #   fine  [200,200,200,0,0,0] → 2-8 px belt-edge detail (sharp, responsive)
+    #   belt  [0,0,200,200,200,0] → 8-32 px belt-width band (robust, anti-noise)
+    # Including coarser scales (level 4+) amplifies the radial limb gradient and
+    # biases the histogram by ~10° toward steeper angles — omit them here.
+    _HIST_AMOUNTS = [
+        [200.0, 200.0, 200.0, 0.0, 0.0, 0.0],  # fine-scale: belt edge detail
+        [0.0, 0.0, 200.0, 200.0, 200.0, 0.0],  # belt-scale: mid-width structure
+    ]
+    N_BINS = 360  # 0.5° resolution after folding to [0°, 180°)
+    estimates: List[float] = []
+
+    for amounts in _HIST_AMOUNTS:
+        sharp_frames = [_wavelet_sharpen(f, levels=6, amounts=amounts) for f in frames]
+        accum = np.zeros(N_BINS // 2, dtype=np.float64)
+        for sf in sharp_frames:
+            gx = cv2.Sobel(sf, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(sf, cv2.CV_32F, 0, 1, ksize=3)
+            mag = np.hypot(gx, gy)
+            thresh = float(np.percentile(mag[disk_mask], 70))
+            strong = disk_mask & (mag > thresh)
+            # Fold gradient angles to [0°, 180°): dark→bright and bright→dark
+            # across a belt represent the same physical orientation.
+            angles_deg = np.degrees(np.arctan2(gy[strong], gx[strong])) % 180.0
+            bin_idx = np.clip(
+                (angles_deg / 180.0 * (N_BINS // 2)).astype(int), 0, N_BINS // 2 - 1
+            )
+            np.add.at(accum, bin_idx, mag[strong])
+
+        sigma_bins = max(1, int(round(4.0 / (180.0 / (N_BINS // 2)))))
+        kernel_size = 2 * (3 * sigma_bins) + 1
+        accum_smooth = cv2.GaussianBlur(
+            accum.astype(np.float32).reshape(1, -1), (kernel_size, 1), sigma_bins
+        ).reshape(-1)
+        best_bin = int(np.argmax(accum_smooth))
+        # Bin centre → pole_pa: shift by -90 so 0° = vertical (North straight up)
+        estimates.append(best_bin * (180.0 / (N_BINS // 2)) - 90.0)
+
+    return float(np.mean(estimates))
+
+
+def auto_detect_ns_flip(
+    frames: List[np.ndarray],
+    dt_sec_list: List[float],
+    cx: float,
+    cy: float,
+    disk_radius_px: float,
+    period_hours: float,
+) -> bool:
+    """Auto-detect whether the image is South-up (flip_ns=True) by testing rotation direction.
+
+    Jupiter's prograde rotation appears CCW in North-up images (flip_ns=False)
+    and CW in South-up images (flip_ns=True).  We test both by rigidly rotating
+    the earliest frame by ±Δθ and cross-correlating with the latest frame
+    inside the inner disk (0.75R).  Higher correlation → correct direction.
+
+    Args:
+        frames:         List of 2-D float [0,1] images (any filter).
+        dt_sec_list:    Time offset (seconds) of each frame relative to a common
+                        reference.  Same order as *frames*.
+        cx, cy:         Disk centre (pixels).
+        disk_radius_px: Disk semi-major radius (pixels).
+        period_hours:   Planetary rotation period (hours).
+
+    Returns:
+        True if South is up (CW rotation seen in image), False if North is up.
+        Defaults to False when the cross-correlation is ambiguous (|Δcorr| < 0.001).
+    """
+    if len(frames) < 2:
+        print("  [auto_ns_flip] fewer than 2 frames — defaulting to North-up (flip_ns=False)")
+        return False
+
+    dts = np.array(dt_sec_list, dtype=np.float64)
+    i_min = int(np.argmin(dts))
+    i_max = int(np.argmax(dts))
+    if i_min == i_max:
+        print("  [auto_ns_flip] all frames at same time — defaulting to North-up (flip_ns=False)")
+        return False
+
+    dt_span = float(dts[i_max] - dts[i_min])
+    angle_mag = abs(dt_span) / (period_hours * 3600.0) * 360.0
+
+    def _lum(f: np.ndarray) -> np.ndarray:
+        if f.ndim == 3:
+            return (0.2126 * f[:, :, 0] + 0.7152 * f[:, :, 1] + 0.0722 * f[:, :, 2]).astype(np.float32)
+        return f.astype(np.float32)
+
+    f_early = _lum(frames[i_min])
+    f_late  = _lum(frames[i_max])
+    h, w = f_early.shape
+    Y, X = np.ogrid[:h, :w]
+    disk_mask = ((X - cx) ** 2 + (Y - cy) ** 2) < (disk_radius_px * 0.75) ** 2
+
+    ref_pixels = f_late[disk_mask].astype(np.float64)
+    ref_std = float(ref_pixels.std())
+
+    scores: dict = {}
+    for south_up in (False, True):
+        # Jupiter prograde: CCW when North-up → cv2 angle = +Δθ (CCW-positive convention)
+        #                   CW when South-up  → cv2 angle = -Δθ
+        cv2_angle = -angle_mag if south_up else +angle_mag
+        M = cv2.getRotationMatrix2D((float(cx), float(cy)), cv2_angle, 1.0)
+        rotated = cv2.warpAffine(
+            f_early, M, (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0.0,
+        )
+        tgt_pixels = rotated[disk_mask].astype(np.float64)
+        tgt_std = float(tgt_pixels.std())
+        if ref_std > 1e-6 and tgt_std > 1e-6:
+            scores[south_up] = float(np.corrcoef(ref_pixels, tgt_pixels)[0, 1])
+        else:
+            scores[south_up] = 0.0
+
+    delta = scores[True] - scores[False]
+    flip_ns = delta > 0.0
+    confidence = abs(delta)
+    label = "South-up" if flip_ns else "North-up"
+    print(
+        f"  [auto_ns_flip] Δθ={angle_mag:.2f}°  "
+        f"CCW_corr={scores[False]:.5f}  CW_corr={scores[True]:.5f}  "
+        f"→ {label} (flip_ns={flip_ns}, |Δcorr|={confidence:.5f})"
+    )
+    if confidence < 0.001:
+        print("  [auto_ns_flip] low confidence — defaulting to flip_ns=False")
+        return False
+    return flip_ns
 
 
 # ── Sub-pixel alignment ────────────────────────────────────────────────────────

@@ -3004,7 +3004,7 @@ def lucky_stack_ser(
             and preloaded_ap_positions is not None
         )
         if _score_metric == "log_disk":
-            print("  [1/5] LoG disk scoring (AS!4 lapl3 방식)…", end="\r", flush=True)
+            print("  [1/5] LoG disk scoring (AS!4 lapl3 method)…", end="\r", flush=True)
             scores = score_frames_log_disk(
                 reader, cfg, score_step=2, progress_callback=_score_prog,
             )

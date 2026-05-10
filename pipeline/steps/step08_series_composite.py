@@ -57,7 +57,7 @@ from pipeline.config import PipelineConfig
 from pipeline.modules import composite as comp_module
 from pipeline.modules import image_io, wavelet as wavelet_module
 from pipeline.modules.derotation import (
-    apply_shift, find_disk_center, find_visual_limb_radius,
+    apply_shift, auto_detect_pole_pa, find_disk_center, find_visual_limb_radius,
     spherical_derotation_warp,
 )
 
@@ -289,6 +289,7 @@ def _derotate_frame_color(
     ref_cy: Optional[float] = None,
     ref_semi_a: Optional[float] = None,
     polar_equatorial_ratio: float = 1.0,
+    pole_pa_deg: float = 0.0,
 ) -> np.ndarray:
     """Load a color TIF and apply de-rotation to each RGB channel.
 
@@ -324,6 +325,7 @@ def _derotate_frame_color(
             period_hours=period_hours,
             scale=warp_scale,
             polar_equatorial_ratio=per,
+            pole_pa_deg=pole_pa_deg,
         )
     return out
 
@@ -491,6 +493,12 @@ def _stack_window_frames(
     log: dict = {"window": [c["center_time"].strftime("%H:%M") for c in window_cycles],
                  "t_center_actual": t_center.strftime("%H:%M:%S"),
                  "filters": {}}
+    # extras: consumed by _sat_composite_window_s08() when series_composite_enabled=True
+    extras: dict = {
+        "window_scored": {},   # {filt: [(path, meta, raw_score), ...]}
+        "ref_cx": ref_cx, "ref_cy": ref_cy, "ref_semi_a": ref_semi_a,
+        "t_center": t_center,
+    }
 
     for filt, entries in window_frames.items():
         # Quality-weighted stack: use ALL frames in the window; bad frames get a
@@ -516,6 +524,7 @@ def _stack_window_frames(
             scored.append((path, meta, raw_score))
             if raw_score < min_quality:
                 n_below += 1
+        extras["window_scored"][filt] = scored
 
         # Weight: quality score ^ 2 so poor frames are strongly down-weighted.
         # Floor at 0.05 so even genuinely bad frames contribute a tiny bit
@@ -575,7 +584,7 @@ def _stack_window_frames(
             "scores": [round(s, 3) for _, _, s in scored],
         }
 
-    return stacked, log
+    return stacked, log, extras
 
 
 # ── Color camera series ────────────────────────────────────────────────────────
@@ -648,6 +657,68 @@ def _run_color_series(
     else:
         print("  save_step08=False: results not written to disk")
 
+    # ── Pole PA detection ──────────────────────────────────────────────────────
+    _color_pole_pa = 0.0
+    print("  [Color pole_pa] Detecting image-space pole PA from color frames…")
+    _pa_samples: List[float] = []
+    _sample_bins = bins[:: max(1, len(bins) // 5)][:5]
+    for _sb in _sample_bins:
+        try:
+            _sp, _sm = _sb[0]
+            _raw = image_io.read_tif(_sp)
+            _lum = (_raw.mean(axis=2) if _raw.ndim == 3
+                    else _raw).astype(np.float32)
+            _scx, _scy, _ssa, _ssb, _ = find_disk_center(_lum)
+            if _ssa < 5:
+                continue
+            _sper = float(np.clip(_ssb / max(_ssa, 1.0), 0.85, 1.0))
+            _t_bin = _sm["timestamp"]
+            _bin_frames, _bin_dts = [], []
+            for _bp, _bm in _sb:
+                _br = image_io.read_tif(_bp)
+                _bl = (_br.mean(axis=2) if _br.ndim == 3 else _br).astype(np.float32)
+                _bin_frames.append(_bl)
+                _bin_dts.append((_bm["timestamp"] - _t_bin).total_seconds())
+            _pa = auto_detect_pole_pa(
+                frames=_bin_frames, dt_sec_list=_bin_dts,
+                cx=_scx, cy=_scy, disk_radius_px=_ssa,
+                period_hours=config.derotation.rotation_period_hours,
+                warp_scale=config.derotation.warp_scale,
+                polar_equatorial_ratio=_sper,
+            )
+            _pa_samples.append(_pa)
+            print(f"    bin sample: pole_pa={_pa:.1f}°")
+        except Exception as _exc:
+            print(f"    bin sample failed: {_exc}")
+    if _pa_samples:
+        _color_pole_pa = float(np.median(_pa_samples))
+        print(f"  [Color pole_pa] session pole_pa={_color_pole_pa:.1f}° (median of {len(_pa_samples)} samples)")
+    else:
+        print("  [Color pole_pa] detection failed — using 0.0°")
+
+    # ── Satellite composite setup ──────────────────────────────────────────────
+    _s08c_tracker = None
+    _s08c_np_ang  = 0.0
+    _s08c_sat_on  = (window_n > 1 and config.satellite.series_composite_enabled)
+    if _s08c_sat_on:
+        from pipeline.modules.satellite_tracker import SatelliteTracker
+        from pipeline.modules.derotation import query_horizons_np_ang
+        _horizons_id = config.derotation.horizons_id or "599"
+        _s08c_tracker = SatelliteTracker(
+            jupiter_horizons_id=_horizons_id,
+            flip_ew=config.satellite.flip_ew,
+            flip_ns=bool(config.satellite.flip_ns) if config.satellite.flip_ns is not None else False,
+        )
+        if all_frames:
+            _t_mid = all_frames[len(all_frames) // 2][1]["timestamp"]
+            try:
+                _np_ang_raw = query_horizons_np_ang(_horizons_id, _t_mid)
+                _s08c_np_ang = float(_np_ang_raw) if _np_ang_raw is not None else 0.0
+                print(f"  [s08 color sat composite] np_ang={_s08c_np_ang:.2f}°")
+            except Exception as _exc:
+                print(f"  [s08 color sat composite] np_ang query failed: {_exc} — using 0.0°")
+        print(f"  [s08 color sat composite] pole_pa={_color_pole_pa:.1f}°")
+
     all_results: Dict[str, List[Tuple[Optional[Path], str]]] = {}
     all_frames_corrected: Dict[str, tuple] = {}  # frame_label → (corrected, params, t_str, n_stack)
     total_written = 0
@@ -694,10 +765,28 @@ def _run_color_series(
                 tif_path, meta["timestamp"], t_center, period, warp_sc,
                 ref_cx=ref_cx, ref_cy=ref_cy, ref_semi_a=ref_semi_a,
                 polar_equatorial_ratio=per,
+                pole_pa_deg=_color_pole_pa,
             )
             stacked_frames.append(warped)
 
         stacked = np.mean(stacked_frames, axis=0).astype(np.float32)
+
+        # ── Satellite composite (before centering, in original coords) ─────────
+        if _s08c_sat_on and _s08c_tracker is not None:
+            try:
+                _color_scored = [(p, m, 1.0) for p, m in window_frames]
+                _sw_extras = {
+                    "t_center": t_center,
+                    "ref_cx": ref_cx, "ref_cy": ref_cy, "ref_semi_a": ref_semi_a,
+                    "window_scored": {"COLOR": _color_scored},
+                }
+                _stacked_dict = {"COLOR": stacked}
+                _sat_composite_window_s08(
+                    _stacked_dict, _sw_extras, config, _s08c_tracker, _color_pole_pa, _s08c_np_ang,
+                )
+                stacked = _stacked_dict["COLOR"]
+            except Exception as _exc:
+                print(f"  [s08 color sat composite] frame {frame_idx} failed: {_exc}")
 
         # Centre the disk
         if ref_cx is not None and ref_semi_a is not None and ref_semi_a >= 5:
@@ -813,6 +902,163 @@ def _run_color_series(
     return all_results
 
 
+# ── Satellite compositing helpers (Step 8 — series composite) ────────────────
+#
+# Applies the exp9 multi-rate Gaussian-blend compositing (same algorithm as
+# step04) to each sliding-window stack before centering and sharpening.
+# pole_pa is read from step04's derotation_log.json; np_ang is queried from
+# Horizons once for the session midpoint.
+
+def _sat_translate_stack_s08(
+    scored_entries: List[Tuple[Path, dict, float]],
+    positions: List,
+    ref_idx: int,
+    keep_color: bool = False,
+) -> Optional[np.ndarray]:
+    """Translate-stack frames so that the satellite aligns at its t_ref position.
+
+    Args:
+        scored_entries: [(path, meta, raw_score), ...] — same order as positions.
+        positions:      [SatellitePos | None, ...] — one per entry.
+        ref_idx:        Index of the reference frame (closest to t_center).
+        keep_color:     If True, return an (H, W, 3) stack preserving color channels
+                        (used for color-camera-mode frames).
+
+    Returns:
+        Quality-weighted mean stack as float32 [0,1], or None if no valid frames.
+    """
+    if not scored_entries or ref_idx >= len(positions):
+        return None
+    ref_pos = positions[ref_idx]
+    if ref_pos is None:
+        return None
+
+    imgs: List[np.ndarray] = []
+    weights: List[float] = []
+    for (path, _meta, score), pos in zip(scored_entries, positions):
+        if pos is None:
+            continue
+        raw = image_io.read_tif(path)
+        img = raw.astype(np.float32) / 65535.0 if raw.dtype == np.uint16 else raw.astype(np.float32)
+        if img.ndim == 3 and not keep_color:
+            img = img.mean(axis=2)
+        elif img.ndim == 2 and keep_color:
+            img = np.stack([img, img, img], axis=2)
+        shifted = apply_shift(img, ref_pos.x_px - pos.x_px, ref_pos.y_px - pos.y_px)
+        imgs.append(shifted)
+        weights.append(max(score ** 2, 0.05))
+
+    if not imgs:
+        return None
+    w_sum = sum(weights)
+    weights = [w / w_sum for w in weights]
+    return np.sum([img * w for img, w in zip(imgs, weights)], axis=0).astype(np.float32)
+
+
+def _sat_composite_window_s08(
+    stacked: Dict[str, np.ndarray],
+    sw_extras: dict,
+    config: "PipelineConfig",
+    tracker: "SatelliteTracker",
+    pole_pa_deg: float,
+    np_ang_deg: float,
+) -> None:
+    """Blend satellite-derotated patches into each filter's planet stack in-place.
+
+    Called after _stack_window_frames(), before _shared_center_derotated().
+    Positions are in pre-centering pixel coordinates (matching the stacks).
+    """
+    from pipeline.modules.satellite_tracker import SatellitePos
+    from pipeline.steps.step04_derotate_stack import (
+        _gaussian_mask, _apparent_radius_px, _compute_sigma_from_motion,
+        _SATELLITE_RADII_KM,
+    )
+
+    t_center   = sw_extras["t_center"]
+    ref_cx     = sw_extras.get("ref_cx")
+    ref_cy     = sw_extras.get("ref_cy")
+    ref_semi_a = sw_extras.get("ref_semi_a")
+    coverage   = config.satellite.composite_coverage_scale
+
+    if ref_cx is None or ref_semi_a is None or ref_semi_a < 5:
+        # Fallback: detect from the best available stacked image
+        for _pf in ("IR", "R", "G", "B", "CH4", "COLOR"):
+            if _pf in stacked:
+                try:
+                    _img = stacked[_pf]
+                    _lum = _img.mean(axis=2) if _img.ndim == 3 else _img
+                    ref_cx, ref_cy, ref_semi_a, _, _ = find_disk_center(_lum)
+                    if ref_semi_a >= 5:
+                        break
+                except Exception:
+                    pass
+        if ref_semi_a is None or ref_semi_a < 5:
+            print("  [s08 sat composite] disk detection failed — skipped")
+            return
+
+    plate_scale = tracker.get_plate_scale(ref_semi_a, t_center)
+
+    for filt, scored_entries in sw_extras.get("window_scored", {}).items():
+        if filt not in stacked:
+            continue
+        if not scored_entries:
+            continue
+
+        t_naive = t_center.replace(tzinfo=None) if t_center.tzinfo else t_center
+        t_list  = [meta["timestamp"].replace(tzinfo=None)
+                   if meta["timestamp"].tzinfo else meta["timestamp"]
+                   for _, meta, _ in scored_entries]
+
+        ref_idx = min(range(len(t_list)),
+                      key=lambda i: abs((t_list[i] - t_naive).total_seconds()))
+
+        body_pos = tracker.get_positions(
+            t_list, ref_cx, ref_cy, ref_semi_a,
+            plate_scale_arcsec_per_px=plate_scale,
+            pole_pa_deg=pole_pa_deg,
+            np_ang_deg=np_ang_deg,
+        )
+        shad_pos = tracker.get_shadow_positions(
+            t_list, ref_cx, ref_cy, ref_semi_a,
+            plate_scale_arcsec_per_px=plate_scale,
+            pole_pa_deg=pole_pa_deg,
+            np_ang_deg=np_ang_deg,
+            moon_horizons_positions=body_pos,
+        )
+
+        europa_positions = body_pos.get("Europa", [None] * len(t_list))
+        shadow_positions = shad_pos.get("Europa_shadow", [None] * len(t_list))
+        europa_ref = europa_positions[ref_idx] if europa_positions else None
+        shadow_ref = shadow_positions[ref_idx] if shadow_positions else None
+
+        app_r = _apparent_radius_px("Europa", t_naive, plate_scale)
+        europa_sigma = _compute_sigma_from_motion(
+            f"s08/{filt}/Europa", europa_positions, europa_ref, app_r, coverage)
+        shadow_sigma = _compute_sigma_from_motion(
+            f"s08/{filt}/Europa_shadow", shadow_positions, shadow_ref, app_r, coverage)
+
+        planet = stacked[filt]
+        is_color = planet.ndim == 3
+        shape2d = planet.shape[:2]
+
+        europa_stack = _sat_translate_stack_s08(scored_entries, europa_positions, ref_idx, keep_color=is_color)
+        shadow_stack = _sat_translate_stack_s08(scored_entries, shadow_positions, ref_idx, keep_color=is_color)
+
+        result = planet.copy()
+        if europa_stack is not None and europa_ref is not None and europa_ref.on_disk:
+            alpha = _gaussian_mask(shape2d, europa_ref.x_px, europa_ref.y_px, europa_sigma)
+            if is_color:
+                alpha = alpha[:, :, np.newaxis]
+            result = (1.0 - alpha) * result + alpha * europa_stack
+        if shadow_stack is not None and shadow_ref is not None and shadow_ref.on_disk:
+            alpha = _gaussian_mask(shape2d, shadow_ref.x_px, shadow_ref.y_px, shadow_sigma)
+            if is_color:
+                alpha = alpha[:, :, np.newaxis]
+            result = (1.0 - alpha) * result + alpha * shadow_stack
+        stacked[filt] = np.clip(result, 0.0, 1.0).astype(np.float32)
+        print(f"    [s08 sat composite/{filt}] σ_e={europa_sigma:.1f}px σ_s={shadow_sigma:.1f}px")
+
+
 # ── Main step ─────────────────────────────────────────────────────────────────
 
 def run(
@@ -905,7 +1151,7 @@ def run(
     # ── Pass 0 (quality scoring — only when window_n > 1 and min_quality > 0) ─
     quality_scores: Dict[str, Dict[str, float]] = {}
     if window_n > 1 and min_quality > 0.0:
-        print("  [Pass 0] 품질 점수 계산 중...")
+        print("  [Pass 0] Computing quality scores...")
         quality_scores = _compute_filter_quality_scores(raw_tif_frames)
         for filt, scores in quality_scores.items():
             if scores:
@@ -913,7 +1159,83 @@ def run(
                 below  = sum(1 for s in scores.values() if s < min_quality)
                 print(f"    {filt}: {len(scores)} frames, "
                       f"mean={mean_q:.3f}, below_threshold={below}")
-        print("  [Pass 0] 완료")
+        print("  [Pass 0] Done")
+
+    # ── Satellite composite setup (series_composite_enabled) ─────────────────
+    # Only active for sliding-window mode (window_n > 1).  tracker and pole_pa
+    # are set up once here and reused per window in the main loop.
+    _s08_tracker   = None
+    _s08_pole_pa   = 0.0
+    _s08_np_ang    = 0.0
+    # step08 satellite composite is independent from step04's satellite.enabled flag.
+    # It only needs series_composite_enabled and window_n > 1.
+    _s08_sat_on    = (
+        window_n > 1
+        and config.satellite.series_composite_enabled
+    )
+    _horizons_id = config.derotation.horizons_id or "599"
+    if _s08_sat_on:
+        from pipeline.modules.satellite_tracker import SatelliteTracker
+        from pipeline.modules.derotation import (
+            auto_detect_pole_pa, query_horizons_np_ang,
+        )
+        _s08_tracker = SatelliteTracker(
+            jupiter_horizons_id=_horizons_id,
+            flip_ew=config.satellite.flip_ew,
+            flip_ns=bool(config.satellite.flip_ns) if config.satellite.flip_ns is not None else False,
+        )
+
+        # Compute pole_pa from step08's own raw frames (independent of step04)
+        print("  [s08 sat composite] computing pole_pa from raw frames…")
+        _raw_pas: List[float] = []
+        _sample_idxs = list(range(0, len(cycles), max(1, len(cycles) // 5)))[:5]
+        for _si in _sample_idxs:
+            _cyc = cycles[_si]
+            _t_cyc = _cyc["center_time"]
+            for _pf in _CENTER_PREF_ORDER:
+                if _pf not in _cyc["frames"]:
+                    continue
+                _fp, _fm = _cyc["frames"][_pf]
+                if _fp is None:
+                    continue
+                try:
+                    _raw = image_io.read_tif(_fp)
+                    _lum = (_raw.astype(np.float32) / 65535.0
+                            if _raw.dtype == np.uint16 else _raw.astype(np.float32))
+                    if _lum.ndim == 3:
+                        _lum = _lum.mean(axis=2)
+                    _cx, _cy, _sa, _sb, _ = find_disk_center(_lum)
+                    if _sa < 5:
+                        break
+                    _peq = float(np.clip(_sb / max(_sa, 1.0), 0.85, 1.0))
+                    _dt = (_fm["timestamp"] - _t_cyc).total_seconds()
+                    _pa = auto_detect_pole_pa(
+                        frames=[_lum], dt_sec_list=[_dt],
+                        cx=_cx, cy=_cy, disk_radius_px=_sa,
+                        period_hours=config.derotation.rotation_period_hours,
+                        warp_scale=config.derotation.warp_scale,
+                        polar_equatorial_ratio=_peq,
+                    )
+                    _raw_pas.append(_pa)
+                    print(f"    cycle {_si}: pole_pa={_pa:.1f}° via {_pf}")
+                except Exception:
+                    pass
+                break
+        if _raw_pas:
+            _s08_pole_pa = float(np.median(_raw_pas))
+            print(f"  [s08 sat composite] pole_pa={_s08_pole_pa:.1f}° (median of {len(_raw_pas)} samples)")
+        else:
+            print("  [s08 sat composite] pole_pa detection failed — using 0.0°")
+
+        # Query np_ang once for session midpoint (Horizons only, no step04 dependency)
+        if cycles:
+            _t_mid = cycles[len(cycles) // 2]["center_time"]
+            try:
+                _np_ang_raw = query_horizons_np_ang(_horizons_id, _t_mid)
+                _s08_np_ang = float(_np_ang_raw) if _np_ang_raw is not None else 0.0
+                print(f"  [s08 sat composite] np_ang={_s08_np_ang:.2f}° at {_t_mid.strftime('%H:%M')}")
+            except Exception as _exc:
+                print(f"  [s08 sat composite] np_ang query failed: {_exc} — using 0.0°")
 
     # ── Pass 1 cache (global_filter_normalize=True) ───────────────────────────
     # When global_filter_normalize is on we need to normalise every frame using
@@ -968,12 +1290,22 @@ def run(
         else:
             # Sliding-window stacking path
             center_idx = frame_idx - 1   # 0-based index into cycles
-            derotated, stack_log = _stack_window_frames(
+            derotated, stack_log, _sw_extras = _stack_window_frames(
                 cycles, center_idx, window_n, quality_scores, min_quality,
                 t_center, period, scale,
                 cycle_seconds=config.composite.cycle_seconds,
             )
             frame_log.update(stack_log)
+
+            # ── Satellite composite (before centering, in original coords) ─────
+            if _s08_sat_on and _s08_tracker is not None:
+                try:
+                    _sat_composite_window_s08(
+                        derotated, _sw_extras, config, _s08_tracker,
+                        _s08_pole_pa, _s08_np_ang,
+                    )
+                except Exception as _exc:
+                    print(f"  [s08 sat composite] window {frame_idx} failed: {_exc}")
 
         # ── Shared centering ───────────────────────────────────────────────────
         _shared_center_derotated(derotated)
@@ -1058,7 +1390,7 @@ def run(
                 "frame_log":      frame_log,
             })
             if frame_idx % 10 == 0 or frame_idx == len(cycles):
-                print(f"  [{frame_idx:>3}/{len(cycles)}] {t_str}  캐시됨")
+                print(f"  [{frame_idx:>3}/{len(cycles)}] {t_str}  cached")
             if progress_callback is not None:
                 progress_callback(frame_idx, len(cycles))
             continue   # compose+save happens in Phase B below
@@ -1192,7 +1524,7 @@ def run(
         #     within-frame contrast and avoiding forced saturation.
         # RGB filters share one joint global mean/std so their relative colour
         # balance is preserved across the normalisation.
-        print("  [Pass 1] post-wavelet 글로벌 통계 계산 중 (mean-std 기반)...")
+        print("  [Pass 1] Computing global post-wavelet statistics (mean-std)...")
         _pix2: Dict[str, list] = {}
         for _entry in _pw_cache:
             for _f, _arr in _entry["derotated"].items():
@@ -1222,9 +1554,9 @@ def run(
                 _g_std = 1e-7
             filter_stats[_f] = (_g_mean, _g_std)
             print(f"    {_f}: mean={_g_mean:.5f}  std={_g_std:.5f}")
-        print(f"  [Pass 1] 완료 — {len(filter_stats)}개 필터 글로벌 분포 확정")
+        print(f"  [Pass 1] Done — global distribution set for {len(filter_stats)} filter(s)")
 
-        print("  [Pass 2] 글로벌 정규화 + 합성 중...")
+        print("  [Pass 2] Global normalization + compositing...")
         for _entry in _pw_cache:
             cycle         = _entry["cycle"]
             frame_idx     = _entry["frame_idx"]

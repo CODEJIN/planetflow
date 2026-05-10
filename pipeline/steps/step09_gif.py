@@ -293,12 +293,12 @@ def run(
             results[comp_name] = {"gif": gif_path}
 
         except Exception as exc:
-            print(f"\n    [ERROR] {comp_name} 출력 실패: {exc}")
+            print(f"\n    [ERROR] {comp_name} output failed: {exc}")
             failed.append(comp_name)
             results[comp_name] = {"gif": None}
 
     ok = len(results) - len(failed)
     print(f"\n  Step 9 complete: {ok}/{len(results)} composite types → {ok} GIF files")
     if failed:
-        print(f"  [WARNING] 실패한 컴포짓: {', '.join(failed)}")
+        print(f"  [WARNING] Failed composites: {', '.join(failed)}")
     return results

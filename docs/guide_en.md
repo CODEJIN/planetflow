@@ -288,6 +288,7 @@ Stacks frames within the optimal windows detected in Step 03, correcting for pla
 | **Warp Scale** | 0.80 | 0.0–2.0 (step 0.01) | Spherical distortion correction strength. Because a planet is a sphere, the disc centre moves significantly with rotation while the limb barely moves. Warp scale controls the magnitude of this depth-dependent per-pixel correction. **0.0** = no correction (uniform shift), **1.0** = theoretical full sphere correction, **0.80** = recommended for Jupiter in typical seeing. On nights of exceptional seeing, try 1.0–1.2. |
 | **Min Quality Threshold** | 0.05 | 0.0–1.0 (step 0.05) | Frames below this quality score are excluded from stacking. Raise to 0.3–0.5 when seeing conditions are poor to more strictly filter bad frames. |
 | **Normalize Brightness** | Off | — | Normalizes the brightness of each frame before stacking. Enable when frames have significant brightness variations due to changing seeing conditions. |
+| **Satellite Composite** | Off | — | Composites Europa and its shadow using Skyfield BSP ephemeris. The status indicator next to the checkbox shows BSP file availability (see §7.4). |
 
 ### 7.2 Warp Scale Auto-Tune
 
@@ -301,6 +302,21 @@ The **"▶ Auto-tune scale"** button inside the panel sweeps warp scale values a
 ### 7.3 JPL Horizons Integration
 
 Step 04 automatically queries the NASA JPL Horizons API to retrieve the planet's north pole angle (NP.ang) at the time of observation. The **Horizons ID** in Global Settings must be set correctly. An internet connection is required.
+
+### 7.4 Satellite / Shadow Composite
+
+When **Satellite Composite** is checked, Europa and its shadow are handled separately from the planet de-rotation and blended into every filter stack.
+
+**BSP status indicator** (coloured label next to the checkbox):
+
+| Colour | Meaning | Action |
+|--------|---------|--------|
+| Green — OK | BSP ephemeris files present | Ready to use |
+| Orange — `<files> — auto-download on first run` | Files missing; internet available | Files download automatically when the step runs (de440s.bsp 32 MB + jup365.bsp 1.1 GB) |
+| Red — network error | No internet connection | Connect to internet, then re-open the panel |
+| Red — `pip install skyfield` required | `skyfield` package not installed | Run `pip install skyfield` in the PlanetFlow environment |
+
+**Cross-filter consistency**: Europa and its shadow are positioned at the same location **relative to the planet disk** in every filter's output TIF (IR, R, G, B, CH4). This guarantees that the satellite appears at the same location across all composites (IR-RGB, CH4-G-IR, etc.) after Step 06 channel alignment — regardless of sub-pixel differences in each filter's disk position.
 
 ---
 
@@ -465,6 +481,7 @@ The parameters shown differ depending on camera mode.
 | **Filter cycle (seconds)** | 225 | 10–600 (step 15) | Time for one complete filter cycle (IR→R→G→B→CH4→IR). Used to group Step 07 PNGs into per-epoch time-series sets. **Set independently from Step 03's filter cycle time.** |
 | **Min quality filter** | 0.05 | 0.0–0.9 (step 0.05) | Quality filter for frames (0.0 = no filter). Low-quality frames receive reduced weighting (soft down-weighting, not hard exclusion). |
 | **Save mono filter GIFs** | Off | — | When checked: saves each filter's monochrome frames alongside the color composites. Step 09 will also generate per-filter monochrome GIFs. |
+| **Satellite Composite** | Off | — | Composites Europa and its shadow into each time-series frame. Requires Window ≥ 3 and Skyfield BSP files (same status indicator as Step 04 §7.4). |
 
 #### 11.A.2 Wavelet Sharpening (Series)
 

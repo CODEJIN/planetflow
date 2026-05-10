@@ -89,7 +89,7 @@ def run(
     cycle_min  = config.quality.cycle_minutes
     window_min = config.quality.window_minutes
 
-    overlap_note = " [겹침허용]" if config.quality.allow_overlap else ""
+    overlap_note = " [overlap-allowed]" if config.quality.allow_overlap else ""
     print(f"\n  Searching for top de-rotation windows "
           f"(window={window_min:.1f} min, "
           f"cycle={cycle_min:.2f} min, "

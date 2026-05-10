@@ -380,6 +380,73 @@ Detecting the disk independently per frame causes (cx, cy) to vary by a few pixe
 2. **User cache**: `~/.astropipe/horizons_cache.json` — cached results from previous online lookups.
 3. **Live Horizons API**: Used when outside bundled range or for Custom planets.
 
+### Satellite / Shadow Composite (exp9 Method)
+
+**Source**: `pipeline/steps/step04_derotate_stack.py` → `_apply_satellite_composite()`
+
+When **Satellite Composite** is enabled, Europa and its shadow are composited into every filter's de-rotated TIF using the exp9 multi-rate Gaussian-blend method.
+
+```
+For each filter TIF:
+    Detect this filter's disk center (disk_cx, disk_cy, disk_sr)
+        │
+        ▼
+    Query canonical satellite + shadow position at t_center (Horizons + Skyfield)
+    using this filter's own disk coordinate system
+        │
+        ▼
+    Query per-frame positions over all frames in the window
+        │
+        ▼
+    Translate-stack raw frames to align satellite at canonical ref position
+        │
+        ▼
+    Gaussian-blend satellite stack into planet stack
+        │
+        ▼
+    Write result back to filter TIF (overwrite in-place)
+```
+
+#### Per-filter Disk Coordinate System
+
+The canonical satellite reference is queried separately for each filter using **that filter's own detected disk center**. This is the key design decision for cross-composite consistency:
+
+After de-rotation, each filter's TIF may have its disk at a slightly different absolute pixel position (sub-pixel variation from independent Otsu threshold detection across filters with different SNR). Step 06's `align_channels()` then shifts non-reference channels to align their disks to the reference (IR). If the satellite were placed at the same absolute pixel coordinate in all filter TIFs, this disk-alignment shift would displace it differently in each channel, causing the satellite to appear at different positions in IR-RGB vs CH4-G-IR composites.
+
+By computing the satellite position in each filter's own disk coordinate system, the satellite's **disk-relative offset** is identical across all filter TIFs. Step 06's disk-alignment shift then moves the disk and the satellite by the same amount, preserving cross-filter co-location.
+
+#### Gaussian Blend Formula
+
+```
+alpha(x,y) = exp(−((x−sx)² + (y−sy)²) / (2σ²))
+result      = (1−alpha) × planet_stack + alpha × satellite_stack
+
+sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
+```
+
+| Symbol | Description |
+|---|---|
+| `sx, sy` | Canonical satellite position at window `center_time` (in this filter's coordinate system) |
+| `max_motion_px` | Maximum per-frame displacement of satellite from the canonical position across all frames in the window |
+| `apparent_radius_px` | Satellite angular radius converted to pixels via Skyfield BSP ephemeris (LTT-corrected) |
+| `coverage_scale` | 2.5 — validated in exp9: α ≈ 0.92 at the farthest streak endpoint |
+
+#### Shadow Detection via Skyfield BSP
+
+Shadow positions require two JPL NAIF BSP kernel files:
+
+| File | Size | URL |
+|---|---|---|
+| `de440s.bsp` | 32 MB | `naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/` |
+| `jup365.bsp` | 1.1 GB | `naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/satellites/` |
+
+Storage resolution order: `PLANETFLOW_SKYFIELD_DIR` env var → `~/.planetflow/skyfield/` → `/tmp/skyfield/`. If files are missing but internet is reachable, they are downloaded automatically via `urllib.request.urlretrieve` on first run.
+
+The **BSP status indicator** (coloured label next to the checkbox in the Step 04 / Step 08 panels) reflects a background thread check:
+1. Import `skyfield` — if `ImportError`: red, checkbox disabled (`pip install skyfield` required)
+2. Check BSP file presence — if present: green (OK)
+3. Check internet (`naif.jpl.nasa.gov:443`) — if reachable: orange (files listed + "auto-download on first run"); if not: red, checkbox disabled
+
 ---
 
 ## 6. Step 05 / 07 — Wavelet Sharpening

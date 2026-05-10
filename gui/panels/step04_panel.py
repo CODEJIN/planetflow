@@ -305,14 +305,26 @@ class Step04Panel(BasePanel):
         lbl_norm.setToolTip(S("step04.normalize.tooltip"))
         fl.addRow(lbl_norm, self._normalize)
 
+        # Satellite composite (multi-rate de-rotation)
+        self._satellite_composite = QCheckBox()
+        self._satellite_composite.setStyleSheet(_CHECK_STYLE)
+        self._satellite_composite.setChecked(False)
+        self._satellite_composite.setToolTip(S("step04.satellite_composite.tooltip"))
+        lbl_sat = QLabel(S("step04.satellite_composite"))
+        lbl_sat.setToolTip(S("step04.satellite_composite.tooltip"))
+        from gui.panels.bsp_status import BspStatusRow
+        fl.addRow(lbl_sat, BspStatusRow(self._satellite_composite))
+
+
         idx = self._form_layout.count() - 1
         self._form_layout.insertWidget(idx, form_widget)
 
     def get_config_updates(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "warp_scale":            self._warp_scale.value(),
-            "min_quality_threshold": self._min_quality.value(),
-            "normalize_brightness":  self._normalize.isChecked(),
+            "warp_scale":                self._warp_scale.value(),
+            "min_quality_threshold":     self._min_quality.value(),
+            "normalize_brightness":      self._normalize.isChecked(),
+            "satellite_composite_enabled": self._satellite_composite.isChecked(),
         }
         out_text = self._output_lbl.text().strip()
         if out_text:
@@ -356,6 +368,9 @@ class Step04Panel(BasePanel):
         self._warp_scale.setValue(float(data.get("warp_scale", 0.80)))
         self._min_quality.setValue(float(data.get("min_quality_threshold", 0.05)))
         self._normalize.setChecked(bool(data.get("normalize_brightness", False)))
+        self._satellite_composite.setChecked(
+            bool(data.get("satellite_composite_enabled", False))
+        )
 
         self._update_sweep_btn_state()
 

@@ -134,6 +134,61 @@ class QualityConfig:
         return self.window_frames * self.cycle_minutes
 
 
+# ── Satellite tracking ────────────────────────────────────────────────────────
+
+@dataclass
+class SatelliteConfig:
+    """Galilean moon position tracking and CV refinement for Step 4.
+
+    When enabled, Step 4 queries Horizons for satellite positions, optionally
+    refines them with CV blob detection, and logs them in derotation_log.json.
+    This does NOT mask satellites (masking is done by experimental strategies).
+
+    flip_ns: None = auto-detect from image-space pole PA sign.
+             South-up cameras have pole_pa < 0° → flip_ns=True (typical).
+    cv_search_radius_px: search window for CV blob refinement.
+                         Recommended: sat_mask_radius_px + 10.
+    """
+    enabled: bool = False
+    flip_ew: bool = False
+    flip_ns: Optional[bool] = None      # None = auto-detect from pole_pa sign
+    cv_search_radius_px: float = 24.0   # CV refinement search window
+    # Clock offset correction: subtract this many seconds from frame timestamps
+    # before querying Skyfield.  Use when the capture PC clock was fast/slow.
+    # Positive value = clock was slow (actual time was later than filename says).
+    # Negative value = clock was fast (actual time was earlier than filename says).
+    # Confirmed value for 2026-05-05 observation: -510.0 (clock was 8.5 min fast).
+    time_offset_sec: float = 0.0
+
+    # ── Multi-rate satellite compositing (Experiment 9 method) ────────────────
+    # When True, Step 4 produces composite TIFs instead of plain planet-derotated
+    # TIFs. Each filter's planet stack is Gaussian-blended with Europa-aligned and
+    # shadow-aligned stacks at the satellite/shadow positions, eliminating the
+    # satellite streak artifact in the final stack.
+    #
+    # Method (exp9 — motion-based sigma):
+    #   1. Build planet-derotated stack (standard Step 4 warp + translate).
+    #   2. Build Europa-derotated stack: translate each frame to align Europa at t_ref.
+    #   3. Build shadow-derotated stack: translate each frame to align shadow at t_ref.
+    #   4. Blend with Gaussian masks:
+    #        sigma = max(max_motion_px, apparent_radius_px) × composite_coverage_scale
+    #      where max_motion_px = max |pos_i − pos_ref| across all frames.
+    #      composite_coverage_scale=2.5 → α≈0.92 at the farthest streak endpoint.
+    #
+    # Requires satellite.enabled = True (tracker must be active).
+    composite_enabled: bool = False
+
+    # Sigma scale factor for the motion-based Gaussian blend mask.
+    # sigma = max(max_motion_px, apparent_radius_px) × composite_coverage_scale
+    # 2.5 → α≈0.92 at streak endpoints (validated in exp9 on 2026-05-05 Jupiter data).
+    composite_coverage_scale: float = 2.5
+
+    # Multi-rate satellite compositing for Step 8 series composite (independent from step04).
+    # When True, each sliding-window stack in Step 8 applies the same exp9 Gaussian blend
+    # before centering and sharpening.  pole_pa is read from step04's derotation_log.json.
+    series_composite_enabled: bool = False
+
+
 # ── Step 4 / 8 / 9: De-rotation ───────────────────────────────────────────────
 
 @dataclass
@@ -174,6 +229,7 @@ class DerotationConfig:
     # Frames with norm_score below this threshold are excluded from stacking.
     # 0.0 = include all frames (disabled). Recommended: 0.05–0.1.
     min_quality_threshold: float = 0.05
+
 
 
 # ── Step 8: RGB / LRGB compositing ────────────────────────────────────────────
@@ -703,6 +759,7 @@ class PipelineConfig:
     wavelet: WaveletConfig = field(default_factory=WaveletConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     derotation: DerotationConfig = field(default_factory=DerotationConfig)
+    satellite: SatelliteConfig = field(default_factory=SatelliteConfig)
     composite: CompositeConfig = field(default_factory=CompositeConfig)
 
     gif: GifConfig = field(default_factory=GifConfig)

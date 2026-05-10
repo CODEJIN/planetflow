@@ -49,6 +49,7 @@ from pipeline.config import (
     WaveletConfig,
     QualityConfig,
     DerotationConfig,
+    SatelliteConfig,
     CompositeConfig,
     CompositeSpec,
     GifConfig,
@@ -1272,6 +1273,14 @@ class MainWindow(QMainWindow):
             min_quality_threshold = float(d.get("min_quality_threshold", 0.3)),
         )
 
+        _sat_composite_on = bool(d.get("satellite_composite_enabled", False))
+        satellite = SatelliteConfig(
+            enabled                  = _sat_composite_on,   # composite requires tracking
+            composite_enabled        = _sat_composite_on,
+            composite_coverage_scale = float(d.get("satellite_coverage_scale", 2.5)),
+            series_composite_enabled = bool(d.get("series_satellite_composite_enabled", False)),
+        )
+
         def _parse_specs(raw: list | None):
             """Convert a list of spec dicts to CompositeSpec objects, or None."""
             if not raw:
@@ -1361,6 +1370,7 @@ class MainWindow(QMainWindow):
             wavelet         = wavelet,
             quality         = quality,
             derotation      = derotation,
+            satellite       = satellite,
             composite        = composite,
             gif              = gif,
             grid            = grid,
