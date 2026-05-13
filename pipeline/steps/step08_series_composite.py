@@ -680,11 +680,7 @@ def _run_color_series(
                 _bin_frames.append(_bl)
                 _bin_dts.append((_bm["timestamp"] - _t_bin).total_seconds())
             _pa = auto_detect_pole_pa(
-                frames=_bin_frames, dt_sec_list=_bin_dts,
-                cx=_scx, cy=_scy, disk_radius_px=_ssa,
-                period_hours=config.derotation.rotation_period_hours,
-                warp_scale=config.derotation.warp_scale,
-                polar_equatorial_ratio=_sper,
+                frames=_bin_frames, cx=_scx, cy=_scy, disk_radius_px=_ssa,
             )
             _pa_samples.append(_pa)
             print(f"    bin sample: pole_pa={_pa:.1f}°")
@@ -1210,11 +1206,7 @@ def run(
                     _peq = float(np.clip(_sb / max(_sa, 1.0), 0.85, 1.0))
                     _dt = (_fm["timestamp"] - _t_cyc).total_seconds()
                     _pa = auto_detect_pole_pa(
-                        frames=[_lum], dt_sec_list=[_dt],
-                        cx=_cx, cy=_cy, disk_radius_px=_sa,
-                        period_hours=config.derotation.rotation_period_hours,
-                        warp_scale=config.derotation.warp_scale,
-                        polar_equatorial_ratio=_peq,
+                        frames=[_lum], cx=_cx, cy=_cy, disk_radius_px=_sa,
                     )
                     _raw_pas.append(_pa)
                     print(f"    cycle {_si}: pole_pa={_pa:.1f}° via {_pf}")

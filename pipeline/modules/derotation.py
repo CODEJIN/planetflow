@@ -430,40 +430,33 @@ def spherical_derotation_warp(
 
 def auto_detect_pole_pa(
     frames: List[np.ndarray],
-    dt_sec_list: List[float],
     cx: float,
     cy: float,
     disk_radius_px: float,
-    period_hours: float,
-    warp_scale: float,
-    pa_coarse_step: int = 5,
-    pa_fine_step: int = 1,
-    polar_equatorial_ratio: float = 1.0,
 ) -> float:
-    """Auto-detect the image-space pole position angle by maximising stack sharpness.
+    """Auto-detect the image-space pole position angle from belt gradient direction.
 
-    Sweeps pole_pa values from -90° to +90° in two passes (coarse then fine)
-    and returns the angle that produces the sharpest (highest Laplacian variance)
-    quality-weighted stack within the planet disk.
+    Builds a gradient-angle histogram over the inner disk (0.75R) using two
+    complementary wavelet-sharpened views of the frames, then returns the angle
+    of the dominant gradient direction converted to pole_pa convention.
 
-    This eliminates the need for manual camera PA entry: the frames themselves
-    carry the true equatorial drift direction, which the sweep recovers by
-    selecting the axis that best aligns surface features across time.
+    Jupiter's belts run perpendicular to the rotation axis, so the dominant
+    gradient direction inside the disk directly encodes the pole position angle:
+
+        pole_pa = 0°   → belts horizontal, North straight up
+        pole_pa = +θ   → belts tilted θ CCW from horizontal (camera rotated CW)
+        pole_pa = −θ   → belts tilted θ CW  from horizontal (camera rotated CCW)
+
+    No warp, no time information, and no rotation period are required — the
+    belt orientation is a static geometric property of each frame.
 
     Args:
-        frames:                List of 2-D float [0,1] images.
-        dt_sec_list:           Time offset (seconds) of each frame relative to
-                               the reference frame.  Same order as *frames*.
-        cx, cy:                Disk centre (pixels).
-        disk_radius_px:        Disk semi-major radius (pixels).
-        period_hours:          Planetary rotation period (hours).
-        warp_scale:            Empirical warp scale factor.
-        pa_coarse_step:        Angular step for the coarse pass (degrees).
-        pa_fine_step:          Angular step for the fine pass (degrees).
-        polar_equatorial_ratio: semi_minor / semi_major; 1.0 = sphere.
+        frames:        List of 2-D float [0,1] images (luminance).
+        cx, cy:        Disk centre (pixels).
+        disk_radius_px: Disk semi-major radius (pixels).
 
     Returns:
-        Best pole_pa_deg (float).
+        pole_pa_deg in (-90°, +90°].
     """
     h, w = frames[0].shape[:2]
     Y, X = np.ogrid[:h, :w]
@@ -523,24 +516,36 @@ def auto_detect_ns_flip(
     cy: float,
     disk_radius_px: float,
     period_hours: float,
+    warp_scale: float = 0.80,
+    pole_pa_deg: float = 0.0,
+    polar_equatorial_ratio: float = 1.0,
 ) -> bool:
-    """Auto-detect whether the image is South-up (flip_ns=True) by testing rotation direction.
+    """Auto-detect whether the image is South-up (flip_ns=True) by testing drift direction.
 
-    Jupiter's prograde rotation appears CCW in North-up images (flip_ns=False)
-    and CW in South-up images (flip_ns=True).  We test both by rigidly rotating
-    the earliest frame by ±Δθ and cross-correlating with the latest frame
-    inside the inner disk (0.75R).  Higher correlation → correct direction.
+    Applies spherical_derotation_warp to f_early with dt=+dt_span in both
+    flip_direction=False (prograde / North-up) and flip_direction=True (retrograde /
+    South-up) and cross-correlates each prediction with f_late inside the inner
+    disk (0.75R).  Higher correlation identifies the correct orientation.
+
+    Using the actual spherical warp (rather than a rigid-body rotation) is critical
+    for equatorial views (pole_pa ≈ 0°): planetary features move as a horizontal
+    shear proportional to sphere depth, which is perpendicular to a rigid rotation
+    and produces near-zero differential correlation with the old approach.
 
     Args:
-        frames:         List of 2-D float [0,1] images (any filter).
-        dt_sec_list:    Time offset (seconds) of each frame relative to a common
-                        reference.  Same order as *frames*.
-        cx, cy:         Disk centre (pixels).
-        disk_radius_px: Disk semi-major radius (pixels).
-        period_hours:   Planetary rotation period (hours).
+        frames:                 List of float [0,1] images (2-D or 3-D).
+        dt_sec_list:            Time offset (s) of each frame from a common reference.
+        cx, cy:                 Disk centre (pixels).
+        disk_radius_px:         Disk semi-major radius (pixels).
+        period_hours:           Atmospheric rotation period (hours).
+        warp_scale:             Empirical spherical warp scale (same value used in
+                                derotate_filter; default 0.80 for Jupiter).
+        pole_pa_deg:            Image-space pole PA from auto_detect_pole_pa().
+                                0° = North straight up (equatorial view).
+        polar_equatorial_ratio: semi_minor / semi_major from find_disk_center().
 
     Returns:
-        True if South is up (CW rotation seen in image), False if North is up.
+        True if South is up (flip_ns=True), False if North is up.
         Defaults to False when the cross-correlation is ambiguous (|Δcorr| < 0.001).
     """
     if len(frames) < 2:
@@ -554,8 +559,7 @@ def auto_detect_ns_flip(
         print("  [auto_ns_flip] all frames at same time — defaulting to North-up (flip_ns=False)")
         return False
 
-    dt_span = float(dts[i_max] - dts[i_min])
-    angle_mag = abs(dt_span) / (period_hours * 3600.0) * 360.0
+    dt_span = float(dts[i_max] - dts[i_min])   # always positive
 
     def _lum(f: np.ndarray) -> np.ndarray:
         if f.ndim == 3:
@@ -571,32 +575,44 @@ def auto_detect_ns_flip(
     ref_pixels = f_late[disk_mask].astype(np.float64)
     ref_std = float(ref_pixels.std())
 
+    # Forward-prediction correlation test.
+    # In astronomical images East is LEFT, so prograde features drift LEFTWARD (N-up).
+    #
+    #   flip_direction=False → map_x = xx − drift  (content shifts RIGHTWARD in output)
+    #                          Matches f_late when features actually move RIGHT → S-up
+    #   flip_direction=True  → map_x = xx + drift  (content shifts LEFTWARD in output)
+    #                          Matches f_late when features actually move LEFT  → N-up
+    #
+    # Note: this is the OPPOSITE of the de-rotation convention (where flip=False = N-up),
+    # because de-rotation undoes the motion while forward-prediction replicates it.
     scores: dict = {}
-    for south_up in (False, True):
-        # Jupiter prograde: CCW when North-up → cv2 angle = +Δθ (CCW-positive convention)
-        #                   CW when South-up  → cv2 angle = -Δθ
-        cv2_angle = -angle_mag if south_up else +angle_mag
-        M = cv2.getRotationMatrix2D((float(cx), float(cy)), cv2_angle, 1.0)
-        rotated = cv2.warpAffine(
-            f_early, M, (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0.0,
+    for flip_direction in (False, True):
+        predicted = spherical_derotation_warp(
+            f_early, +dt_span,
+            cx, cy, disk_radius_px,
+            period_hours=period_hours,
+            scale=warp_scale,
+            flip_direction=flip_direction,
+            pole_pa_deg=pole_pa_deg,
+            polar_equatorial_ratio=polar_equatorial_ratio,
         )
-        tgt_pixels = rotated[disk_mask].astype(np.float64)
+        tgt_pixels = predicted[disk_mask].astype(np.float64)
         tgt_std = float(tgt_pixels.std())
         if ref_std > 1e-6 and tgt_std > 1e-6:
-            scores[south_up] = float(np.corrcoef(ref_pixels, tgt_pixels)[0, 1])
+            scores[flip_direction] = float(np.corrcoef(ref_pixels, tgt_pixels)[0, 1])
         else:
-            scores[south_up] = 0.0
+            scores[flip_direction] = 0.0
 
-    delta = scores[True] - scores[False]
+    # S-up → scores[False] wins; N-up → scores[True] wins.
+    # flip_ns=True means S-up camera → de-rotation uses flip_direction=True.
+    delta = scores[False] - scores[True]
     flip_ns = delta > 0.0
     confidence = abs(delta)
+    angle_deg = abs(dt_span) / (period_hours * 3600.0) * 360.0
     label = "South-up" if flip_ns else "North-up"
     print(
-        f"  [auto_ns_flip] Δθ={angle_mag:.2f}°  "
-        f"CCW_corr={scores[False]:.5f}  CW_corr={scores[True]:.5f}  "
+        f"  [auto_ns_flip] Δt={dt_span:.0f}s ({angle_deg:.2f}°)  "
+        f"South-up_corr={scores[False]:.5f}  North-up_corr={scores[True]:.5f}  "
         f"→ {label} (flip_ns={flip_ns}, |Δcorr|={confidence:.5f})"
     )
     if confidence < 0.001:
@@ -867,6 +883,7 @@ def derotate_filter(
     min_quality_threshold: float = 0.0,
     pole_pa_deg: float = 0.0,
     color_mode: bool = False,
+    flip_direction: bool = False,
 ) -> Tuple[np.ndarray, dict]:
     """De-rotate and stack a single filter's images for one time window.
 
@@ -878,10 +895,12 @@ def derotate_filter(
         t_reference:   Window center time (reference orientation).
         period_hours:  System II period.
         warp_scale:    Spherical warp empirical scale factor (default 0.20).
-        align:         If True, apply sub-pixel phase correlation alignment
-                       after warp. Disable for speed testing.
-        color_mode:    If True, preserve RGB channels throughout; disk detection
-                       and alignment are computed on the luminance channel.
+        align:          If True, apply sub-pixel phase correlation alignment
+                        after warp. Disable for speed testing.
+        color_mode:     If True, preserve RGB channels throughout; disk detection
+                        and alignment are computed on the luminance channel.
+        flip_direction: If True, negate the warp drift direction (South-up camera).
+                        Must match the flip_ns detected by auto_detect_ns_flip().
 
     Returns:
         (stacked_image, log_dict)
@@ -949,7 +968,7 @@ def derotate_filter(
             img, dt_sec, ref_cx, ref_cy, ref_semi_a,
             period_hours=period_hours,
             scale=warp_scale,
-            flip_direction=False,
+            flip_direction=flip_direction,
             pole_pa_deg=pole_pa_deg,
             polar_equatorial_ratio=_polar_eq_ratio,
         )
@@ -1017,6 +1036,7 @@ def derotate_filter(
         "period_hours":          period_hours,
         "warp_scale":            warp_scale,
         "pole_pa_deg":           pole_pa_deg,
+        "flip_direction":        flip_direction,
         "align_enabled":         align,
         "normalize_brightness":  normalize_brightness,
         "min_quality_threshold": min_quality_threshold,
@@ -1038,6 +1058,7 @@ def derotate_window(
     min_quality_threshold: float = 0.0,
     pole_pa_deg: float = 0.0,
     color_mode: bool = False,
+    flip_ns: bool = False,
     out_dir: Optional[Path] = None,
 ) -> Dict[str, Tuple[Optional[Path], dict]]:
     """De-rotate and stack all filters in a single time window.
@@ -1048,6 +1069,8 @@ def derotate_window(
         period_hours:     System II rotation period.
         warp_scale:       Spherical warp scale (passed through to derotate_filter).
         align:            Sub-pixel alignment between frames.
+        flip_ns:          South-up camera flag from auto_detect_ns_flip(); passed
+                          as flip_direction to spherical_derotation_warp().
         out_dir:          If provided, save TIF files here.
 
     Returns:
@@ -1078,6 +1101,7 @@ def derotate_window(
                 min_quality_threshold=min_quality_threshold,
                 pole_pa_deg=pole_pa_deg,
                 color_mode=color_mode,
+                flip_direction=flip_ns,
             )
         except Exception as exc:
             print(f" ERROR: {exc}")

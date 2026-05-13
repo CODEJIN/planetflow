@@ -47,7 +47,7 @@ _BTN_STYLE = (
 )
 
 # Filter priority for sweep: prefer high-contrast, wide-band filters first
-_FILTER_PRIORITY = ["IR", "R", "G", "B", "CH4"]
+_FILTER_PRIORITY = ["IR", "R", "G", "B", "CH4", "color"]
 
 
 # ── Background worker ──────────────────────────────────────────────────────────
@@ -136,7 +136,10 @@ class _WarpSweepWorker(QThread):
 
     def _sweep(self) -> None:
         from pipeline.modules import image_io
-        from pipeline.modules.derotation import spherical_derotation_warp, find_disk_center
+        from pipeline.modules.derotation import (
+            spherical_derotation_warp, find_disk_center,
+            auto_detect_pole_pa, auto_detect_ns_flip,
+        )
 
         # ── pick filter ───────────────────────────────────────────────────────
         filt = self._pick_filter()
@@ -163,6 +166,24 @@ class _WarpSweepWorker(QThread):
         ref_img = imgs[0]
         cx, cy, radius, _, _ = find_disk_center(ref_img)
 
+        # ── auto-detect pole PA and NS flip ───────────────────────────────────
+        try:
+            pole_pa_deg = auto_detect_pole_pa(
+                frames=imgs, cx=cx, cy=cy, disk_radius_px=radius,
+            )
+        except Exception:
+            pole_pa_deg = 0.0
+
+        try:
+            flip_ns = auto_detect_ns_flip(
+                frames=imgs, dt_sec_list=dt_secs,
+                cx=cx, cy=cy, disk_radius_px=radius,
+                period_hours=self._period_hours,
+                pole_pa_deg=pole_pa_deg,
+            )
+        except Exception:
+            flip_ns = False
+
         # ── sweep ─────────────────────────────────────────────────────────────
         scales = np.arange(0.0, 1.55, 0.1)
         sharpness_values: list[float] = []
@@ -173,8 +194,8 @@ class _WarpSweepWorker(QThread):
                     img, dt, cx, cy, radius,
                     period_hours=self._period_hours,
                     scale=float(scale),
-                    flip_direction=False,
-                    pole_pa_deg=0.0,
+                    flip_direction=flip_ns,
+                    pole_pa_deg=pole_pa_deg,
                 )
                 for img, dt in zip(imgs, dt_secs)
             ]
@@ -192,12 +213,15 @@ class _WarpSweepWorker(QThread):
         else:
             improvement_pct = 0.0
 
+        flip_label = "S↑" if flip_ns else "N↑"
         if improvement_pct < 3.0:
             confidence = "low"
-            msg = S("sweep.result.low", scale=best_scale, filt=filt, pct=improvement_pct)
+            msg = S("sweep.result.low", scale=best_scale, filt=filt, pct=improvement_pct,
+                    pole_pa=pole_pa_deg, flip_label=flip_label)
         else:
             confidence = "high"
-            msg = S("sweep.result.high", scale=best_scale, filt=filt, pct=improvement_pct)
+            msg = S("sweep.result.high", scale=best_scale, filt=filt, pct=improvement_pct,
+                    pole_pa=pole_pa_deg, flip_label=flip_label)
 
         self.finished.emit(best_scale, confidence, msg)
 

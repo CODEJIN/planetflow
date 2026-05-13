@@ -88,7 +88,8 @@ class SatelliteTracker:
         flip_ew:             Mirror East-West (True = East on left, astronomical
                              convention).  False = East on right (default for
                              many planetary cameras with alt-az mounts).
-        flip_ns:             Mirror North-South.
+        flip_ns:             False = North-up camera (north = −y, default).
+                             True  = South-up camera (south = −y).
     """
 
     def __init__(
@@ -190,7 +191,7 @@ class SatelliteTracker:
 
                 # Sky-plane offsets (positive = East / North)
                 ew_sign  = -1.0 if self.flip_ew else +1.0
-                ns_sign  = -1.0 if self.flip_ns else +1.0
+                ns_sign  = +1.0 if self.flip_ns else -1.0
                 east_px  = ew_sign * dra_arcsec  / plate_scale_arcsec_per_px
                 north_px = ns_sign * ddec_arcsec / plate_scale_arcsec_per_px
 
@@ -933,7 +934,7 @@ def _shadow_pos_skyfield(
         dra_arcsec  = dra_deg * np.cos(np.radians(ref_dec)) * 3600.0
         ddec_arcsec = (dec - ref_dec) * 3600.0
         ew_sign  = -1.0 if flip_ew else +1.0
-        ns_sign  = -1.0 if flip_ns else +1.0
+        ns_sign  = +1.0 if flip_ns else -1.0
         east_px  = ew_sign * dra_arcsec  / plate_scale
         north_px = ns_sign * ddec_arcsec / plate_scale
         pa_rad   = np.radians(pole_pa_deg + np_ang_deg)

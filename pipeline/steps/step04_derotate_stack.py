@@ -33,12 +33,15 @@ import numpy as np
 from pipeline.config import PipelineConfig
 from pipeline.modules import derotation, image_io
 from pipeline.modules.derotation import (
+    auto_detect_ns_flip,
     auto_detect_pole_pa,
     find_disk_center,
     query_horizons_np_ang,
 )
 
-_FILT_PREF = ["IR", "R", "G", "B", "CH4"]
+# Mono filters in priority order; "color" is appended for color-camera sessions.
+_FILT_PREF      = ["IR", "R", "G", "B", "CH4"]
+_FILT_PREF_EXT  = ["IR", "R", "G", "B", "CH4", "color"]
 
 # Physical mean radii of Galilean moons (km) — used for apparent-size computation
 _SATELLITE_RADII_KM: Dict[str, float] = {
@@ -397,7 +400,7 @@ def _scan_session_pole_pa(
     print("  [pole_pa] Pre-scanning windows for image-space pole PA…")
     for win in windows:
         filt = next(
-            (f for f in _FILT_PREF
+            (f for f in _FILT_PREF_EXT
              if f in win.get("per_filter", {}) and win["per_filter"][f].get("included")),
             None,
         )
@@ -406,23 +409,13 @@ def _scan_session_pole_pa(
         rows = win["per_filter"][filt]["included"]
         t_center = win["center_time"]
         try:
-            frames, dts = [], []
+            frames = []
             for row in rows:
                 raw = image_io.read_tif(row["path"])
                 lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
                 frames.append(lum)
-                dts.append((row["timestamp"] - t_center).total_seconds())
-            cx, cy, semi_a, semi_b, _ = find_disk_center(frames[0])
-            polar_eq = float(np.clip(semi_b / max(semi_a, 1.0), 0.85, 1.0))
-            pa = auto_detect_pole_pa(
-                frames=frames,
-                dt_sec_list=dts,
-                cx=cx, cy=cy,
-                disk_radius_px=semi_a,
-                period_hours=config.derotation.rotation_period_hours,
-                warp_scale=config.derotation.warp_scale,
-                polar_equatorial_ratio=polar_eq,
-            )
+            cx, cy, semi_a, *_ = find_disk_center(frames[0])
+            pa = auto_detect_pole_pa(frames=frames, cx=cx, cy=cy, disk_radius_px=semi_a)
             print(f"    window {len(raw_pas)+1}: raw pole_pa = {pa:.1f}° via {filt}")
             raw_pas.append(pa)
         except Exception as exc:
@@ -440,6 +433,87 @@ def _scan_session_pole_pa(
     return session_pa
 
 
+def _detect_session_flip_ns(
+    windows: List[dict],
+    config: PipelineConfig,
+    session_pole_pa: float,
+) -> bool:
+    """Auto-detect camera NS orientation using spherical-warp drift direction test.
+
+    Selects the window with the longest time span (maximises feature displacement
+    → highest signal-to-noise for the test) and calls auto_detect_ns_flip() with
+    the corrected spherical-warp model.
+
+    Falls back to flip_ns=False (North-up) when:
+      - No usable window / fewer than 2 frames
+      - auto_detect_ns_flip() reports low confidence (|Δcorr| < 0.001)
+    """
+    print("  [flip_ns] Detecting camera NS orientation via spherical-warp drift test…")
+
+    # Choose the window with the longest time span for the best signal.
+    best_win = None
+    best_span = 0.0
+    for win in windows:
+        filt = next(
+            (f for f in _FILT_PREF_EXT
+             if f in win.get("per_filter", {}) and win["per_filter"][f].get("included")),
+            None,
+        )
+        if filt is None:
+            continue
+        rows = win["per_filter"][filt]["included"]
+        if len(rows) < 2:
+            continue
+        ts = [r["timestamp"] for r in rows]
+        span = (max(ts) - min(ts)).total_seconds()
+        if span > best_span:
+            best_span = span
+            best_win = (win, filt)
+
+    if best_win is None:
+        print("  [flip_ns] No suitable window found — defaulting to North-up (flip_ns=False)")
+        return False
+
+    win, filt = best_win
+    rows = win["per_filter"][filt]["included"]
+    t_center = win["center_time"]
+
+    try:
+        frames, dts = [], []
+        for row in rows:
+            raw = image_io.read_tif(row["path"])
+            lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
+            frames.append(lum)
+            dts.append((row["timestamp"] - t_center).total_seconds())
+
+        cx, cy, semi_a, semi_b, _ = find_disk_center(frames[0])
+        if semi_a < 5:
+            print("  [flip_ns] Disk detection failed — defaulting to North-up (flip_ns=False)")
+            return False
+        polar_eq = float(np.clip(semi_b / max(semi_a, 1.0), 0.85, 1.0))
+
+        flip_ns = auto_detect_ns_flip(
+            frames=frames,
+            dt_sec_list=dts,
+            cx=cx, cy=cy,
+            disk_radius_px=semi_a,
+            period_hours=config.derotation.rotation_period_hours,
+            warp_scale=config.derotation.warp_scale,
+            pole_pa_deg=session_pole_pa,
+            polar_equatorial_ratio=polar_eq,
+        )
+        orientation = "South-up" if flip_ns else "North-up"
+        print(
+            f"  [flip_ns] → {orientation} (flip_ns={flip_ns})  "
+            f"[span={best_span:.0f}s, filter={filt}]"
+        )
+        return flip_ns
+
+    except Exception as exc:
+        warnings.warn(f"  [flip_ns] Detection failed: {exc} — defaulting to North-up")
+        return False
+
+
 def _precompute_cv_offsets(
     window: dict,
     tracker,
@@ -455,7 +529,7 @@ def _precompute_cv_offsets(
     )
 
     filt = next(
-        (f for f in _FILT_PREF
+        (f for f in _FILT_PREF_EXT
          if f in window.get("per_filter", {}) and window["per_filter"][f].get("included")),
         None,
     )
@@ -535,16 +609,13 @@ def run(
         session_pole_pa = 0.0
         print("  [WARNING] pole_pa scan failed — using 0.0°")
 
-    # ── Auto-detect flip_ns from pole_pa sign ─────────────────────────────────
+    # ── Auto-detect flip_ns via spherical-warp drift test ────────────────────
     sat_cfg = config.satellite
     if sat_cfg.flip_ns is not None:
-        flip_ns = sat_cfg.flip_ns
+        flip_ns = bool(sat_cfg.flip_ns)
         print(f"  [flip_ns] manual override: {flip_ns}")
     else:
-        flip_ns = session_pole_pa < 0.0
-        orientation = "South-up" if flip_ns else "North-up"
-        print(f"  [flip_ns] auto-detected: pole_pa={session_pole_pa:.1f}° → "
-              f"{orientation} (flip_ns={flip_ns})")
+        flip_ns = _detect_session_flip_ns(windows, config, session_pole_pa)
 
     # ── SatelliteTracker ───────────────────────────────────────────────────────
     tracker = None
@@ -642,6 +713,7 @@ def run(
             min_quality_threshold=config.derotation.min_quality_threshold,
             pole_pa_deg=pole_pa_for_warp,
             color_mode=(config.camera_mode == "color"),
+            flip_ns=flip_ns,
             out_dir=win_out_dir,
         )
 
