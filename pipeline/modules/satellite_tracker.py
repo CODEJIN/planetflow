@@ -1,10 +1,12 @@
 """Galilean satellite position tracker for Jupiter transit detection.
 
-Queries JPL Horizons for Io/Europa/Ganymede/Callisto positions relative to
-Jupiter's disk center and converts them to pixel coordinates.  When Horizons
-is unavailable, falls back to OpenCV blob detection in the image data.
+Primary path: jup365.bsp (Skyfield) for Io/Europa/Ganymede/Callisto body
+positions, de440s.bsp for angular radius.  Identical LTT-corrected RA/Dec
+projection to Horizons; max discrepancy <0.16px across all test sessions.
+Falls back to JPL Horizons HTTPS if Skyfield kernels are unavailable, and
+to OpenCV blob detection as a last resort.
 
-Satellite Horizons IDs:
+Satellite Horizons IDs (fallback only):
     Io=501, Europa=502, Ganymede=503, Callisto=504
 """
 from __future__ import annotations
@@ -114,15 +116,21 @@ class SatelliteTracker:
         disk_radius_px: float,
         t_sample: datetime,
     ) -> float:
-        """Return plate scale in arcsec/px from disk radius and Horizons ang-diam."""
+        """Return plate scale in arcsec/px from disk radius and angular radius.
+
+        Tries Skyfield (de440s.bsp) first; falls back to Horizons HTTPS, then
+        to a hard-coded fallback.
+        """
         if self._plate_scale is not None:
             return self._plate_scale
 
-        ang_radius = self._query_angular_radius_arcsec(t_sample)
+        ang_radius = self._get_angular_radius_skyfield(t_sample)
+        if ang_radius is None:
+            ang_radius = self._query_angular_radius_arcsec(t_sample)
         if ang_radius is None:
             ang_radius = _JUP_ANG_RADIUS_FALLBACK_ARCSEC
             warnings.warn(
-                f"[SatTracker] Horizons ang-diam failed → using fallback "
+                f"[SatTracker] ang-diam unavailable → using fallback "
                 f"{_JUP_ANG_RADIUS_FALLBACK_ARCSEC:.1f} arcsec as Jupiter angular radius"
             )
 
@@ -150,21 +158,30 @@ class SatelliteTracker:
             t_list:                    List of UTC datetimes (one per frame).
             disk_cx, disk_cy:          Disk center in pixels (from find_disk_center).
             disk_radius_px:            Disk semi-major radius in pixels.
-            plate_scale_arcsec_per_px: If None, queried from Horizons.
+            plate_scale_arcsec_per_px: If None, computed from BSP ephemeris.
 
         Returns:
             {moon_name: [SatellitePos, ...]}  — same length as t_list.
-            Moons for which Horizons data is unavailable are omitted.
+            Moons for which ephemeris data is unavailable are omitted.
         """
         if not t_list:
             return {}
 
-        # Strip timezone info so comparisons with Horizons naive datetimes work
+        # Strip timezone info so comparisons with naive datetimes work
         t_list_naive = [t.replace(tzinfo=None) if t.tzinfo is not None else t for t in t_list]
 
         if plate_scale_arcsec_per_px is None:
             plate_scale_arcsec_per_px = self.get_plate_scale(disk_radius_px, t_list_naive[0])
 
+        # Try Skyfield (jup365.bsp) first — no network, sub-pixel accuracy vs Horizons
+        results = self._get_positions_skyfield(
+            t_list_naive, disk_cx, disk_cy, disk_radius_px,
+            plate_scale_arcsec_per_px, pole_pa_deg, np_ang_deg,
+        )
+        if results is not None:
+            return results
+
+        # Fallback: Horizons HTTPS
         t_start = min(t_list_naive) - timedelta(minutes=5)
         t_end   = max(t_list_naive) + timedelta(minutes=5)
 
@@ -173,7 +190,7 @@ class SatelliteTracker:
             warnings.warn("[SatTracker] Jupiter ephemeris unavailable → no satellite positions")
             return {}
 
-        results: Dict[str, List[SatellitePos]] = {}
+        results = {}
         for moon_name, moon_id in GALILEAN_MOONS.items():
             moon_ephem = self._query_ra_dec(moon_id, t_start, t_end)
             if not moon_ephem:
@@ -185,18 +202,14 @@ class SatelliteTracker:
                 jup_ra, jup_dec = _interp_ra_dec(jup_ephem, t)
                 moon_ra, moon_dec = _interp_ra_dec(moon_ephem, t)
 
-                # Angular offset in arcsec
                 dra_arcsec  = (moon_ra  - jup_ra)  * np.cos(np.radians(jup_dec)) * 3600.0
                 ddec_arcsec = (moon_dec - jup_dec) * 3600.0
 
-                # Sky-plane offsets (positive = East / North)
                 ew_sign  = -1.0 if self.flip_ew else +1.0
-                ns_sign  = +1.0 if self.flip_ns else -1.0
+                ns_sign  = -1.0 if self.flip_ns else +1.0
                 east_px  = ew_sign * dra_arcsec  / plate_scale_arcsec_per_px
                 north_px = ns_sign * ddec_arcsec / plate_scale_arcsec_per_px
 
-                # Rotate into camera frame using effective camera PA = pole_pa + NP.ang
-                # (auto_detect_pole_pa returns θ_cam − NP.ang, so +NP.ang recovers θ_cam)
                 pa_rad = np.radians(pole_pa_deg + np_ang_deg)
                 dx_px  = east_px * np.cos(pa_rad) + north_px * np.sin(pa_rad)
                 dy_px  = east_px * np.sin(pa_rad) - north_px * np.cos(pa_rad)
@@ -278,6 +291,104 @@ class SatelliteTracker:
             self._ra_dec_cache[cache_key] = result
         return result
 
+    def _get_angular_radius_skyfield(self, t: datetime) -> Optional[float]:
+        """Compute Jupiter equatorial angular radius (arcsec) from de440s.bsp distance."""
+        sf = _load_skyfield_kernels()
+        if sf is None:
+            return None
+        ts, eph, _ = sf
+        t_naive = t.replace(tzinfo=None) if t.tzinfo else t
+        t_sf = ts.utc(t_naive.year, t_naive.month, t_naive.day,
+                      t_naive.hour, t_naive.minute, t_naive.second)
+        earth_km = eph["earth"].at(t_sf).position.km
+        jup_km   = eph["jupiter barycenter"].at(t_sf).position.km
+        d_km = float(np.linalg.norm(jup_km - earth_km))
+        return float(np.degrees(np.arcsin(_JUP_EQ_RADIUS_KM / d_km)) * 3600.0)
+
+    def _get_positions_skyfield(
+        self,
+        t_list_naive: List[datetime],
+        disk_cx: float,
+        disk_cy: float,
+        disk_radius_px: float,
+        plate_scale_arcsec_per_px: float,
+        pole_pa_deg: float,
+        np_ang_deg: float,
+    ) -> Optional[Dict[str, List[SatellitePos]]]:
+        """Body positions for all 4 Galilean moons using jup365.bsp + LTT correction.
+
+        Identical projection formula to get_positions() Horizons path.
+        Returns None if Skyfield kernels are unavailable.
+        """
+        sf = _load_skyfield_kernels()
+        if sf is None:
+            return None
+        ts, eph, jup_moons = sf
+
+        results: Dict[str, List[SatellitePos]] = {}
+
+        for moon_name, sf_id in _MOON_SF_ID.items():
+            positions: List[SatellitePos] = []
+            for t in t_list_naive:
+                t_sf = ts.utc(t.year, t.month, t.day, t.hour, t.minute, t.second)
+                earth_km = eph["earth"].at(t_sf).position.km
+
+                # Light travel time from Jupiter to Earth
+                jup_km_obs = eph["jupiter barycenter"].at(t_sf).position.km
+                d_EJ_km = float(np.linalg.norm(jup_km_obs - earth_km))
+                lt_days  = d_EJ_km / (299792.458 * 86400.0)
+                t_emit   = ts.tt_jd(float(t_sf.tt) - lt_days)
+
+                # Positions at emission time from jup365 (same kernel → self-consistent)
+                jup_km  = jup_moons["jupiter barycenter"].at(t_emit).position.km
+                moon_km = jup_moons[sf_id].at(t_emit).position.km
+
+                def _ra_dec(pos_km: np.ndarray):
+                    d = pos_km - earth_km
+                    d = d / float(np.linalg.norm(d))
+                    dec = float(np.degrees(np.arcsin(float(np.clip(d[2], -1.0, 1.0)))))
+                    ra  = float(np.degrees(np.arctan2(float(d[1]), float(d[0]))) % 360.0)
+                    return ra, dec
+
+                jup_ra,  jup_dec  = _ra_dec(jup_km)
+                moon_ra, moon_dec = _ra_dec(moon_km)
+
+                dra_deg = moon_ra - jup_ra
+                if dra_deg >  180.0: dra_deg -= 360.0
+                if dra_deg < -180.0: dra_deg += 360.0
+                dra_arcsec  = dra_deg * np.cos(np.radians(jup_dec)) * 3600.0
+                ddec_arcsec = (moon_dec - jup_dec) * 3600.0
+
+                ew_sign  = -1.0 if self.flip_ew else +1.0
+                ns_sign  = -1.0 if self.flip_ns else +1.0
+                east_px  = ew_sign * dra_arcsec  / plate_scale_arcsec_per_px
+                north_px = ns_sign * ddec_arcsec / plate_scale_arcsec_per_px
+
+                pa_rad = np.radians(pole_pa_deg + np_ang_deg)
+                dx_px  = east_px * np.cos(pa_rad) + north_px * np.sin(pa_rad)
+                dy_px  = east_px * np.sin(pa_rad) - north_px * np.cos(pa_rad)
+
+                x_px  = disk_cx + dx_px
+                y_px  = disk_cy + dy_px
+                dist  = float(np.hypot(dx_px, dy_px))
+                positions.append(SatellitePos(
+                    name=moon_name, x_px=float(x_px), y_px=float(y_px),
+                    on_disk=dist < disk_radius_px, dist_px=dist,
+                ))
+
+            n_transit = sum(1 for p in positions if p.on_disk)
+            if n_transit > 0:
+                print(
+                    f"  [SatTracker] {moon_name}: {n_transit}/{len(t_list_naive)} frames"
+                    f" on disk → TRANSIT DETECTED"
+                )
+            else:
+                print(f"  [SatTracker] {moon_name}: off disk ({positions[0].dist_px:.0f}px"
+                      f"–{positions[-1].dist_px:.0f}px from center)")
+            results[moon_name] = positions
+
+        return results
+
     def get_shadow_positions(
         self,
         t_list: List[datetime],
@@ -287,7 +398,6 @@ class SatelliteTracker:
         plate_scale_arcsec_per_px: Optional[float] = None,
         pole_pa_deg: float = 0.0,
         np_ang_deg: float = 0.0,
-        moon_horizons_positions: Optional[Dict[str, List["SatellitePos"]]] = None,
         time_offset_sec: float = 0.0,
     ) -> Dict[str, List["SatellitePos"]]:
         """Return pixel positions of Galilean moon SHADOWS via Skyfield oblate-spheroid intersection.
@@ -295,11 +405,6 @@ class SatelliteTracker:
         Shoots a ray from the Sun through each moon and intersects Jupiter's oblate
         spheroid (R_eq=71492 km, R_pol=66854 km).  Transit detection is purely
         geometric — no Horizons /t flag needed.
-
-        If moon_horizons_positions is provided ({moon_name: [SatellitePos, ...]}
-        from get_positions()), the function computes the systematic Skyfield→Horizons
-        calibration offset for each moon (mean Horizons−Skyfield over on-disk frames)
-        and applies it to the corresponding shadow positions.
 
         Returns {"{moon}_shadow": [SatellitePos, ...]} for moons with detected shadow
         transits.  Requires Skyfield + de440s.bsp + jup365.bsp in /tmp/skyfield/.
@@ -330,10 +435,9 @@ class SatelliteTracker:
 
             shadow_key = f"{moon_name}_shadow"
             shadow_positions: List[SatellitePos] = []
-            moon_sf_positions: List[SatellitePos] = []
 
             for t in t_list_naive:
-                shad_pos, moon_sf_pos = _shadow_pos_skyfield(
+                shad_pos, _ = _shadow_pos_skyfield(
                     t, moon_body, eph, jup_moons, ts,
                     disk_cx, disk_cy, disk_radius_px,
                     plate_scale_arcsec_per_px,
@@ -344,35 +448,6 @@ class SatelliteTracker:
                     time_offset_sec=time_offset_sec,
                 )
                 shadow_positions.append(shad_pos)
-                moon_sf_positions.append(moon_sf_pos)
-
-            # ── Horizons calibration: apply (Horizons − Skyfield) offset ────
-            cal_dx, cal_dy = 0.0, 0.0
-            if moon_horizons_positions and moon_name in moon_horizons_positions:
-                h_list = moon_horizons_positions[moon_name]
-                deltas = [
-                    (h.x_px - s.x_px, h.y_px - s.y_px)
-                    for h, s in zip(h_list, moon_sf_positions)
-                    if h.on_disk and s.on_disk
-                ]
-                if deltas:
-                    cal_dx = float(np.mean([d[0] for d in deltas]))
-                    cal_dy = float(np.mean([d[1] for d in deltas]))
-                    print(
-                        f"  [SatTracker] {moon_name} Horizons calibration:"
-                        f" Δx={cal_dx:+.2f}px  Δy={cal_dy:+.2f}px"
-                        f"  (from {len(deltas)} on-disk frames)"
-                    )
-                    shadow_positions = [
-                        SatellitePos(
-                            name=p.name,
-                            x_px=p.x_px + cal_dx,
-                            y_px=p.y_px + cal_dy,
-                            on_disk=p.on_disk,
-                            dist_px=p.dist_px,
-                        )
-                        for p in shadow_positions
-                    ]
 
             n_transit = sum(1 for p in shadow_positions if p.on_disk)
             if n_transit > 0:
@@ -430,6 +505,139 @@ class SatelliteTracker:
                 except ValueError:
                     pass
         return None
+
+
+# ── Camera N/S orientation detection ─────────────────────────────────────────
+
+_JUPITER_HORIZONS_ID = "599"
+
+
+def detect_tracker_flip_ns(
+    frames: List[np.ndarray],
+    cx: float,
+    cy: float,
+    disk_radius_px: float,
+    pole_pa_deg: float = 0.0,
+    horizons_id: str = _JUPITER_HORIZONS_ID,
+) -> Tuple[Optional[bool], float]:
+    """Detect camera N/S orientation for the satellite tracker.
+
+    Uses belt brightness asymmetry: Jupiter's South Equatorial Belt (SEB) is
+    consistently wider and darker than the North Equatorial Belt (NEB).
+    Whichever hemisphere of the image contains the wider equatorial belt is
+    identified as south, determining whether the camera is South-up or North-up.
+
+    Only implemented for Jupiter (horizons_id "599").  Returns (None, 0.0) for
+    other bodies.
+
+    Args:
+        frames:          List of 2-D float [0,1] images (luminance).
+        cx, cy:          Disk centre in pixels.
+        disk_radius_px:  Semi-major disk radius in pixels.
+        pole_pa_deg:     Belt-axis PA in image space (from auto_detect_pole_pa).
+        horizons_id:     JPL Horizons body ID of the target planet.
+
+    Returns:
+        (flip_ns, confidence)
+        flip_ns=True  → South-up camera (SEB at image-top).
+        flip_ns=False → North-up camera (SEB at image-bottom).
+        flip_ns=None  → inconclusive or not applicable; confidence < threshold.
+    """
+    if horizons_id != _JUPITER_HORIZONS_ID:
+        return None, 0.0
+
+    if not frames:
+        return None, 0.0
+
+    avg = np.mean(np.stack([
+        f.astype(np.float32) if f.ndim == 2 else f.astype(np.float32).mean(axis=2)
+        for f in frames
+    ], axis=0), axis=0)
+    h, w = avg.shape
+
+    # Rotate image so equatorial belts run exactly horizontally
+    if abs(pole_pa_deg) > 0.5:
+        M = cv2.getRotationMatrix2D((float(cx), float(cy)), -float(pole_pa_deg), 1.0)
+        rotated = cv2.warpAffine(
+            avg, M, (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+    else:
+        rotated = avg
+
+    # Vertical strip through disk centre (±10 % of disk_r in x)
+    strip_w = max(3, int(0.10 * disk_radius_px))
+    x1 = max(0, int(cx) - strip_w)
+    x2 = min(w, int(cx) + strip_w + 1)
+
+    y_lo = max(0, int(cy - 0.80 * disk_radius_px))
+    y_hi = min(h, int(cy + 0.80 * disk_radius_px) + 1)
+    strip = rotated[y_lo:y_hi, x1:x2].mean(axis=1)
+
+    n = len(strip)
+    if n < 20:
+        return None, 0.0
+
+    sigma = max(2, int(disk_radius_px * 0.025))
+    sm = cv2.GaussianBlur(
+        strip.reshape(1, -1).astype(np.float32),
+        (0, 0), sigmaX=float(sigma),
+    ).flatten()
+
+    eq = max(5, min(n - 5, int(round(cy)) - y_lo))
+    upper = sm[:eq]   # image-top half
+    lower = sm[eq:]   # image-bottom half
+
+    if len(upper) < 8 or len(lower) < 8:
+        return None, 0.0
+
+    def _belt_width(profile: np.ndarray) -> float:
+        min_idx = int(np.argmin(profile))
+        min_val = float(profile[min_idx])
+        max_val = float(profile.max())
+        depth = max_val - min_val
+        if depth < 0.02:
+            return 0.0
+        thresh = min_val + 0.5 * depth
+        lo, hi = min_idx, min_idx
+        while lo > 0 and profile[lo] < thresh:
+            lo -= 1
+        while hi < len(profile) - 1 and profile[hi] < thresh:
+            hi += 1
+        return float(hi - lo)
+
+    belt_zone = min(len(upper), len(lower), int(0.55 * disk_radius_px))
+    upper_inner = upper[-belt_zone:]
+    lower_inner = lower[:belt_zone]
+
+    upper_w = _belt_width(upper_inner)
+    lower_w = _belt_width(lower_inner)
+    total_w = upper_w + lower_w
+    if total_w < 1.0:
+        return None, 0.0
+
+    # Width signal: > 0 → upper belt wider → SEB in upper half → South-up
+    width_asymmetry = (upper_w - lower_w) / total_w
+
+    # Brightness signal: SEB is darker; > 0 → upper half darker → South-up
+    upper_dark = float(upper_inner.min()) if len(upper_inner) else 1.0
+    lower_dark = float(lower_inner.min()) if len(lower_inner) else 1.0
+    brightness_signal = (lower_dark - upper_dark) / (abs(lower_dark - upper_dark) + 0.01)
+
+    score = 0.7 * width_asymmetry + 0.3 * brightness_signal
+    confidence = float(min(1.0, abs(score) * 2.5))
+
+    print(
+        f"  [tracker_flip] upper_w={upper_w:.1f}px lower_w={lower_w:.1f}px  "
+        f"upper_dark={upper_dark:.3f} lower_dark={lower_dark:.3f}  "
+        f"score={score:.3f}  confidence={confidence:.3f}"
+    )
+
+    if confidence < 0.25:
+        return None, confidence
+
+    return bool(score > 0), confidence
 
 
 # ── CV-based fallback ──────────────────────────────────────────────────────────
@@ -934,7 +1142,7 @@ def _shadow_pos_skyfield(
         dra_arcsec  = dra_deg * np.cos(np.radians(ref_dec)) * 3600.0
         ddec_arcsec = (dec - ref_dec) * 3600.0
         ew_sign  = -1.0 if flip_ew else +1.0
-        ns_sign  = +1.0 if flip_ns else -1.0
+        ns_sign  = -1.0 if flip_ns else +1.0
         east_px  = ew_sign * dra_arcsec  / plate_scale
         north_px = ns_sign * ddec_arcsec / plate_scale
         pa_rad   = np.radians(pole_pa_deg + np_ang_deg)
@@ -1051,130 +1259,4 @@ def _local_extremum_centroid(
     return best_pt
 
 
-def refine_positions_with_cv(
-    ref_lum: np.ndarray,
-    disk_cx: float,
-    disk_cy: float,
-    disk_radius_px: float,
-    sat_positions: Dict[str, List[SatellitePos]],
-    search_radius_px: float = 35.0,
-) -> Tuple[Dict[str, List[SatellitePos]], Dict[str, Tuple[float, float]]]:
-    """Refine Horizons-predicted positions using local-patch extremum search.
 
-    For each on-disk satellite/shadow, finds the brightest (body) or darkest
-    (shadow) cluster within search_radius_px of the Horizons prediction.
-    The systematic offset is applied uniformly to all frames for that satellite.
-
-    Returns:
-        refined_positions: same structure as sat_positions, with corrected centers.
-        deltas_xy: {name: (dx, dy)} — (0.0, 0.0) if no match found.
-    """
-    refined:   Dict[str, List[SatellitePos]]  = {}
-    deltas_xy: Dict[str, Tuple[float, float]] = {}
-
-    for name, positions in sat_positions.items():
-        is_shadow = name.endswith("_shadow")
-
-        ref_idx = next((i for i, p in enumerate(positions) if p is not None and p.on_disk), None)
-        if ref_idx is None:
-            refined[name]   = positions
-            deltas_xy[name] = (0.0, 0.0)
-            continue
-
-        ref_pos = positions[ref_idx]
-        result  = _local_extremum_centroid(
-            ref_lum, ref_pos.x_px, ref_pos.y_px,
-            search_radius=search_radius_px,
-            is_shadow=is_shadow,
-        )
-
-        if result is None:
-            refined[name]   = positions
-            deltas_xy[name] = (0.0, 0.0)
-            print(f"  [CV refine] {name}: local search failed → Horizons kept")
-            continue
-
-        rx, ry = result
-        dx = rx - ref_pos.x_px
-        dy = ry - ref_pos.y_px
-        dist = float(np.hypot(dx, dy))
-
-        if dist > search_radius_px * 0.9:
-            refined[name]   = positions
-            deltas_xy[name] = (0.0, 0.0)
-            print(f"  [CV refine] {name}: correction {dist:.1f}px too large → Horizons kept")
-            continue
-
-        print(f"  [CV refine] {name}: Δ=({dx:+.1f},{dy:+.1f})px  dist={dist:.1f}px → corrected")
-
-        corrected = []
-        for pos in positions:
-            if pos is None or not pos.on_disk:
-                corrected.append(pos)
-            else:
-                corrected.append(SatellitePos(
-                    name=pos.name,
-                    x_px=pos.x_px + dx, y_px=pos.y_px + dy,
-                    on_disk=True, dist_px=pos.dist_px,
-                ))
-        refined[name]   = corrected
-        deltas_xy[name] = (dx, dy)
-
-    return refined, deltas_xy
-
-
-def apply_cv_offsets(
-    sat_positions: Dict[str, List[SatellitePos]],
-    offsets: Dict[str, Tuple[float, float]],
-) -> Dict[str, List[SatellitePos]]:
-    """Apply pre-computed (dx, dy) offsets to Horizons positions."""
-    refined: Dict[str, List[SatellitePos]] = {}
-    for name, positions in sat_positions.items():
-        dx, dy = offsets.get(name, (0.0, 0.0))
-        if dx == 0.0 and dy == 0.0:
-            refined[name] = positions
-            continue
-        dist = float(np.hypot(dx, dy))
-        print(f"  [CV refine] {name}: Δ=({dx:+.1f},{dy:+.1f})px  dist={dist:.1f}px → applied (pre-computed)")
-        corrected = []
-        for pos in positions:
-            if pos is None or not pos.on_disk:
-                corrected.append(pos)
-            else:
-                corrected.append(SatellitePos(
-                    name=pos.name,
-                    x_px=pos.x_px + dx, y_px=pos.y_px + dy,
-                    on_disk=True, dist_px=pos.dist_px,
-                ))
-        refined[name] = corrected
-    return refined
-
-
-def average_body_shadow_offsets(
-    offsets: Dict[str, Tuple[float, float]],
-) -> Dict[str, Tuple[float, float]]:
-    """Average body + shadow corrections for the same moon when both are valid.
-
-    When both the body (e.g. 'Europa') and its shadow ('Europa_shadow') have
-    non-zero CV corrections, replaces both with their mean, giving a more
-    robust estimate than either measurement alone.
-    """
-    averaged = dict(offsets)
-    for body_key in list(offsets):
-        if body_key.endswith("_shadow"):
-            continue
-        shadow_key = f"{body_key}_shadow"
-        if shadow_key not in offsets:
-            continue
-        bdx, bdy = offsets[body_key]
-        sdx, sdy = offsets[shadow_key]
-        if (bdx != 0.0 or bdy != 0.0) and (sdx != 0.0 or sdy != 0.0):
-            adx, ady = (bdx + sdx) / 2.0, (bdy + sdy) / 2.0
-            print(
-                f"  [CV avg/{body_key}] body=({bdx:+.1f},{bdy:+.1f})"
-                f" shadow=({sdx:+.1f},{sdy:+.1f})"
-                f" → avg=({adx:+.1f},{ady:+.1f})"
-            )
-            averaged[body_key]   = (adx, ady)
-            averaged[shadow_key] = (adx, ady)
-    return averaged

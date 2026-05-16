@@ -8,3 +8,5 @@ gui/__pycache__/
 *.txt
 *.webp
 run_3to10.py
+Derotation_Paper_Dataset*/
+evaluation/

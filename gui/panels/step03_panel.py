@@ -146,7 +146,7 @@ class Step03Panel(BasePanel):
         # n_windows
         self._n_windows = QSpinBox()
         self._n_windows.setStyleSheet(_INT_SPINBOX_STYLE)
-        self._n_windows.setRange(1, 10)
+        self._n_windows.setRange(1, 20)
         self._n_windows.setSingleStep(1)
         self._n_windows.setValue(1)
         self._n_windows.setToolTip(S("step03.n_windows.tooltip"))

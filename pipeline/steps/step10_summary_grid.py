@@ -15,6 +15,7 @@ Output (when config.save_step10 is True):
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -59,6 +60,108 @@ def _float_to_pil(img: np.ndarray, target_px: int) -> Image.Image:
     if target_px > 0 and (pil.width != target_px or pil.height != target_px):
         pil = pil.resize((target_px, target_px), Image.LANCZOS)
     return pil
+
+
+def _estimate_disk_radius(img_np: np.ndarray, display_size: int) -> Tuple[float, float, float]:
+    """Return (cx, cy, radius) in display_size pixel coordinates.
+
+    Scans rightward from the image centre until brightness drops below 25 % of
+    maximum, then scales to display_size.  Assumes the disk is centred.
+    """
+    lum = img_np.mean(axis=2) if img_np.ndim == 3 else img_np
+    h, w = lum.shape
+    scale = display_size / max(h, w)
+    cx_d = cy_d = display_size / 2
+    thresh = float(lum.max()) * 0.25
+    cy_i, cx_i = h // 2, w // 2
+    r_px = int(w * 0.42)
+    for xi in range(cx_i, min(w, cx_i + w // 2)):
+        if lum[cy_i, xi] < thresh:
+            r_px = xi - cx_i
+            break
+    return cx_d, cy_d, max(10.0, r_px * scale)
+
+
+def _draw_rotation_indicators(
+    draw: ImageDraw.ImageDraw,
+    cx: float,
+    cy: float,
+    disk_r: float,
+    pole_pa_deg: float,
+    tracker_flip_ns: bool,
+    derot_flip: bool,
+    small_font,
+) -> None:
+    """Draw rotation-axis and rotation-direction indicators outside the disk.
+
+    Nothing is drawn inside the planetary disk.
+    """
+    pole_rad = math.radians(pole_pa_deg)
+
+    # Pole axis unit vector in screen coords (y increases downward).
+    # pole_pa=0 → axis vertical; positive values tilt north clockwise.
+    ax = math.sin(pole_rad)
+    ay = -math.cos(pole_rad)   # negative y = upward in screen
+
+    # North pole direction: N-up → (ax, ay); S-up → opposite
+    if not tracker_flip_ns:
+        north_x, north_y = ax, ay
+    else:
+        north_x, north_y = -ax, -ay
+
+    # ── Pole axis segments (outside disk only) ────────────────────────────────
+    axis_gap = 12    # px gap between limb and indicator start
+    pole_ext = 12    # px length of the indicator segment
+    label_pad = 6    # px beyond line end to label centre
+
+    for (dx, dy), label, color in [
+        (( north_x,  north_y), "N", (140, 170, 255)),
+        ((-north_x, -north_y), "S", (255, 140, 140)),
+    ]:
+        x1 = cx + dx * (disk_r + axis_gap)
+        y1 = cy + dy * (disk_r + axis_gap)
+        x2 = cx + dx * (disk_r + axis_gap + pole_ext)
+        y2 = cy + dy * (disk_r + axis_gap + pole_ext)
+        draw.line([(int(x1), int(y1)), (int(x2), int(y2))], fill=color, width=2)
+        tw, th = _text_size(draw, label, small_font)
+        lx = int(x2 + dx * label_pad - tw // 2)
+        ly = int(y2 + dy * label_pad - th // 2)
+        draw.text((lx, ly), label, fill=color, font=small_font)
+
+    # ── Rotation direction arrow ───────────────────────────────────────────────
+    # "Equatorial rightward" = 90° CCW of north pole vector in screen coords.
+    # CCW rotation: (x, y) → (−y, x)
+    eq_x = -north_y
+    eq_y =  north_x
+
+    # derot_flip=False → features drifted toward +eq in camera → arrow in +eq dir
+    # derot_flip=True  → features drifted toward −eq in camera → arrow in −eq dir
+    if not derot_flip:
+        rot_x, rot_y = eq_x, eq_y
+    else:
+        rot_x, rot_y = -eq_x, -eq_y
+
+    arrow_r = disk_r + axis_gap + 12   # distance from center to arrow midpoint
+    mid_x = cx + rot_x * arrow_r
+    mid_y = cy + rot_y * arrow_r
+    half = 12
+    tail_x, tail_y = mid_x - rot_x * half, mid_y - rot_y * half
+    tip_x,  tip_y  = mid_x + rot_x * half, mid_y + rot_y * half
+
+    arrow_color = (255, 215, 60)
+    draw.line([(int(tail_x), int(tail_y)), (int(tip_x), int(tip_y))],
+              fill=arrow_color, width=2)
+
+    perp_x, perp_y = -rot_y, rot_x
+    head = 6
+    pts = [
+        (int(tip_x), int(tip_y)),
+        (int(tip_x - rot_x * head + perp_x * head * 0.5),
+         int(tip_y - rot_y * head + perp_y * head * 0.5)),
+        (int(tip_x - rot_x * head - perp_x * head * 0.5),
+         int(tip_y - rot_y * head - perp_y * head * 0.5)),
+    ]
+    draw.polygon(pts, fill=arrow_color)
 
 
 def _get_font(size: int) -> ImageFont.ImageFont:
@@ -939,13 +1042,24 @@ def run_analytic(
         y += filter_lbl_h
 
         # ── Filter images ─────────────────────────────────────────────────────
+        sess = (data04 or {}).get("session", {})
         for i, (fpath, _) in enumerate(filter_entries):
             x = filter_x0 + i * (filter_px + gap)
             if fpath is not None and fpath.exists():
                 try:
                     img = image_io.read_png(fpath)
+                    cx_d, cy_d, disk_r = _estimate_disk_radius(img, filter_px)
                     img = _apply_levels(img, cfg.black_point, cfg.white_point, cfg.gamma)
                     canvas.paste(_float_to_pil(img, filter_px), (x, y))
+                    if sess:
+                        _draw_rotation_indicators(
+                            draw,
+                            x + cx_d, y + cy_d, disk_r,
+                            sess.get("pole_pa_deg", 0.0),
+                            sess.get("tracker_flip_ns", False),
+                            sess.get("derot_flip", False),
+                            small_font,
+                        )
                 except Exception as exc:
                     print(f"  [Analytic][WARN] {fpath.name}: {exc}")
         y += filter_px
@@ -978,8 +1092,18 @@ def run_analytic(
             if cpath is not None and cpath.exists():
                 try:
                     img = image_io.read_png(cpath)
+                    cx_d, cy_d, disk_r = _estimate_disk_radius(img, composite_px)
                     img = _apply_levels(img, cfg.black_point, cfg.white_point, cfg.gamma)
                     canvas.paste(_float_to_pil(img, composite_px), (x, y))
+                    if sess:
+                        _draw_rotation_indicators(
+                            draw,
+                            x + cx_d, y + cy_d, disk_r,
+                            sess.get("pole_pa_deg", 0.0),
+                            sess.get("tracker_flip_ns", False),
+                            sess.get("derot_flip", False),
+                            small_font,
+                        )
                 except Exception as exc:
                     print(f"  [Analytic][WARN] {cpath.name}: {exc}")
         y += composite_px

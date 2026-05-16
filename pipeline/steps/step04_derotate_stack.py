@@ -36,8 +36,11 @@ from pipeline.modules.derotation import (
     auto_detect_ns_flip,
     auto_detect_pole_pa,
     find_disk_center,
+    pole_pa_from_disk_ellipse,
     query_horizons_np_ang,
+    spherical_derotation_warp,
 )
+from pipeline.modules.satellite_tracker import detect_tracker_flip_ns
 
 # Mono filters in priority order; "color" is appended for color-camera sessions.
 _FILT_PREF      = ["IR", "R", "G", "B", "CH4"]
@@ -134,7 +137,7 @@ def _satellite_translate_stack(
     weights: List[float] = []
     for i, row in enumerate(rows):
         pos = positions[i]
-        if pos is None:
+        if pos is None or not pos.on_disk:
             continue
         raw = image_io.read_tif(row["path"])
         img = raw.astype(np.float32) / 65535.0 if raw.dtype == np.uint16 else raw.astype(np.float32)
@@ -149,34 +152,19 @@ def _satellite_translate_stack(
     return quality_weighted_stack(imgs, weights)
 
 
-def _blend_satellite_composite(
+def _blend_one(
     planet: np.ndarray,
-    europa_stack: Optional[np.ndarray],
-    shadow_stack: Optional[np.ndarray],
-    europa_ref,
-    shadow_ref,
-    europa_sigma: float,
-    shadow_sigma: float,
+    sat_stack: Optional[np.ndarray],
+    ref_pos,
+    sigma: float,
 ) -> np.ndarray:
-    """Blend satellite-derotated patches into planet stack via Gaussian masks.
-
-    Works for both grayscale (H, W) and color (H, W, 3) planet arrays.
-    The alpha mask is always computed in 2D and broadcast over channels when needed.
-    """
-    result = planet.copy()
-    is_color = planet.ndim == 3
-    shape2d = planet.shape[:2]
-    if europa_stack is not None and europa_ref is not None and europa_ref.on_disk:
-        alpha = _gaussian_mask(shape2d, europa_ref.x_px, europa_ref.y_px, europa_sigma)
-        if is_color:
-            alpha = alpha[:, :, np.newaxis]
-        result = (1.0 - alpha) * result + alpha * europa_stack
-    if shadow_stack is not None and shadow_ref is not None and shadow_ref.on_disk:
-        alpha = _gaussian_mask(shape2d, shadow_ref.x_px, shadow_ref.y_px, shadow_sigma)
-        if is_color:
-            alpha = alpha[:, :, np.newaxis]
-        result = (1.0 - alpha) * result + alpha * shadow_stack
-    return np.clip(result, 0.0, 1.0)
+    """Blend a single satellite or shadow stack into the planet image."""
+    if sat_stack is None or ref_pos is None or not ref_pos.on_disk:
+        return planet
+    alpha = _gaussian_mask(planet.shape[:2], ref_pos.x_px, ref_pos.y_px, sigma)
+    if planet.ndim == 3:
+        alpha = alpha[:, :, np.newaxis]
+    return np.clip((1.0 - alpha) * planet + alpha * sat_stack, 0.0, 1.0)
 
 
 # ── NOT USED: Approach B — planet warp + satellite translation ─────────────────
@@ -290,20 +278,18 @@ def _apply_satellite_composite(
     pole_pa_deg: float,
     np_ang_deg: float,
 ) -> None:
-    """Apply multi-rate satellite compositing to planet-derotated TIFs.
+    """Apply multi-rate satellite compositing for all on-disk moons and shadows.
 
-    Each filter's satellite reference position is computed in that filter's own
-    disk coordinate system (using that filter's detected disk_cx/cy/sr).  This
-    ensures the satellite lands at the same disk-relative position in every filter
-    TIF.  When step06's align_channels() shifts non-reference channels to match
-    the reference disk position, the satellite shifts by the same amount and
-    remains co-located across all channels in the final composite.
+    Each filter uses its own disk center for tracker queries so that the
+    satellite lands at the same disk-relative pixel in every filter TIF.
+    Any Galilean moon body or shadow predicted to be on disk at t_center is
+    composited; moons that are off disk are silently skipped.
     """
     t_center = window["center_time"]
     t_center_naive = t_center.replace(tzinfo=None) if t_center.tzinfo else t_center
     coverage_scale = config.satellite.composite_coverage_scale
 
-    # ── Reference filter: used only for plate_scale / apparent radius ──────────
+    # ── Reference filter: plate_scale only ────────────────────────────────────
     ref_filt = next(
         (f for f in _FILT_PREF
          if filter_results.get(f, (None,))[0] is not None
@@ -312,20 +298,14 @@ def _apply_satellite_composite(
     )
     if ref_filt is None:
         return
-    ref_tif = image_io.read_tif(filter_results[ref_filt][0])
-    ref_lum = ref_tif.astype(np.float32) / 65535.0 if ref_tif.dtype == np.uint16 else ref_tif.astype(np.float32)
+    ref_raw = image_io.read_tif(filter_results[ref_filt][0])
+    ref_lum = ref_raw.astype(np.float32) / 65535.0 if ref_raw.dtype == np.uint16 else ref_raw.astype(np.float32)
     if ref_lum.ndim == 3:
         ref_lum = ref_lum.mean(axis=2)
     _, _, ref_sr, _, _ = derotation.find_disk_center(ref_lum)
-
     plate_scale = tracker.get_plate_scale(ref_sr, t_center_naive)
-    app_r = _apparent_radius_px("Europa", t_center_naive, plate_scale)
 
-    # ── Per-filter satellite composite ─────────────────────────────────────────
-    # Each filter uses its OWN disk center for all tracker queries.
-    # This ensures the satellite lands at the same disk-relative position in every
-    # filter TIF, so step06's disk alignment shift does not create cross-filter
-    # satellite position differences in the final composite.
+    # ── Per-filter composite ───────────────────────────────────────────────────
     for filt, (out_path, _) in filter_results.items():
         if out_path is None or not out_path.exists():
             continue
@@ -335,7 +315,6 @@ def _apply_satellite_composite(
 
         print(f"    [{filt}] satellite composite…")
 
-        # Load this filter's de-rotated TIF and detect its own disk center
         planet_raw = image_io.read_tif(out_path)
         planet = (planet_raw.astype(np.float32) / 65535.0 if planet_raw.dtype == np.uint16
                   else planet_raw.astype(np.float32))
@@ -343,7 +322,7 @@ def _apply_satellite_composite(
         planet_lum = planet.mean(axis=2) if is_color else planet
         disk_cx, disk_cy, disk_sr, _, _ = derotation.find_disk_center(planet_lum)
 
-        # Canonical satellite ref at t_center in THIS filter's coordinate system
+        # Canonical positions at t_center — determines on_disk and reference coords
         canonical_body = tracker.get_positions(
             [t_center_naive], disk_cx, disk_cy, disk_sr,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
@@ -351,14 +330,10 @@ def _apply_satellite_composite(
         canonical_shad = tracker.get_shadow_positions(
             [t_center_naive], disk_cx, disk_cy, disk_sr,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
-            moon_horizons_positions=canonical_body,
         )
-        europa_ref = canonical_body.get("Europa", [None])[0]
-        shadow_ref = canonical_shad.get("Europa_shadow", [None])[0]
 
         time_sorted = sorted(rows, key=lambda r: r["timestamp"])
         t_list = [r["timestamp"] for r in time_sorted]
-
         body_pos = tracker.get_positions(
             t_list, disk_cx, disk_cy, disk_sr,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
@@ -366,69 +341,101 @@ def _apply_satellite_composite(
         shad_pos = tracker.get_shadow_positions(
             t_list, disk_cx, disk_cy, disk_sr,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
-            moon_horizons_positions=body_pos,
         )
-        europa_positions = body_pos.get("Europa", [None] * len(time_sorted))
-        shadow_positions = shad_pos.get("Europa_shadow", [None] * len(time_sorted))
 
-        europa_sigma = _compute_sigma_from_motion("Europa", europa_positions, europa_ref, app_r, coverage_scale)
-        shadow_sigma = _compute_sigma_from_motion("Europa_shadow", shadow_positions, shadow_ref, app_r, coverage_scale)
+        composite = planet if is_color else planet_lum
+        composited: List[str] = []
 
-        europa_stack = _satellite_translate_stack(time_sorted, europa_positions, europa_ref, keep_color=is_color)
-        shadow_stack = _satellite_translate_stack(time_sorted, shadow_positions, shadow_ref, keep_color=is_color)
+        # Body composites — any moon on disk at t_center
+        for moon_name, ref_list in canonical_body.items():
+            ref = ref_list[0]
+            if not ref.on_disk:
+                continue
+            positions = body_pos.get(moon_name, [None] * len(time_sorted))
+            app_r = _apparent_radius_px(moon_name, t_center_naive, plate_scale)
+            sigma = _compute_sigma_from_motion(moon_name, positions, ref, app_r, coverage_scale)
+            stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
+            composite = _blend_one(composite, stack, ref, sigma)
+            composited.append(f"{moon_name}(σ={sigma:.1f}px)")
 
-        planet_for_blend = planet if is_color else planet_lum
-        comp = _blend_satellite_composite(
-            planet_for_blend, europa_stack, shadow_stack,
-            europa_ref, shadow_ref,
-            europa_sigma, shadow_sigma,
-        )
-        image_io.write_tif_16bit(comp, out_path)
-        print(f"      → {out_path.name}  (σ_e={europa_sigma:.1f}px σ_s={shadow_sigma:.1f}px)")
+        # Shadow composites — any shadow on disk at t_center
+        for shad_name, ref_list in canonical_shad.items():
+            ref = ref_list[0]
+            if not ref.on_disk:
+                continue
+            moon_name = shad_name.replace("_shadow", "")
+            positions = shad_pos.get(shad_name, [None] * len(time_sorted))
+            app_r = _apparent_radius_px(moon_name, t_center_naive, plate_scale)
+            sigma = _compute_sigma_from_motion(shad_name, positions, ref, app_r, coverage_scale)
+            stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
+            composite = _blend_one(composite, stack, ref, sigma)
+            composited.append(f"{shad_name}(σ={sigma:.1f}px)")
+
+        if not composited:
+            print(f"    [{filt}] no on-disk bodies/shadows — composite skipped")
+            continue
+
+        image_io.write_tif_16bit(composite, out_path)
+        print(f"      → {out_path.name}  ({', '.join(composited)})")
 
 
 def _scan_session_pole_pa(
-    windows: List[dict],
+    scores: dict,
     config: PipelineConfig,
 ) -> Optional[float]:
-    """Pre-scan all windows and return the session-median image-space pole PA.
+    """Return the session-median image-space pole PA from all input frames.
 
-    Uses the highest-priority filter available per window.  Outliers are kept
-    because the camera orientation is fixed within a session.
+    Iterates every frame in the preferred filter (from step03 scores dict,
+    which covers all input TIFs regardless of window selection), computes
+    per-frame belt-gradient PA, and returns the median.
     """
+    # Pick the first preferred filter that has any scored frames.
+    filt = next((f for f in _FILT_PREF_EXT if scores.get(f)), None)
+    if filt is None:
+        return None
+
+    all_rows: List[dict] = sorted(scores[filt], key=lambda r: r["timestamp"])
+    print(f"  [pole_pa] Pre-scanning {len(all_rows)} frame(s) for image-space pole PA…")
+
+    # Detect disk geometry once from the middle frame (stable across session).
+    mid_row = all_rows[len(all_rows) // 2]
+    try:
+        mid_raw = image_io.read_tif(mid_row["path"])
+        mid_lum = mid_raw if mid_raw.ndim == 2 else mid_raw.mean(axis=2).astype(np.float32)
+        cx, cy, semi_a, *_ = find_disk_center(mid_lum)
+        if semi_a < 5:
+            raise ValueError("disk too small")
+    except Exception as exc:
+        warnings.warn(f"  [pole_pa] disk detection failed: {exc}")
+        return None
+
     raw_pas: List[float] = []
-    print("  [pole_pa] Pre-scanning windows for image-space pole PA…")
-    for win in windows:
-        filt = next(
-            (f for f in _FILT_PREF_EXT
-             if f in win.get("per_filter", {}) and win["per_filter"][f].get("included")),
-            None,
-        )
-        if filt is None:
-            continue
-        rows = win["per_filter"][filt]["included"]
-        t_center = win["center_time"]
+    for i, row in enumerate(all_rows):
         try:
-            frames = []
-            for row in rows:
-                raw = image_io.read_tif(row["path"])
-                lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
-                frames.append(lum)
-            cx, cy, semi_a, *_ = find_disk_center(frames[0])
-            pa = auto_detect_pole_pa(frames=frames, cx=cx, cy=cy, disk_radius_px=semi_a)
-            print(f"    window {len(raw_pas)+1}: raw pole_pa = {pa:.1f}° via {filt}")
+            raw = image_io.read_tif(row["path"])
+            lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
+            pa = auto_detect_pole_pa(frames=[lum], cx=cx, cy=cy, disk_radius_px=semi_a)
+            print(f"    frame {i+1}/{len(all_rows)}: raw pole_pa = {pa:.1f}° via {filt} [belt_gradient]")
             raw_pas.append(pa)
         except Exception as exc:
-            warnings.warn(f"  [pole_pa] window scan failed: {exc}")
+            try:
+                raw = image_io.read_tif(row["path"])
+                lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
+                pa = pole_pa_from_disk_ellipse(lum)
+                if pa is not None:
+                    print(f"    frame {i+1}/{len(all_rows)}: raw pole_pa = {pa:.1f}° via {filt} [disk_ellipse]")
+                    raw_pas.append(pa)
+            except Exception:
+                pass
 
     if not raw_pas:
         return None
 
     session_pa = float(np.median(raw_pas))
-    kept = [f"{p:.1f}" for p in raw_pas]
+    raw_str = [f"{p:.1f}" for p in raw_pas]
     print(
         f"  [pole_pa] session pole_pa = {session_pa:.1f}° "
-        f"(raw: {kept}, kept: {kept})"
+        f"(n={len(raw_pas)}, raw: {raw_str})"
     )
     return session_pa
 
@@ -437,21 +444,207 @@ def _detect_session_flip_ns(
     windows: List[dict],
     config: PipelineConfig,
     session_pole_pa: float,
-) -> bool:
-    """Auto-detect camera NS orientation using spherical-warp drift direction test.
+) -> Tuple[bool, float, float]:
+    """Detect de-rotation warp direction from atmospheric feature drift.
 
-    Selects the window with the longest time span (maximises feature displacement
-    → highest signal-to-noise for the test) and calls auto_detect_ns_flip() with
-    the corrected spherical-warp model.
+    Returns (derot_flip, ncc_flip_false, ncc_flip_true).
+    derot_flip is passed as flip_direction to spherical_derotation_warp.
+    NOTE: this does NOT determine satellite-tracker orientation — use
+    sat_cfg.flip_ns for that (S-up cameras should set flip_ns=True there).
+    Falls back to (False, 0.0, 0.0) when detection is ambiguous.
 
-    Falls back to flip_ns=False (North-up) when:
-      - No usable window / fewer than 2 frames
-      - auto_detect_ns_flip() reports low confidence (|Δcorr| < 0.001)
+    Strategy: collect ALL frames from all windows (sorted by time) using the
+    preferred filter, then slide pairs separated by window_frames positions.
+    Each pair casts one vote; majority decides derot_flip.
     """
-    print("  [flip_ns] Detecting camera NS orientation via spherical-warp drift test…")
+    print("  [derot_flip] Detecting de-rotation warp direction via drift test…")
 
-    # Choose the window with the longest time span for the best signal.
-    best_win = None
+    # Collect all frames across all windows using the preferred filter.
+    filt = None
+    all_rows: List[dict] = []
+    for preferred in _FILT_PREF_EXT:
+        for win in windows:
+            pf = win.get("per_filter", {})
+            if preferred in pf and pf[preferred].get("included"):
+                all_rows.extend(pf[preferred]["included"])
+        if len(all_rows) >= 2:
+            filt = preferred
+            break
+        all_rows = []
+
+    if len(all_rows) < 2:
+        print("  [derot_flip] No suitable frames — defaulting to flip_direction=False")
+        return False, 0.0, 0.0
+
+    all_rows.sort(key=lambda r: r["timestamp"])
+
+    # Load all frames as luminance arrays.
+    loaded_frames: List[np.ndarray] = []
+    loaded_ts: List = []
+    for row in all_rows:
+        raw = image_io.read_tif(row["path"])
+        lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
+        loaded_frames.append(lum)
+        loaded_ts.append(row["timestamp"])
+
+    # Find disk center from the middle frame (most representative).
+    mid = len(loaded_frames) // 2
+    try:
+        cx, cy, semi_a, semi_b, _ = find_disk_center(loaded_frames[mid])
+    except Exception:
+        print("  [derot_flip] Disk detection failed — defaulting to flip_direction=False")
+        return False, 0.0, 0.0
+    if semi_a < 5:
+        print("  [derot_flip] Disk too small — defaulting to flip_direction=False")
+        return False, 0.0, 0.0
+    polar_eq = float(np.clip(semi_b / max(semi_a, 1.0), 0.85, 1.0))
+
+    # Step size = window_frames - 1: within one window of W frames, the max span
+    # is index 0 ↔ index W-1, so pairs are separated by W-1 positions.
+    W = config.quality.window_frames - 1
+    t_center = loaded_ts[mid]
+
+    votes: List[Tuple[bool, float, float, float]] = []  # (flip, confidence, ncc_f, ncc_t)
+
+    for i in range(len(loaded_frames) - W):
+        frames_pair = [loaded_frames[i], loaded_frames[i + W]]
+        dt_pair = [
+            (loaded_ts[i]     - t_center).total_seconds(),
+            (loaded_ts[i + W] - t_center).total_seconds(),
+        ]
+        dt = (loaded_ts[i + W] - loaded_ts[i]).total_seconds()
+
+        try:
+            flip, ncc_f, ncc_t = auto_detect_ns_flip(
+                frames=frames_pair,
+                dt_sec_list=dt_pair,
+                cx=cx, cy=cy,
+                disk_radius_px=semi_a,
+                period_hours=config.derotation.rotation_period_hours,
+                warp_scale=config.derotation.warp_scale,
+                pole_pa_deg=session_pole_pa,
+                polar_equatorial_ratio=polar_eq,
+            )
+            confidence = abs(ncc_f - ncc_t)
+            votes.append((flip, confidence, ncc_f, ncc_t))
+            print(
+                f"  [derot_flip] pair vote [{i}→{i+W}]: flip={flip}  confidence={confidence:.5f}"
+                f"  [Δt={dt:.0f}s, filter={filt}]"
+            )
+        except Exception as exc:
+            warnings.warn(f"  [derot_flip] pair [{i}→{i+W}] failed: {exc}")
+
+    if not votes:
+        print("  [derot_flip] No valid pairs — defaulting to flip_direction=False")
+        return False, 0.0, 0.0
+
+    n_true  = sum(1 for v, *_ in votes if v)
+    n_false = len(votes) - n_true
+    if n_true != n_false:
+        derot_flip = n_true > n_false
+    else:
+        derot_flip = max(votes, key=lambda x: x[1])[0]
+
+    best = max(votes, key=lambda x: x[1])
+    ncc_f, ncc_t = best[2], best[3]
+
+    print(
+        f"  [derot_flip] → flip_direction={derot_flip}  "
+        f"[{n_true}×True / {n_false}×False, {len(votes)} pair(s)]"
+    )
+    return derot_flip, ncc_f, ncc_t
+
+
+def _detect_tracker_flip_ns(
+    windows: List[dict],
+    session_pole_pa: float,
+    horizons_id: str = "599",
+) -> Tuple[Optional[bool], float]:
+    """Load frames from all windows and call detect_tracker_flip_ns().
+
+    Aggregates frames across all windows (one preferred filter per window) to
+    maximise signal, then delegates to satellite_tracker.detect_tracker_flip_ns.
+
+    Returns (flip_ns, confidence): flip_ns=None if inconclusive or not applicable.
+    """
+    print("  [tracker_flip] Auto-detecting tracker N/S orientation…")
+
+    frames: List[np.ndarray] = []
+    cx_ref = cy_ref = r_ref = None
+
+    for win in windows:
+        filt = next(
+            (f for f in _FILT_PREF_EXT
+             if f in win.get("per_filter", {}) and win["per_filter"][f].get("included")),
+            None,
+        )
+        if filt is None:
+            continue
+        for row in win["per_filter"][filt]["included"]:
+            try:
+                raw = image_io.read_tif(row["path"])
+                lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
+                lum = lum.astype(np.float32)
+                if lum.max() > 1.5:
+                    lum /= 65535.0
+                if cx_ref is None:
+                    cx_ref, cy_ref, r_ref, *_ = find_disk_center(lum)
+                    if r_ref < 5:
+                        cx_ref = None
+                        continue
+                frames.append(lum)
+            except Exception:
+                continue
+
+    if not frames or cx_ref is None:
+        print("  [tracker_flip] No usable frames — cannot auto-detect")
+        return None, 0.0
+
+    try:
+        flip_ns, confidence = detect_tracker_flip_ns(
+            frames=frames,
+            cx=cx_ref, cy=cy_ref,
+            disk_radius_px=r_ref,
+            pole_pa_deg=session_pole_pa,
+            horizons_id=horizons_id,
+        )
+        status = "INCONCLUSIVE" if flip_ns is None else f"flip_ns={flip_ns}"
+        print(
+            f"  [tracker_flip] → {status}  (confidence={confidence:.3f}, "
+            f"n_frames={len(frames)})"
+        )
+        return flip_ns, confidence
+
+    except Exception as exc:
+        warnings.warn(f"  [tracker_flip] Detection failed: {exc}")
+        return None, 0.0
+
+
+def _calibrate_warp_scale(
+    windows: List[dict],
+    config: "PipelineConfig",
+    session_pole_pa: float,
+    flip_ns: bool,
+    scale_min: float = 0.50,
+    scale_max: float = 1.20,
+    n_steps: int = 8,
+    min_rotation_deg: float = 5.0,
+) -> float:
+    """Auto-calibrate warp_scale via NCC sweep on the longest time-span window.
+
+    Applies the spherical warp as a forward prediction (early frame → late frame)
+    across a grid of scale values and picks the value that maximises NCC inside
+    the inner disk (0.7R).  Falls back to config.derotation.warp_scale when the
+    session rotation is insufficient for reliable measurement.
+
+    Forward prediction uses flip_direction = not flip_ns (opposite of de-rotation)
+    because de-rotation undoes the drift while forward-prediction replicates it.
+    """
+    print("  [warp_scale] Auto-calibrating via NCC sweep…")
+    default = config.derotation.warp_scale
+
+    # Select window with the longest time span (same criterion as flip_ns detection)
+    best_win: Optional[Tuple[dict, str]] = None
     best_span = 0.0
     for win in windows:
         filt = next(
@@ -471,111 +664,79 @@ def _detect_session_flip_ns(
             best_win = (win, filt)
 
     if best_win is None:
-        print("  [flip_ns] No suitable window found — defaulting to North-up (flip_ns=False)")
-        return False
+        print(f"  [warp_scale] No suitable window → config default ({default})")
+        return default
 
     win, filt = best_win
-    rows = win["per_filter"][filt]["included"]
-    t_center = win["center_time"]
+    period_sec = config.derotation.rotation_period_hours * 3600.0
+    rotation_deg = best_span / period_sec * 360.0
+    if rotation_deg < min_rotation_deg:
+        print(
+            f"  [warp_scale] Rotation {rotation_deg:.1f}° < {min_rotation_deg}° "
+            f"→ config default ({default})"
+        )
+        return default
 
+    rows = sorted(win["per_filter"][filt]["included"], key=lambda r: r["timestamp"])
     try:
-        frames, dts = [], []
-        for row in rows:
-            raw = image_io.read_tif(row["path"])
-            lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
-            frames.append(lum)
-            dts.append((row["timestamp"] - t_center).total_seconds())
+        raw_e = image_io.read_tif(rows[0]["path"])
+        raw_l = image_io.read_tif(rows[-1]["path"])
+    except Exception as exc:
+        warnings.warn(f"  [warp_scale] Frame read failed: {exc} → config default")
+        return default
 
-        cx, cy, semi_a, semi_b, _ = find_disk_center(frames[0])
-        if semi_a < 5:
-            print("  [flip_ns] Disk detection failed — defaulting to North-up (flip_ns=False)")
-            return False
-        polar_eq = float(np.clip(semi_b / max(semi_a, 1.0), 0.85, 1.0))
+    def _lum(raw: np.ndarray) -> np.ndarray:
+        img = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
+        return img.astype(np.float32) / 65535.0 if img.dtype == np.uint16 else img.astype(np.float32)
 
-        flip_ns = auto_detect_ns_flip(
-            frames=frames,
-            dt_sec_list=dts,
-            cx=cx, cy=cy,
-            disk_radius_px=semi_a,
+    lum_e = _lum(raw_e)
+    lum_l = _lum(raw_l)
+
+    cx, cy, semi_a, semi_b, _ = find_disk_center(lum_e)
+    if semi_a < 5:
+        print(f"  [warp_scale] Disk detection failed → config default ({default})")
+        return default
+
+    polar_eq = float(np.clip(semi_b / max(semi_a, 1.0), 0.85, 1.0))
+    dt = (rows[-1]["timestamp"] - rows[0]["timestamp"]).total_seconds()
+
+    h, w = lum_e.shape
+    yy, xx = np.mgrid[:h, :w].astype(np.float32)
+    disk_mask = ((xx - cx) ** 2 + (yy - cy) ** 2) < (0.7 * semi_a) ** 2
+    ref_px = lum_l[disk_mask].astype(np.float64)
+    if ref_px.std() < 1e-6:
+        print(f"  [warp_scale] Reference frame featureless → config default ({default})")
+        return default
+
+    # Forward prediction: replicate the drift (opposite of de-rotation direction)
+    forward_flip = not flip_ns
+    best_scale = default
+    best_ncc = -1.0
+    ncc_pairs: List[Tuple[float, float]] = []
+
+    for scale in np.linspace(scale_min, scale_max, n_steps):
+        warped = spherical_derotation_warp(
+            lum_e, dt, cx, cy, semi_a,
             period_hours=config.derotation.rotation_period_hours,
-            warp_scale=config.derotation.warp_scale,
+            scale=float(scale),
+            flip_direction=forward_flip,
             pole_pa_deg=session_pole_pa,
             polar_equatorial_ratio=polar_eq,
         )
-        orientation = "South-up" if flip_ns else "North-up"
-        print(
-            f"  [flip_ns] → {orientation} (flip_ns={flip_ns})  "
-            f"[span={best_span:.0f}s, filter={filt}]"
-        )
-        return flip_ns
+        pred_px = warped[disk_mask].astype(np.float64)
+        ncc = float(np.corrcoef(ref_px, pred_px)[0, 1]) if pred_px.std() > 1e-6 else 0.0
+        ncc_pairs.append((float(scale), ncc))
+        if ncc > best_ncc:
+            best_ncc = ncc
+            best_scale = float(scale)
 
-    except Exception as exc:
-        warnings.warn(f"  [flip_ns] Detection failed: {exc} — defaulting to North-up")
-        return False
-
-
-def _precompute_cv_offsets(
-    window: dict,
-    tracker,
-    session_pole_pa: float,
-    np_ang: float,
-    cv_search_radius_px: float,
-    time_offset_sec: float = 0.0,
-) -> Optional[Dict[str, Tuple[float, float]]]:
-    """Compute per-window CV position offsets from the best available filter."""
-    from pipeline.modules.satellite_tracker import (
-        refine_positions_with_cv,
-        average_body_shadow_offsets,
+    ncc_str = "  ".join(f"{s:.2f}:{n:.4f}" for s, n in ncc_pairs)
+    print(
+        f"  [warp_scale] NCC sweep ({n_steps} steps, Δt={dt:.0f}s, "
+        f"{rotation_deg:.1f}°, {filt}):\n    {ncc_str}"
     )
-
-    filt = next(
-        (f for f in _FILT_PREF_EXT
-         if f in window.get("per_filter", {}) and window["per_filter"][f].get("included")),
-        None,
-    )
-    if filt is None:
-        return None
-
-    rows = window["per_filter"][filt]["included"]
-    t_center = window["center_time"]
-    sorted_rows = sorted(rows, key=lambda r: abs((r["timestamp"] - t_center).total_seconds()))
-    try:
-        ref_raw = image_io.read_tif(sorted_rows[0]["path"])
-        ref_lum = ref_raw if ref_raw.ndim == 2 else ref_raw.mean(axis=2).astype(np.float32)
-        cx, cy, sr, *_ = find_disk_center(ref_lum)
-        t_list = [r["timestamp"] for r in rows]
-
-        sat_pos = tracker.get_positions(
-            t_list, cx, cy, sr,
-            pole_pa_deg=session_pole_pa, np_ang_deg=np_ang,
-        )
-        shd_pos = tracker.get_shadow_positions(
-            t_list, cx, cy, sr,
-            pole_pa_deg=session_pole_pa, np_ang_deg=np_ang,
-            time_offset_sec=time_offset_sec,
-        )
-        all_pos = {**sat_pos, **shd_pos}
-
-        if not tracker.any_on_disk(all_pos):
-            return None
-
-        _, offsets = refine_positions_with_cv(
-            ref_lum, cx, cy, sr, all_pos,
-            search_radius_px=cv_search_radius_px,
-        )
-        offsets = average_body_shadow_offsets(offsets)
-        print(
-            f"  [CV pre-compute/{filt}] offsets: "
-            + ", ".join(
-                f"{n}: ({dx:+.1f},{dy:+.1f})px"
-                for n, (dx, dy) in offsets.items()
-                if dx != 0.0 or dy != 0.0
-            )
-        )
-        return offsets
-    except Exception as exc:
-        warnings.warn(f"  [step04] CV pre-compute failed: {exc}")
-        return None
+    print(f"  [warp_scale] → {best_scale:.3f}  (NCC={best_ncc:.4f}, config={default})")
+    return best_scale
 
 
 def run(
@@ -600,22 +761,43 @@ def run(
 
     print(f"  Processing {len(windows)} window(s) × {len(config.filters)} filter(s)…")
     print(f"  Period: {config.derotation.rotation_period_hours}h  "
-          f"|  warp_scale: {config.derotation.warp_scale}  "
           f"|  sub-pixel alignment: enabled")
 
     # ── Session-level pole PA ──────────────────────────────────────────────────
-    session_pole_pa = _scan_session_pole_pa(windows, config)
+    session_pole_pa = _scan_session_pole_pa(results_03.get("scores", {}), config)
     if session_pole_pa is None:
         session_pole_pa = 0.0
         print("  [WARNING] pole_pa scan failed — using 0.0°")
 
-    # ── Auto-detect flip_ns via spherical-warp drift test ────────────────────
+    # ── De-rotation warp direction (derot_flip) ───────────────────────────────
+    # Determines flip_direction for spherical_derotation_warp via feature drift test.
+    # For N-up AND pure NS-flip cameras this is almost always False (leftward drift).
+    # sat_cfg.flip_ns is NOT used here — it controls satellite tracker only.
+    derot_flip, _ncc_f, _ncc_t = _detect_session_flip_ns(windows, config, session_pole_pa)
+
+    # ── Satellite tracker orientation (tracker_flip_ns) ───────────────────────
+    # Independent of derot_flip: tells the tracker which way is "north" in the image.
+    # Priority: explicit sat_cfg override → belt-asymmetry auto-detect → derot_flip.
     sat_cfg = config.satellite
     if sat_cfg.flip_ns is not None:
-        flip_ns = bool(sat_cfg.flip_ns)
-        print(f"  [flip_ns] manual override: {flip_ns}")
+        tracker_flip_ns = bool(sat_cfg.flip_ns)
+        print(f"  [tracker] flip_ns override = {tracker_flip_ns} (from sat_cfg)")
     else:
-        flip_ns = _detect_session_flip_ns(windows, config, session_pole_pa)
+        auto_flip, auto_conf = _detect_tracker_flip_ns(
+            windows, session_pole_pa,
+            horizons_id=config.derotation.horizons_id,
+        )
+        if auto_flip is not None:
+            tracker_flip_ns = auto_flip
+            print(f"  [tracker] flip_ns = {tracker_flip_ns} "
+                  f"(belt-asymmetry auto-detect, confidence={auto_conf:.3f})")
+        else:
+            tracker_flip_ns = derot_flip
+            print(f"  [tracker] flip_ns = {tracker_flip_ns} "
+                  f"(fallback to derot_flip — belt detection inconclusive)")
+
+    # ── Auto-calibrate warp_scale ──────────────────────────────────────────────
+    warp_scale = _calibrate_warp_scale(windows, config, session_pole_pa, derot_flip)
 
     # ── SatelliteTracker ───────────────────────────────────────────────────────
     tracker = None
@@ -625,10 +807,10 @@ def run(
             jupiter_horizons_id=config.derotation.horizons_id,
             observer_code=config.derotation.observer_code,
             flip_ew=sat_cfg.flip_ew,
-            flip_ns=flip_ns,
+            flip_ns=tracker_flip_ns,
         )
         print(f"  [satellite] tracker enabled  "
-              f"(flip_ns={flip_ns}, flip_ew={sat_cfg.flip_ew})")
+              f"(tracker_flip_ns={tracker_flip_ns}, flip_ew={sat_cfg.flip_ew})")
 
     # ── Output directory ───────────────────────────────────────────────────────
     out_base: Optional[Path] = None
@@ -641,7 +823,27 @@ def run(
 
     # ── Process each window ────────────────────────────────────────────────────
     all_results: List[dict] = []
-    summary_lines: List[str] = ["=== Step 4 De-rotation Summary ===\n"]
+    summary_lines: List[str] = [
+        "=== Step 4 De-rotation Summary ===",
+        "",
+        f"  pole_pa         : {session_pole_pa:.2f}°",
+        f"  warp_scale      : {warp_scale:.4f}  (auto-calibrated)",
+        f"  derot_flip      : {derot_flip}",
+        f"  tracker_flip_ns : {tracker_flip_ns}",
+        f"  ncc_flip_false  : {_ncc_f:.4f}",
+        f"  ncc_flip_true   : {_ncc_t:.4f}",
+        "",
+    ]
+
+    session_log = {
+        "pole_pa_deg":           session_pole_pa,
+        "warp_scale_calibrated": warp_scale,
+        "warp_scale_config":     config.derotation.warp_scale,
+        "derot_flip":            derot_flip,
+        "tracker_flip_ns":       tracker_flip_ns,
+        "ncc_flip_false":        _ncc_f,
+        "ncc_flip_true":         _ncc_t,
+    }
 
     n_windows = len(windows)
     for win_idx, window in enumerate(windows, start=1):
@@ -682,20 +884,12 @@ def run(
 
         # ── Satellite position prediction ──────────────────────────────────────
         sat_log: Dict = {}
-        cv_offsets: Dict[str, Tuple[float, float]] = {}
         if tracker is not None:
-            cv_offsets = _precompute_cv_offsets(
-                window, tracker,
-                session_pole_pa=pole_pa_for_warp,
-                np_ang=np_ang_val,
-                cv_search_radius_px=sat_cfg.cv_search_radius_px,
-                time_offset_sec=sat_cfg.time_offset_sec,
-            ) or {}
             sat_log = {
-                "np_ang_deg":  np_ang_val,
-                "pole_pa_deg": pole_pa_for_warp,
-                "flip_ns":     flip_ns,
-                "cv_offsets":  {k: list(v) for k, v in cv_offsets.items()},
+                "np_ang_deg":      np_ang_val,
+                "pole_pa_deg":     pole_pa_for_warp,
+                "derot_flip":      derot_flip,
+                "tracker_flip_ns": tracker_flip_ns,
             }
 
         # ── De-rotate all filters ──────────────────────────────────────────────
@@ -707,13 +901,13 @@ def run(
                 else config.filters
             ),
             period_hours=config.derotation.rotation_period_hours,
-            warp_scale=config.derotation.warp_scale,
+            warp_scale=warp_scale,
             align=True,
             normalize_brightness=config.derotation.normalize_brightness,
             min_quality_threshold=config.derotation.min_quality_threshold,
             pole_pa_deg=pole_pa_for_warp,
             color_mode=(config.camera_mode == "color"),
-            flip_ns=flip_ns,
+            flip_ns=derot_flip,
             out_dir=win_out_dir,
         )
 
@@ -731,6 +925,7 @@ def run(
 
         # ── Build log and save JSON ────────────────────────────────────────────
         log_dict = derotation.derotation_log_to_json(win_idx, window, filter_results)
+        log_dict["session"] = session_log
         if sat_log:
             log_dict["satellite"] = sat_log
         if win_out_dir is not None:

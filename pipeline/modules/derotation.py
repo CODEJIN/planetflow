@@ -519,18 +519,24 @@ def auto_detect_ns_flip(
     warp_scale: float = 0.80,
     pole_pa_deg: float = 0.0,
     polar_equatorial_ratio: float = 1.0,
-) -> bool:
-    """Auto-detect whether the image is South-up (flip_ns=True) by testing drift direction.
+) -> Tuple[bool, float, float]:
+    """Detect the de-rotation warp direction from atmospheric feature drift.
 
-    Applies spherical_derotation_warp to f_early with dt=+dt_span in both
-    flip_direction=False (prograde / North-up) and flip_direction=True (retrograde /
-    South-up) and cross-correlates each prediction with f_late inside the inner
-    disk (0.75R).  Higher correlation identifies the correct orientation.
+    Tests two forward-prediction directions (flip_direction=False / True) and
+    picks whichever better matches f_late from f_early inside the inner disk.
 
-    Using the actual spherical warp (rather than a rigid-body rotation) is critical
-    for equatorial views (pole_pa ≈ 0°): planetary features move as a horizontal
-    shear proportional to sphere depth, which is perpendicular to a rigid rotation
-    and produces near-zero differential correlation with the old approach.
+    IMPORTANT — what this function detects and what it does NOT detect:
+      • It determines which flip_direction to pass to spherical_derotation_warp.
+        For BOTH N-up AND pure NS-flip (South-up, East-left) cameras the
+        atmospheric features drift in the same image-plane direction (leftward),
+        so this function returns flip_ns=False in both cases.
+        flip_direction=False is the *correct* de-rotation direction for both.
+      • It does NOT determine the satellite-tracker orientation (flip_ns for the
+        tracker), because the tracker's NS-sign is purely about whether the camera
+        image has north at the top or bottom — this is camera-orientation knowledge
+        that cannot be inferred from feature drift alone for a pure NS-flip setup.
+        Use sat_cfg.flip_ns (SatelliteConfig) to tell the tracker the actual
+        camera orientation independently.
 
     Args:
         frames:                 List of float [0,1] images (2-D or 3-D).
@@ -538,26 +544,26 @@ def auto_detect_ns_flip(
         cx, cy:                 Disk centre (pixels).
         disk_radius_px:         Disk semi-major radius (pixels).
         period_hours:           Atmospheric rotation period (hours).
-        warp_scale:             Empirical spherical warp scale (same value used in
-                                derotate_filter; default 0.80 for Jupiter).
+        warp_scale:             Empirical spherical warp scale (default 0.80).
         pole_pa_deg:            Image-space pole PA from auto_detect_pole_pa().
-                                0° = North straight up (equatorial view).
         polar_equatorial_ratio: semi_minor / semi_major from find_disk_center().
 
     Returns:
-        True if South is up (flip_ns=True), False if North is up.
-        Defaults to False when the cross-correlation is ambiguous (|Δcorr| < 0.001).
+        (derot_flip, score_flip_false, score_flip_true)
+        derot_flip=True  → use flip_direction=True in spherical_derotation_warp.
+        derot_flip=False → use flip_direction=False (default, correct for most setups).
+        Defaults to (False, 0.0, 0.0) when ambiguous (|Δcorr| < 0.001).
     """
     if len(frames) < 2:
-        print("  [auto_ns_flip] fewer than 2 frames — defaulting to North-up (flip_ns=False)")
-        return False
+        print("  [derot_flip] fewer than 2 frames — defaulting to flip_direction=False")
+        return False, 0.0, 0.0
 
     dts = np.array(dt_sec_list, dtype=np.float64)
     i_min = int(np.argmin(dts))
     i_max = int(np.argmax(dts))
     if i_min == i_max:
-        print("  [auto_ns_flip] all frames at same time — defaulting to North-up (flip_ns=False)")
-        return False
+        print("  [derot_flip] all frames at same time — defaulting to flip_direction=False")
+        return False, 0.0, 0.0
 
     dt_span = float(dts[i_max] - dts[i_min])   # always positive
 
@@ -566,8 +572,10 @@ def auto_detect_ns_flip(
             return (0.2126 * f[:, :, 0] + 0.7152 * f[:, :, 1] + 0.0722 * f[:, :, 2]).astype(np.float32)
         return f.astype(np.float32)
 
-    f_early = _lum(frames[i_min])
-    f_late  = _lum(frames[i_max])
+    _DRIFT_SHARPEN = [200, 200, 200, 0, 0, 0]
+
+    f_early = _wavelet_sharpen(_lum(frames[i_min]), amounts=_DRIFT_SHARPEN)
+    f_late  = _wavelet_sharpen(_lum(frames[i_max]), amounts=_DRIFT_SHARPEN)
     h, w = f_early.shape
     Y, X = np.ogrid[:h, :w]
     disk_mask = ((X - cx) ** 2 + (Y - cy) ** 2) < (disk_radius_px * 0.75) ** 2
@@ -603,22 +611,50 @@ def auto_detect_ns_flip(
         else:
             scores[flip_direction] = 0.0
 
-    # S-up → scores[False] wins; N-up → scores[True] wins.
-    # flip_ns=True means S-up camera → de-rotation uses flip_direction=True.
+    # scores[True] > scores[False] → leftward drift (N-up / S-up East-left) → derot_flip=False
+    # scores[False] > scores[True] → rightward drift (180°-rotated, no prism) → derot_flip=True
     delta = scores[False] - scores[True]
-    flip_ns = delta > 0.0
+    derot_flip = delta > 0.0
     confidence = abs(delta)
     angle_deg = abs(dt_span) / (period_hours * 3600.0) * 360.0
-    label = "South-up" if flip_ns else "North-up"
     print(
-        f"  [auto_ns_flip] Δt={dt_span:.0f}s ({angle_deg:.2f}°)  "
-        f"South-up_corr={scores[False]:.5f}  North-up_corr={scores[True]:.5f}  "
-        f"→ {label} (flip_ns={flip_ns}, |Δcorr|={confidence:.5f})"
+        f"  [derot_flip] Δt={dt_span:.0f}s ({angle_deg:.2f}°)  "
+        f"flip_False_corr={scores[False]:.5f}  flip_True_corr={scores[True]:.5f}  "
+        f"→ derot_flip={derot_flip} (|Δcorr|={confidence:.5f})"
     )
     if confidence < 0.001:
-        print("  [auto_ns_flip] low confidence — defaulting to flip_ns=False")
-        return False
-    return flip_ns
+        print("  [derot_flip] low confidence — defaulting to derot_flip=False")
+        return False, float(scores[False]), float(scores[True])
+    return derot_flip, float(scores[False]), float(scores[True])
+
+
+def pole_pa_from_disk_ellipse(image: np.ndarray) -> Optional[float]:
+    """Estimate pole PA from disk ellipse major-axis direction.
+
+    For oblate planets the equatorial (major) axis = drift direction = pole_pa
+    in the warp convention (pole_pa=0° → horizontal drift → North straight up).
+
+    Works for any planet with detectable oblateness (Jupiter f≈6.5%, Saturn
+    disk f≈9.8%, Uranus f≈2.3%).  Not reliable for nearly-spherical bodies
+    (Mars f≈0.6%) or when the disk is too small.
+
+    Args:
+        image: 2-D or 3-D float image (luminance extracted automatically).
+
+    Returns:
+        pole_pa_deg in (-90°, +90°], or None if the disk is undetectable or
+        too circular (semi_b/semi_a > 0.995, oblateness < 0.5%).
+    """
+    lum = _to_luminance(image) if image.ndim == 3 else image.astype(np.float32)
+    _, _, semi_a, semi_b, angle_major = find_disk_center(lum)
+    if semi_a < 5:
+        return None
+    if semi_b / max(semi_a, 1.0) > 0.995:
+        return None
+    # angle_major ∈ [0°, 180°) — major (equatorial) axis from horizontal (OpenCV).
+    # Map to warp convention (-90°, +90°]: fold values > 90° back to negative side.
+    pole_pa = float(angle_major) if float(angle_major) <= 90.0 else float(angle_major) - 180.0
+    return pole_pa
 
 
 # ── Sub-pixel alignment ────────────────────────────────────────────────────────
