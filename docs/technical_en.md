@@ -336,9 +336,10 @@ Quality-weighted accumulation → master TIF output
 
 | GUI Parameter | Default | Internal Behavior |
 |---|---|---|
-| **Warp Scale** | 0.80 | Spherical warp intensity multiplier. `drift = warp_scale × Δλ_rad × depth(x,y)`. Theoretical value is 1.0, but 0.80 is the experimentally optimal value accounting for atmospheric blur and plate scale uncertainty. The auto-search button finds the value maximizing Laplacian variance |
 | **Min Quality Threshold** | 0.05 | Frames with `norm_score < threshold` are excluded from stacking accumulation |
 | **Normalize Brightness** | Off | Normalizes each frame's brightness to match the reference frame before stacking. Use when inter-frame brightness variation is large |
+
+> **Warp Scale** (config-only): The spherical warp intensity multiplier (`drift = warp_scale × Δλ_rad × depth(x,y)`) is fixed at **0.80** in the GUI and configurable only via `config.py → DerotationConfig.warp_scale`. Theoretical value is 1.0; 0.80 is the experimentally optimal value for Jupiter under typical atmospheric blur and plate-scale uncertainty.
 
 ### Internal Fixed Values
 
@@ -693,6 +694,8 @@ One PNG per time window. Layout (top to bottom):
 ─────────────────────────────────── (divider)
 
 [Composite images row]        ← Step 06 PNGs, cell_size each
+[Rotation indicators]         ← N/S pole axis segments + rotation-direction arrow drawn
+                                 outside the disk on the first composite image
 [Align table]                 ← rows = filter names; columns = composites
                                  cell = "[role] shift" or "[role] ref" or "—"
 [Sat row]                     ← saturation boost per composite
@@ -701,6 +704,8 @@ One PNG per time window. Layout (top to bottom):
 
 [Global params line]          ← Win.Q / Rot / Wvl / bp / γ
 ```
+
+**Rotation indicators**: Short line segments outside the disk limb mark the north (N, blue) and south (S, red) pole directions based on the logged `pole_pa_deg` and `tracker_flip_ns` values. A curved arrow drawn outside the disk indicates the prograde rotation direction.
 
 #### Filter Stats Block
 

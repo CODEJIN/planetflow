@@ -53,6 +53,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import scipy.ndimage as ndi
 
 from pipeline.modules import image_io
 from pipeline.modules.wavelet import sharpen as _wavelet_sharpen
@@ -216,6 +217,62 @@ def _to_luminance(image: np.ndarray) -> np.ndarray:
 
 # ── Disk geometry ──────────────────────────────────────────────────────────────
 
+def _gradient_disk_r(
+    image: np.ndarray,
+    cx: float,
+    cy: float,
+    r_rough: float,
+    n_rays: int = 72,
+    search_frac: tuple = (0.75, 1.30),
+    n_samples: int = 100,
+    smooth_sigma: float = 1.5,
+    outlier_sigma: float = 2.0,
+) -> float:
+    """Estimate disk radius from steepest-gradient limb edge along radial rays.
+
+    Replaces the Otsu-threshold disk_r (which underestimates the true limb by
+    ~5 px due to limb darkening) with a gradient-profile measurement.  cx/cy
+    are unchanged.  Falls back to r_rough if fewer than 8 valid rays are found.
+    """
+    h, w = image.shape[:2]
+    angles  = np.linspace(0.0, 2.0 * np.pi, n_rays, endpoint=False)
+    r_start = r_rough * search_frac[0]
+    r_end   = r_rough * search_frac[1]
+    r_vals  = np.linspace(r_start, r_end, n_samples)
+    dr      = r_vals[1] - r_vals[0]
+
+    edge_radii: list[float] = []
+    for angle in angles:
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        xs = cx + r_vals * cos_a
+        ys = cy + r_vals * sin_a
+        if (xs < 0).any() or (xs >= w - 1).any() or \
+           (ys < 0).any() or (ys >= h - 1).any():
+            continue
+        profile = ndi.map_coordinates(
+            image, [ys, xs], order=1, mode="constant", cval=0.0,
+        ).astype(np.float64)
+        smoothed = ndi.gaussian_filter1d(profile, sigma=smooth_sigma)
+        grad = np.gradient(smoothed, dr)
+        idx = int(np.argmin(grad))
+        if idx == 0 or idx == len(grad) - 1:
+            continue
+        y0, y1, y2 = grad[idx - 1], grad[idx], grad[idx + 1]
+        denom = 2.0 * (y2 - 2.0 * y1 + y0)
+        sub = -(y2 - y0) / denom if abs(denom) > 1e-12 else 0.0
+        edge_radii.append(float(r_vals[idx] + sub * dr))
+
+    if len(edge_radii) < 8:
+        return r_rough
+    arr = np.array(edge_radii)
+    med = float(np.median(arr))
+    std = float(np.std(arr))
+    keep = arr[np.abs(arr - med) < outlier_sigma * (std + 0.5)]
+    if len(keep) < 6:
+        keep = arr
+    return float(np.median(keep))
+
+
 def find_disk_center(
     image: np.ndarray,
     margin_factor: float = 0.10,
@@ -278,7 +335,8 @@ def find_disk_center(
             semi_a = mi / 2
             semi_b = ma / 2
             angle_major = (angle + 90.0) % 180.0
-        return float(cx), float(cy), float(semi_a), float(semi_b), float(angle_major)
+        semi_a_refined = _gradient_disk_r(image, float(cx), float(cy), float(semi_a))
+        return float(cx), float(cy), float(semi_a_refined), float(semi_b), float(angle_major)
     else:
         # Fallback: centroid of bounding box
         x, y, w, h = cv2.boundingRect(largest)

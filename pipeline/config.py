@@ -153,12 +153,6 @@ class SatelliteConfig:
     flip_ew: bool = False
     flip_ns: Optional[bool] = None      # None = auto-detect from pole_pa sign
     cv_search_radius_px: float = 24.0   # CV refinement search window
-    # Clock offset correction: subtract this many seconds from frame timestamps
-    # before querying Skyfield.  Use when the capture PC clock was fast/slow.
-    # Positive value = clock was slow (actual time was later than filename says).
-    # Negative value = clock was fast (actual time was earlier than filename says).
-    # Confirmed value for 2026-05-05 observation: -510.0 (clock was 8.5 min fast).
-    time_offset_sec: float = 0.0
 
     # ── Multi-rate satellite compositing (Experiment 9 method) ────────────────
     # When True, Step 4 produces composite TIFs instead of plain planet-derotated

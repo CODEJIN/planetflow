@@ -256,7 +256,7 @@ Automatically evaluates the image quality of each TIF frame and detects the opti
 | **Output Folder** | Auto-set | — | Quality score CSVs and window recommendation JSON are saved here. |
 | **Window (frames)** | 3 | 1–20 | De-rotation window length expressed as **number of filter cycles**. 1 frame = one complete filter cycle (IR→R→G→B→CH4). Actual window time = frames × filter cycle time. Example: 3 frames × 225s = 675s (~11 min). **Jupiter: 2–4 frames / Mars, Saturn: 3–6 frames** |
 | **Filter cycle (sec)** | 225 | 10–600 (step 15) | Time in seconds for one complete filter cycle (IR→R→G→B→CH4→IR). Set this to match your actual capture cadence. Example: 45s × 5 filters = 225s. **This value is used only for Step 03 window length calculation.** Step 08 has its own independent cycle time setting. |
-| **Number of Windows** | 1 | 1–10 | Number of optimal windows to detect. **1**: Find only the single best window (for Step 04 stacking). **2–3**: Detect multiple windows at different epochs (for Step 08 time-series). |
+| **Number of Windows** | 1 | 1–20 | Number of optimal windows to detect. **1**: Find only the single best window (for Step 04 stacking). **2–3**: Detect multiple windows at different epochs (for Step 08 time-series). |
 | **Allow Overlap** | Off | — | Checked: Detected windows may overlap in time. Unchecked: Each window is non-overlapping (default). |
 | **Min Quality Threshold** | 0.05 | 0.0–1.0 (step 0.05) | Frames below this quality score are excluded from window optimization. 0.0 = include all frames. 0.2–0.3 = remove clearly bad frames. **Setting too high may leave too few valid frames.** |
 
@@ -285,25 +285,15 @@ Stacks frames within the optimal windows detected in Step 03, correcting for pla
 |-----------|---------|-------|-------------|
 | **Input Folder** | Auto-set | — | Automatically set to the same Step 02 Lucky Stacking TIF folder as Step 03. |
 | **Output Folder** | Auto-set | — | De-rotation stacked master TIF files are saved here. |
-| **Warp Scale** | 0.80 | 0.0–2.0 (step 0.01) | Spherical distortion correction strength. Because a planet is a sphere, the disc centre moves significantly with rotation while the limb barely moves. Warp scale controls the magnitude of this depth-dependent per-pixel correction. **0.0** = no correction (uniform shift), **1.0** = theoretical full sphere correction, **0.80** = recommended for Jupiter in typical seeing. On nights of exceptional seeing, try 1.0–1.2. |
 | **Min Quality Threshold** | 0.05 | 0.0–1.0 (step 0.05) | Frames below this quality score are excluded from stacking. Raise to 0.3–0.5 when seeing conditions are poor to more strictly filter bad frames. |
 | **Normalize Brightness** | Off | — | Normalizes the brightness of each frame before stacking. Enable when frames have significant brightness variations due to changing seeing conditions. |
-| **Satellite Composite** | Off | — | Composites Europa and its shadow using Skyfield BSP ephemeris. The status indicator next to the checkbox shows BSP file availability (see §7.4). |
+| **Satellite Composite** | Off | — | Composites Europa and its shadow using Skyfield BSP ephemeris. The status indicator next to the checkbox shows BSP file availability (see §7.3). |
 
-### 7.2 Warp Scale Auto-Tune
-
-The **"▶ Auto-tune scale"** button inside the panel sweeps warp scale values and automatically finds the value that maximises stack sharpness (Laplacian variance), based on Step 03 data.
-
-- Only becomes active after Step 03 has been run.
-- Takes approximately 2–4 seconds.
-- Results are shown in orange (low confidence, improvement < 3%) or green (high confidence).
-- The auto-tuned value is a starting point — manual fine-tuning afterwards is recommended.
-
-### 7.3 JPL Horizons Integration
+### 7.2 JPL Horizons Integration
 
 Step 04 automatically queries the NASA JPL Horizons API to retrieve the planet's north pole angle (NP.ang) at the time of observation. The **Horizons ID** in Global Settings must be set correctly. An internet connection is required.
 
-### 7.4 Satellite / Shadow Composite
+### 7.3 Satellite / Shadow Composite
 
 When **Satellite Composite** is checked, Europa and its shadow are handled separately from the planet de-rotation and blended into every filter stack.
 
