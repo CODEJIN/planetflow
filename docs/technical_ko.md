@@ -315,7 +315,8 @@ Step 02 TIF + windows.json
     │
     ▼
 기준 프레임에서 디스크 감지 (윈도우 전체 공유)
-    Otsu → Closing(7×7) → fitEllipse → (cx, cy, semi_a, semi_b, angle)
+    Otsu → Closing(7×7) → fitEllipse → (cx, cy, semi_a_rough)
+    → 그레디언트 림브 스캔 (72 레이) → semi_a_refined → (cx, cy, semi_a_refined, semi_b, angle)
     │
     ▼
 NP.ang 조회 (번들 테이블 → 사용자 캐시 → 라이브 Horizons API)
@@ -758,15 +759,27 @@ canvas_h = (pad + header_h
 여러 Step(04, 05, 06, 08)에서 공통으로 사용합니다.
 
 ```
+Phase 1 — 중심 검출 (Otsu 이진화)
 1. arr8 = clip(image × 255, 0, 255).uint8
 2. Otsu 임계값 → effective_thresh = Otsu × (1 − 0.10)
    (margin_factor=0.10: 어두운 림브 픽셀 포함을 위해 임계값을 낮춤)
 3. 형태학적 Closing (7×7 타원형 커널) → 디스크 내 작은 갭 메움
 4. 최대 윤곽선 추출 (≥5점이면 타원 피팅):
    (cx, cy), (ma, mi), angle = cv2.fitEllipse(largest_contour)
-5. 반환: (cx, cy, semi_major, semi_minor, angle_deg)
-   (항상 semi_major ≥ semi_minor 보장; 필요 시 angle + 90°)
+   → (cx, cy, semi_a_rough) 산출
+
+Phase 2 — 반지름 정밀화 (그레디언트 림브 검출)
+5. cx, cy에서 72방향(5° 간격, 0°–360°)으로 방사형 레이 투사
+   각 레이마다 [0.75 × semi_a, 1.30 × semi_a] 구간을 n=100점 샘플링
+6. 각 프로파일에 1-D 가우시안(σ=1.5 px) 평활화 → 그레디언트 계산
+7. 최대 강하점(argmin) → 포물선 피팅으로 서브픽셀 정밀화
+8. 유효 엣지 반지름 수집; 중앙값 기준 2σ 초과 이상치 제거 → 중앙값 반환
+   → semi_a_refined (Otsu 이진화 추정치보다 약 4–5 px 큼)
+
+반환: (cx, cy, semi_a_refined, semi_b, angle_deg)
 ```
+
+Phase 1(이진화)은 디스크 중심(cx, cy)을 정확히 찾지만, Otsu 임계값이 어두운 외곽 림브를 잘라 반지름을 과소평가합니다. Phase 2(그레디언트)는 각 방향에서 실제 밝기 변곡점을 찾아 정확한 디스크 반지름을 결정하며, 이 값이 위성 좌표 스케일링과 가우시안 블렌드 σ 계산에 사용됩니다.
 
 ---
 

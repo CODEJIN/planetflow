@@ -316,7 +316,8 @@ Step 02 TIF + windows.json
     │
     ▼
 Disk detection from reference frame (shared across entire window)
-    Otsu → Closing(7×7) → fitEllipse → (cx, cy, semi_a, semi_b, angle)
+    Otsu → Closing(7×7) → fitEllipse → (cx, cy, semi_a_rough)
+    → Gradient limb scan (72 rays) → semi_a_refined → (cx, cy, semi_a_refined, semi_b, angle)
     │
     ▼
 NP.ang lookup (bundled table → user cache → live Horizons API)
@@ -759,15 +760,27 @@ canvas_h = (pad + header_h
 Used in common across multiple Steps (04, 05, 06, 08).
 
 ```
+Phase 1 — Center detection (Otsu binary method)
 1. arr8 = clip(image × 255, 0, 255).uint8
 2. Compute Otsu threshold → effective_thresh = Otsu × (1 − 0.10)
    (margin_factor=0.10: lowers threshold slightly to include dark limb pixels)
 3. Morphological Closing (7×7 elliptical kernel) → fills small gaps inside disk
 4. Largest contour extraction (ellipse fitting if ≥5 points):
    (cx, cy), (ma, mi), angle = cv2.fitEllipse(largest_contour)
-5. Return: (cx, cy, semi_major, semi_minor, angle_deg)
-   (always guarantees semi_major ≥ semi_minor; adds 90° to angle if needed)
+   → yields (cx, cy, semi_a_rough)
+
+Phase 2 — Radius refinement (gradient limb detection)
+5. Cast 72 radial rays from cx, cy at angles 0°–360° (every 5°)
+   For each ray, sample pixel values at n=100 points in [0.75 × semi_a, 1.30 × semi_a]
+6. Smooth each profile with a 1-D Gaussian (σ=1.5 px) and compute gradient
+7. Steepest descent (argmin of gradient) → sub-pixel refinement via parabolic fit
+8. Collect valid edge radii; reject outliers beyond 2σ from median; return median
+   → semi_a_refined (typically ~4–5 px larger than Otsu binary estimate)
+
+Return: (cx, cy, semi_a_refined, semi_b, angle_deg)
 ```
+
+The binary method (Phase 1) accurately locates the disk center (cx, cy) but underestimates the radius because the Otsu threshold clips the dark outer limb. The gradient method (Phase 2) finds the true intensity inflection point at each limb direction, giving a more accurate disk radius used for satellite position scaling and Gaussian blend sigma computation.
 
 ---
 

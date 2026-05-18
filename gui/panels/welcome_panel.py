@@ -225,14 +225,6 @@ class WelcomePanel(QWidget):
 
         outer.addStretch()
 
-        # Copyright — bottom-right
-        cp = QLabel("© 2026 Heejo You. All rights reserved.")
-        cp.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        cp.setStyleSheet(
-            "color: #444; font-size: 10px; background: transparent; border: none;"
-        )
-        outer.addWidget(cp)
-
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load_session(self, data: dict[str, Any]) -> None:
