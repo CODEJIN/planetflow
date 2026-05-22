@@ -321,7 +321,7 @@ Disk detection from reference frame (shared across entire window)
 NP.ang lookup (bundled table → user cache → live Horizons API)
     │
     ▼
-Warp scale auto-calibration (high-pass NCC sweep: earliest vs latest frame, σ=30 px)
+De-rotation confidence measurement (high-pass NCC at fixed warp_scale: earliest vs latest frame, σ=30 px)
     │
     ▼
 Per frame in window:
@@ -342,7 +342,7 @@ Quality-weighted accumulation → master TIF output
 | **Min Quality Threshold** | 0.05 | Frames with `norm_score < threshold` are excluded from stacking accumulation |
 | **Normalize Brightness** | Off | Normalizes each frame's brightness to match the reference frame before stacking. Use when inter-frame brightness variation is large |
 
-> **Warp Scale** (auto-calibrated per window): The spherical warp intensity multiplier (`drift = warp_scale × Δλ_rad × depth(x,y)`) is automatically determined for each window via high-pass NCC sweep (see *Warp Scale Auto-calibration* below). Typically **0.75–0.85** for Jupiter. A fallback value can be set in `config.py → DerotationConfig.warp_scale` but is not used when auto-calibration succeeds.
+> **Warp Scale** (fixed): The spherical warp intensity multiplier (`drift = warp_scale × Δλ_rad × depth(x,y)`). This is a **physical constant** empirically calibrated from best-seeing data — default **1.0** for Jupiter (full theoretical spherical correction; NCC peak consistently near 1.0 across multiple datasets). The planet's rotation rate is fixed, so the correct warp geometry does not change with seeing conditions. Set in `config.py → DerotationConfig.warp_scale`.
 
 ### Internal Fixed Values
 
@@ -374,15 +374,17 @@ map_x  = x − drift × cos(pole_pa_rad)
 map_y  = y − drift × sin(pole_pa_rad)
 ```
 
-### Warp Scale Auto-calibration (NCC Sweep)
+### De-rotation Confidence Measurement (NCC Sweep)
 
-**Source**: `pipeline/steps/derotate_stack.py` → `_calibrate_warp_scale()`
+**Source**: `pipeline/steps/derotate_stack.py` → `_measure_derot_confidence()`
 
-The optimal `warp_scale` is found automatically for each window by sweeping over candidate values and selecting the one that maximizes normalized cross-correlation (NCC) between a de-rotation-predicted early frame and the actual late frame.
+After Step 04 completes, a high-pass NCC sweep is performed to quantify how reliably the de-rotation prediction matches the actual belt structure. This is a **diagnostic metric** — it does not change the `warp_scale` used for warping.
 
-**Why raw NCC fails**: The raw NCC is dominated by the smooth, radially-symmetric limb darkening gradient. Any warp distorts that gradient, so NCC decreases monotonically with increasing scale regardless of how well the belt structures align — the minimum scale always "wins." Running the sweep on raw frames therefore always returns `scale_min`.
+**Design rationale**: `warp_scale` is a physical constant (the planet's rotation geometry). Poor seeing does not change the correct warp geometry; it just makes the belt structure blurry and harder to correlate. When the old design tried to auto-tune `warp_scale` per window, bad seeing caused the calibration to return spurious low values (~0.5 instead of 1.0), producing streaky de-rotation artifacts. The NCC result now answers a different question: *"given that we applied the correct warp_scale, how visible was the belt structure in this session?"*
 
-**Fix — Gaussian high-pass filter**: Before computing NCC, subtract a wide Gaussian blur (σ=30 px) from both frames. This removes the DC/low-frequency limb darkening component and leaves only fine-scale atmospheric belt and zone structures to drive the correlation peak at the correct scale.
+**Why raw NCC fails**: The smooth, radially-symmetric limb-darkening gradient dominates raw NCC. Any warp distorts that gradient, so raw NCC decreases monotonically with scale — the minimum scale always "wins."
+
+**Fix — Gaussian high-pass filter**: Subtract a wide Gaussian blur (σ=30 px) before computing NCC. This removes the limb-darkening component and leaves only fine-scale belt/zone structures to drive the correlation.
 
 ```python
 lum_hp = lum - GaussianBlur(lum, sigma=30)
@@ -390,14 +392,21 @@ lum_hp = lum - GaussianBlur(lum, sigma=30)
 
 **Procedure**:
 
-1. Select the earliest and latest TIF frames in the window as `frame_early` and `frame_late`
-2. Apply high-pass filter to both luminance images
-3. Sweep `scale` from 0.50 to 1.10 in 13 steps
-4. For each scale, apply `spherical_derotation_warp(frame_early, dt_total)` to predict `frame_early` at `frame_late`'s time
-5. Compute NCC between the high-pass-filtered predicted and actual frames using only the inner disk (r ≤ 0.7 × semi_a)
-6. Select the `scale` that maximizes NCC
+1. Select the session's longest window (maximum time span across all windows)
+2. Load the earliest and latest TIF frames of that window
+3. Sweep `scale` from 0.50 to 1.20 in 13 steps, **plus** the config value (1.0) explicitly included
+4. For each scale, apply `spherical_derotation_warp(frame_early, dt_total)` as a forward prediction
+5. Compute high-pass NCC between predicted and actual `frame_late` on the inner disk (r ≤ 0.7 × semi_a)
+6. Report `ncc_at_config_scale` (NCC at warp_scale=1.0) as the primary confidence metric
 
-Typical result for Jupiter: **0.75–0.85**. The calibrated value is logged as `warp_scale` in `derotation_log.json`.
+**Outputs logged in `derotation_summary.txt`**:
+
+| Field | Meaning |
+|---|---|
+| `derot_confidence` | NCC at config warp_scale — primary confidence metric |
+| `est. peak` | Scale where NCC peaks — diagnostic only, not used for warping |
+
+**Warning threshold**: If `ncc_at_config_scale < 0.80`, a GUI warning dialog is shown after Step 04 completes (standalone) or after all steps finish (Run All). The warning recommends reducing the window size in Step 3 and re-running. Shorter windows accumulate less rotation and are less sensitive to poor seeing.
 
 ### Pre-warp Disk Center Alignment
 

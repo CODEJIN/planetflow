@@ -1249,7 +1249,6 @@ class MainWindow(QMainWindow):
             rotation_period_hours = float(d.get("rotation_period_hours",
                                                d.get("rotation_period", 9.9281))),
             horizons_id           = str(d.get("horizons_id", "599")),
-            warp_scale            = float(d.get("warp_scale", 0.80)),
             normalize_brightness  = bool(d.get("normalize_brightness", False)),
             min_quality_threshold = float(d.get("min_quality_threshold", 0.3)),
         )

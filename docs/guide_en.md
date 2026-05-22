@@ -292,9 +292,19 @@ Stacks frames within the optimal windows detected in Step 03, correcting for pla
 
 Step 04 automatically queries the NASA JPL Horizons API to retrieve the planet's north pole angle (NP.ang) at the time of observation. The **Horizons ID** in Global Settings must be set correctly. An internet connection is required.
 
-### 7.3 Warp Scale Auto-calibration
+### 7.3 De-rotation Confidence (NCC)
 
-The de-rotation warp intensity (warp scale) is automatically calibrated for each window using a high-pass NCC sweep between the earliest and latest frames in the window. A Gaussian high-pass filter (σ=30 px) is applied before cross-correlation to remove limb darkening bias, allowing the belt structure to drive the optimal scale selection. The calibrated value is logged in `derotation_log.json` as `warp_scale` (typically 0.75–0.85 for Jupiter). No user input is required.
+The **warp scale** is a fixed physical constant (default 1.0) empirically calibrated from best-seeing data. It is not auto-tuned per window — the planet's rotation rate is constant, so the warp geometry does not change with seeing.
+
+After Step 04 completes (standalone or as part of Run All), a **high-pass NCC sweep** is performed between the earliest and latest frames of the session's longest window. A Gaussian high-pass filter (σ=30 px) removes limb-darkening bias so that belt structures drive the correlation. The resulting **NCC at warp_scale=1.0** measures how reliably the de-rotation prediction matches the actual belt structure — a proxy for seeing quality and de-rotation reliability.
+
+If NCC < 0.80, a warning dialog is shown:
+
+> *De-rotation NCC confidence is low: NCC = X.XXX < 0.8. Consider reducing the Window (frames) setting in Step 3 and re-running from Step 3.*
+
+This is informational — the pipeline has already completed and results are saved. The warning simply recommends re-running with a shorter window if the low confidence is a concern. Shorter windows accumulate less rotation and are less sensitive to poor seeing.
+
+The NCC value and measurement details are logged in `derotation_summary.txt` as `derot_confidence`.
 
 ### 7.4 Satellite / Shadow Composite
 

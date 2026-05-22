@@ -191,11 +191,10 @@ class DerotationConfig:
     horizons_id: str = "599"
     observer_code: str = "500@399"   # JPL Horizons geocentric observer
 
-    # Spherical warp scale factor (empirically determined ~0.80 for 260320).
-    # Theoretical value is 1.0; values < 1.0 apply the remainder as a rigid
-    # horizontal shift per-frame before stacking.  Lower values increase east/
-    # west limb blurring; 0.80 was found optimal for the 260320 Jupiter dataset.
-    warp_scale: float = 0.80
+    # Spherical warp scale factor (empirically calibrated from best-seeing data).
+    # 1.0 = full theoretical spherical correction, empirically confirmed optimal
+    # for Jupiter across multiple datasets (NCC peak consistently near 1.0).
+    warp_scale: float = 1.00
 
     # Per-frame brightness normalization before stacking.
     # Rescales each frame so its planet-disk median matches the reference frame.

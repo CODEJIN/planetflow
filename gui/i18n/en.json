@@ -276,7 +276,7 @@
   "step04.input_dir.tooltip": "Step 2 Lucky Stacking output TIF folder.\nAuto-filled by cascade.",
   "step04.quality_dir.tooltip": "Folder containing quality score CSV files produced by Step 3.\nAuto-set after Step 3 completes.\nRequired for the 'Auto-tune scale' button to be enabled.",
   "step04.output_dir.tooltip": "Folder where de-rotation stacked TIF master images are saved.\nSet automatically.",
-  "step04.warp_scale.tooltip": "Intensity factor for the de-rotation spherical warp.\n0.0 = no correction / 1.0 = full theoretical sphere correction\n0.8 = empirically optimal (Jupiter, typical seeing)\nGood seeing: try 1.0–1.2\nUse 'Auto-tune scale' to measure automatically.",
+  "step04.warp_scale.tooltip": "Intensity factor for the de-rotation spherical warp.\n0.0 = no correction / 1.0 = full theoretical sphere correction\n1.0 = empirically confirmed optimal for Jupiter (NCC peak consistently near 1.0)",
   "step04.sweep_btn.tooltip": "Automatically searches for the warp_scale value that maximizes stack sharpness\nbased on the current Step 3 data.\nTakes about 2–4 seconds. Step 3 must be complete.",
   "step04.min_quality.tooltip": "Frames with quality scores below this value are excluded from stacking.\n0.0 = include all frames. Raise to 0.3–0.5 in poor conditions.",
   "step04.normalize.tooltip": "Normalize each frame's brightness before stacking.\nEnable when there are large brightness variations due to changing seeing.",
