@@ -1,7 +1,7 @@
-"""Levels (black-point / gamma) before/after preview widget — used by Step 10.
+"""Levels (black-point / gamma) before/after preview widget — used by Step 9.
 
-Loads one representative PNG from ``input_dir`` (Step 7 composite output),
-applies the levels adjustment used by step10_summary_grid, and shows the
+Loads one representative PNG from ``input_dir`` (Step 6 composite output),
+applies the levels adjustment used by step09_summary_grid, and shows the
 original vs. adjusted image side by side.
 
 Auto-renders on first show; re-renders (debounced 400 ms) when params change.

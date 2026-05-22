@@ -7,7 +7,7 @@ with two sub-widgets:
 
 Color camera mode:
   Per-window automatic white balance + CA correction runs entirely inside the
-  pipeline (_auto_color_correct in step06_rgb_composite.py).  The GUI panel
+  pipeline (_auto_color_correct in rgb_composite.py).  The GUI panel
   shows a before/after preview using the same algorithm so the user can verify
   the correction quality before running the full pipeline.
 
@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import StepStatusWidget
 from gui.widgets.rgb_composite_preview import RgbCompositePreviewWidget
 
 # ── Shared styles ──────────────────────────────────────────────────────────────
@@ -224,12 +225,10 @@ class _Step06MonoWidget(QWidget):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self._input_lbl = QLineEdit()
-        self._input_lbl.setReadOnly(True)
-        self._input_lbl.setStyleSheet(_READONLY_STYLE)
-        self._input_lbl.setToolTip(S("step06.input_dir.tooltip"))
-        lbl_in = QLabel(S("step06.input_dir"))
-        fl.addRow(lbl_in, self._input_lbl)
+        self._step_status = StepStatusWidget(steps=[5])
+        lbl_req = QLabel(S("common.requires"))
+        lbl_req.setStyleSheet("color: #888;")
+        fl.addRow(lbl_req, self._step_status)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
@@ -248,6 +247,18 @@ class _Step06MonoWidget(QWidget):
         lbl_shift = QLabel(S("step06.max_shift"))
         lbl_shift.setToolTip(_tip_shift)
         fl.addRow(lbl_shift, self._max_shift)
+
+        _tip_bscale = S("step06.brightness_scale.tooltip")
+        self._brightness_scale = QDoubleSpinBox()
+        self._brightness_scale.setStyleSheet(_SPINBOX_STYLE)
+        self._brightness_scale.setRange(0.1, 2.0)
+        self._brightness_scale.setDecimals(2)
+        self._brightness_scale.setSingleStep(0.05)
+        self._brightness_scale.setValue(1.0)
+        self._brightness_scale.setToolTip(_tip_bscale)
+        lbl_bscale = QLabel(S("step06.brightness_scale"))
+        lbl_bscale.setToolTip(_tip_bscale)
+        fl.addRow(lbl_bscale, self._brightness_scale)
 
         left_layout.addWidget(form_widget)
 
@@ -298,19 +309,21 @@ class _Step06MonoWidget(QWidget):
         chk_row.setContentsMargins(0, 6, 0, 0)
         chk_row.setSpacing(16)
         self._chk_global_normalize = QCheckBox(S("step06.global_normalize"))
+        self._chk_filter_normalize = QCheckBox(S("step06.filter_normalize"))
         self._chk_stretch  = QCheckBox(S("step06.stretch_enabled"))
         self._chk_saturate = QCheckBox(S("step06.saturation_boost"))
-        self._chk_global_normalize.setStyleSheet(_CHK_STYLE)
-        self._chk_stretch.setStyleSheet(_CHK_STYLE)
-        self._chk_saturate.setStyleSheet(_CHK_STYLE)
+        for chk in (self._chk_global_normalize, self._chk_filter_normalize,
+                    self._chk_stretch, self._chk_saturate):
+            chk.setStyleSheet(_CHK_STYLE)
+            chk.toggled.connect(self._on_params_changed)
         self._chk_global_normalize.setChecked(True)
         self._chk_global_normalize.setToolTip(S("step06.global_normalize.tooltip"))
+        self._chk_filter_normalize.setChecked(False)
+        self._chk_filter_normalize.setToolTip(S("step06.filter_normalize.tooltip"))
         self._chk_stretch.setChecked(False)
         self._chk_saturate.setChecked(True)
-        self._chk_global_normalize.toggled.connect(self._on_params_changed)
-        self._chk_stretch.toggled.connect(self._on_params_changed)
-        self._chk_saturate.toggled.connect(self._on_params_changed)
         chk_row.addWidget(self._chk_global_normalize)
+        chk_row.addWidget(self._chk_filter_normalize)
         chk_row.addWidget(self._chk_stretch)
         chk_row.addWidget(self._chk_saturate)
         chk_row.addStretch()
@@ -336,6 +349,8 @@ class _Step06MonoWidget(QWidget):
         self._preview.retranslate()
         self._chk_global_normalize.setText(S("step06.global_normalize"))
         self._chk_global_normalize.setToolTip(S("step06.global_normalize.tooltip"))
+        self._chk_filter_normalize.setText(S("step06.filter_normalize"))
+        self._chk_filter_normalize.setToolTip(S("step06.filter_normalize.tooltip"))
         self._chk_stretch.setText(S("step06.stretch_enabled"))
         self._chk_saturate.setText(S("step06.saturation_boost"))
 
@@ -343,12 +358,14 @@ class _Step06MonoWidget(QWidget):
         out = data.get("output_dir", "")
         if out:
             p = Path(out)
-            self._input_lbl.setText(str(p / "step05_wavelet_master"))
             self._output_lbl.setText(str(p / "step06_rgb_composite"))
+            self._step_status.refresh(p)
             if hasattr(self, "_preview"):
                 self._preview.set_input_dir(p / "step05_wavelet_master")
         self._max_shift.setValue(float(data.get("max_shift_px", 15.0)))
+        self._brightness_scale.setValue(float(data.get("brightness_scale", 1.0)))
         self._chk_global_normalize.setChecked(bool(data.get("global_normalize", True)))
+        self._chk_filter_normalize.setChecked(bool(data.get("global_filter_normalize", False)))
         self._chk_stretch.setChecked(bool(data.get("stretch_enabled", False)))
         self._chk_saturate.setChecked(bool(data.get("saturation_boost", True)))
 
@@ -375,11 +392,13 @@ class _Step06MonoWidget(QWidget):
     def get_config_updates(self) -> dict[str, Any]:
         specs = [r.to_dict() for r in self._spec_rows if r.to_dict()["name"]]
         result: dict[str, Any] = {
-            "max_shift_px":     self._max_shift.value(),
-            "composite_specs":  specs,
-            "global_normalize": self._chk_global_normalize.isChecked(),
-            "stretch_enabled":  self._chk_stretch.isChecked(),
-            "saturation_boost": self._chk_saturate.isChecked(),
+            "max_shift_px":            self._max_shift.value(),
+            "composite_specs":         specs,
+            "brightness_scale":        self._brightness_scale.value(),
+            "global_normalize":        self._chk_global_normalize.isChecked(),
+            "global_filter_normalize": self._chk_filter_normalize.isChecked(),
+            "stretch_enabled":         self._chk_stretch.isChecked(),
+            "saturation_boost":        self._chk_saturate.isChecked(),
         }
         out_text = self._output_lbl.text().strip()
         if out_text:
@@ -418,9 +437,10 @@ class _Step06MonoWidget(QWidget):
 
     def set_output_dir(self, path: Path | str | None) -> None:
         self._output_dir = Path(path) if path else None
-        step06_dir = self._output_dir / "step05_wavelet_master" if self._output_dir else None
+        self._step_status.refresh(self._output_dir)
+        step05_dir = self._output_dir / "step05_wavelet_master" if self._output_dir else None
         if hasattr(self, "_preview"):
-            self._preview.set_input_dir(step06_dir)
+            self._preview.set_input_dir(step05_dir)
 
     def on_show(self) -> None:
         if hasattr(self, "_preview"):
@@ -552,7 +572,7 @@ class _CCPreviewWorker(QObject):
     def run(self) -> None:
         try:
             from pipeline.modules import image_io, composite as comp_mod
-            from pipeline.steps.step06_rgb_composite import _auto_color_correct
+            from pipeline.steps.rgb_composite import _auto_color_correct
 
             orig = image_io.read_png(self._path)
             if orig.ndim == 2:
@@ -799,19 +819,14 @@ class _Step06ColorWidget(QWidget):
         chk_row = QHBoxLayout()
         chk_row.setContentsMargins(0, 4, 0, 0)
         chk_row.setSpacing(16)
-        self._chk_global_normalize = QCheckBox(S("step06.global_normalize"))
         self._chk_stretch  = QCheckBox(S("step06.stretch_enabled"))
         self._chk_saturate = QCheckBox(S("step06.saturation_boost"))
-        self._chk_global_normalize.setStyleSheet(_CHK_STYLE)
         self._chk_stretch.setStyleSheet(_CHK_STYLE)
         self._chk_saturate.setStyleSheet(_CHK_STYLE)
-        self._chk_global_normalize.setChecked(True)
-        self._chk_global_normalize.setToolTip(S("step06.global_normalize.tooltip"))
         self._chk_stretch.setChecked(False)
         self._chk_saturate.setChecked(True)
         self._chk_stretch.toggled.connect(lambda: self.schedule_update(0))
         self._chk_saturate.toggled.connect(lambda: self.schedule_update(0))
-        chk_row.addWidget(self._chk_global_normalize)
         chk_row.addWidget(self._chk_stretch)
         chk_row.addWidget(self._chk_saturate)
         chk_row.addStretch()
@@ -867,8 +882,6 @@ class _Step06ColorWidget(QWidget):
         self._status_lbl.setText(S("step06.cc.status_init"))
         self._cap_before_lbl.setText(S("step06.cc.cap_before"))
         self._cap_after_lbl.setText(S("step06.cc.cap_after"))
-        self._chk_global_normalize.setText(S("step06.global_normalize"))
-        self._chk_global_normalize.setToolTip(S("step06.global_normalize.tooltip"))
         self._chk_stretch.setText(S("step06.stretch_enabled"))
         self._chk_saturate.setText(S("step06.saturation_boost"))
 
@@ -879,13 +892,11 @@ class _Step06ColorWidget(QWidget):
             self._input_lbl.setText(str(p / "step05_wavelet_master"))
             self._output_lbl.setText(str(p / "step06_rgb_composite"))
             self._step06_dir = p / "step05_wavelet_master"
-        self._chk_global_normalize.setChecked(bool(data.get("global_normalize", True)))
         self._chk_stretch.setChecked(bool(data.get("stretch_enabled", False)))
         self._chk_saturate.setChecked(bool(data.get("saturation_boost", True)))
 
     def get_config_updates(self) -> dict[str, Any]:
         return {
-            "global_normalize": self._chk_global_normalize.isChecked(),
             "stretch_enabled":  self._chk_stretch.isChecked(),
             "saturation_boost": self._chk_saturate.isChecked(),
         }
@@ -1002,7 +1013,7 @@ class _Step06ColorWidget(QWidget):
 
 # ── Wrapper panel ──────────────────────────────────────────────────────────────
 
-class Step06Panel(BasePanel):
+class RgbCompositePanel(BasePanel):
     STEP_ID   = "06"
     TITLE_KEY = "step06.title"
     DESC_KEY  = "step06.desc"

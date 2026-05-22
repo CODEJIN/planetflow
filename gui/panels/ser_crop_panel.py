@@ -1,4 +1,4 @@
-"""Step 1 — PIPP preprocessing panel."""
+"""Step 1 — SER Crop panel."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import FolderStatusDot
 from gui.widgets.ser_preview import SerPreviewWidget
 
 _SPINBOX_STYLE = (
@@ -61,7 +62,7 @@ def _dir_row(parent: QWidget, line_edit: QLineEdit) -> QHBoxLayout:
     return row
 
 
-class Step01Panel(BasePanel):
+class SerCropPanel(BasePanel):
     STEP_ID   = "01"
     TITLE_KEY = "step01.title"
     DESC_KEY  = "step01.desc"
@@ -109,7 +110,10 @@ class Step01Panel(BasePanel):
         self._ser_dir.editingFinished.connect(self._auto_set_step1_output)
         lbl_ser = QLabel(S("step01.ser_dir"))
         lbl_ser.setToolTip(S("step01.ser_dir.tooltip"))
-        fl.addRow(lbl_ser, _dir_row(self, self._ser_dir))
+        self._ser_dot = FolderStatusDot()
+        ser_row = _dir_row(self, self._ser_dir)
+        ser_row.insertWidget(0, self._ser_dot)
+        fl.addRow(lbl_ser, ser_row)
 
         # Output directory
         self._output_step1 = QLineEdit()
@@ -179,6 +183,8 @@ class Step01Panel(BasePanel):
         self._ser_dir.blockSignals(True)
         self._ser_dir.setText(ser_dir)
         self._ser_dir.blockSignals(False)
+        if hasattr(self, "_ser_dot"):
+            self._ser_dot.check(ser_dir, ["*.ser", "*.SER"])
 
         self._roi_size.blockSignals(True)
         self._roi_size.setValue(int(data.get("roi_size", 448)))
@@ -196,7 +202,7 @@ class Step01Panel(BasePanel):
         else:
             out = data.get("output_dir", "")
             if out and not self._output_manually_edited:
-                self._output_step1.setText(str(Path(out) / "step01_pipp"))
+                self._output_step1.setText(str(Path(out) / "step01_ser_crop"))
                 self._output_dir = Path(out)
 
         # Sync preview
@@ -225,7 +231,7 @@ class Step01Panel(BasePanel):
                 return sorted(p.glob("*.ser"))
         if self._output_dir is None:
             return []
-        step_dir = self._output_dir / "step01_pipp"
+        step_dir = self._output_dir / "step01_ser_crop"
         if not step_dir.exists():
             return []
         return sorted(step_dir.glob("*.ser"))
@@ -244,6 +250,8 @@ class Step01Panel(BasePanel):
     # ── Slots ─────────────────────────────────────────────────────────────────
 
     def _on_ser_dir_changed(self, text: str) -> None:
+        if hasattr(self, "_ser_dot"):
+            self._ser_dot.check(text.strip(), ["*.ser", "*.SER"])
         if hasattr(self, "_preview"):
             self._preview.set_input_dir(text.strip() or None)
 
@@ -256,7 +264,7 @@ class Step01Panel(BasePanel):
         t = self._ser_dir.text().strip()
         if not t:
             return
-        derived = str(Path(t) / "step01_pipp")
+        derived = str(Path(t) / "step01_ser_crop")
         self._output_step1.setText(derived)
         self._output_dir = Path(t)
         self.dirs_changed.emit()

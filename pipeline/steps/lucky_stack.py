@@ -1,23 +1,23 @@
 """
 Step 2 — Lucky stacking: SER video frames → stacked TIF.
 
-Reads PIPP-preprocessed SER files (step01 output) and runs AS!4-style lucky
+Reads SER Crop output files (step01 output) and runs AS!4-style lucky
 stacking to produce one 16-bit TIF per SER file.
 
 Input:
     Scans ``config.ser_input_dir`` (or ``config.step01_output_dir``) for SER
-    files matching ``*_pipp.ser``.  Falls back to any ``*.ser`` files if no
-    ``_pipp.ser`` are found.
+    files matching ``*_ser_crop.ser``.  Falls back to any ``*.ser`` files if no
+    ``_ser_crop.ser`` are found.
 
 Output:
     <output_base>/step02_lucky_stack/
-        2026-04-07-1114_7-U-IR-Jup_pipp_lucky.tif
-        2026-04-07-1114_7-U-IR-Jup_pipp_lucky.json   ← processing log
+        2026-04-07-1114_7-U-IR-Jup_ser_crop_lucky.tif
+        2026-04-07-1114_7-U-IR-Jup_ser_crop_lucky.json   ← processing log
         ...
 
 Output filename convention:
     ``<original_stem>_lucky.tif``
-    The ``_pipp_lucky`` suffix (after the target group) is transparent to the
+    The ``_ser_crop_lucky`` suffix (after the target group) is transparent to the
     ``parse_filename`` regex in image_io.py, so steps 03-10 consume these TIFs
     without any changes.
 
@@ -79,7 +79,7 @@ def run(
         if not p.exists():
             print(f"  [ERROR] Step 2: SER input directory not found: {p}")
             return {}
-        pipp_files = sorted(p.glob("*_pipp.ser"))
+        pipp_files = sorted(p.glob("*_ser_crop.ser"))
         ser_files  = pipp_files if pipp_files else sorted(p.glob("*.ser"))
         if not ser_files:
             print(f"  [ERROR] Step 2: No SER files in: {p}")
@@ -90,7 +90,7 @@ def run(
         candidates: List[Path] = []
         if config.step01_output_dir is not None:
             candidates.append(Path(config.step01_output_dir))
-        candidates.append(config.output_base_dir / "step01_pipp")
+        candidates.append(config.output_base_dir / "step01_ser_crop")
         if hasattr(config, "ser_input_dir") and config.ser_input_dir is not None:
             raw = Path(config.ser_input_dir)
             if raw != Path("."):   # skip the "." default that build_config injects
@@ -98,7 +98,7 @@ def run(
 
         for cand in candidates:
             if cand.exists():
-                pipp_files = sorted(cand.glob("*_pipp.ser"))
+                pipp_files = sorted(cand.glob("*_ser_crop.ser"))
                 if pipp_files:
                     ser_dir = cand
                     ser_files = pipp_files

@@ -17,21 +17,20 @@ from pipeline.config import (
     DerotationConfig,
     GifConfig,
     PipelineConfig,
-    PippConfig,
+    SerCropConfig,
     QualityConfig,
     SummaryGridConfig,
     WaveletConfig,
 )
-from pipeline.steps import step01_pipp
-from pipeline.steps import step02_lucky_stack
-from pipeline.steps import step03_wavelet_sharpen
-from pipeline.steps import step04_quality_assess
-from pipeline.steps import step05_derotate_stack
-from pipeline.steps import step06_wavelet_master
-from pipeline.steps import step08_rgb_composite
-from pipeline.steps import step09_series_composite
-from pipeline.steps import step10_gif
-from pipeline.steps import step11_summary_grid
+from pipeline.steps import ser_crop
+from pipeline.steps import lucky_stack
+from pipeline.steps import quality_assess
+from pipeline.steps import derotate_stack
+from pipeline.steps import wavelet_master
+from pipeline.steps import rgb_composite
+from pipeline.steps import wavelet_preview
+from pipeline.steps import gif
+from pipeline.steps import summary_grid
 
 
 def main() -> None:
@@ -44,15 +43,15 @@ def main() -> None:
         output_base_dir=Path("/data/astro_test/260402_output"),
 
         # ── Step save flags ────────────────────────────────────────────────────
-        save_step01=True,    # PIPP-processed SER files (Step 1)
-        save_step03=True,    # Wavelet preview PNGs  (Step 3)
-        save_step04=True,    # Quality score CSV     (Step 4, not yet implemented)
-        save_step05=True,    # De-rotated TIFs       (Step 5, not yet implemented)
-        save_step06=True,    # Master wavelet PNGs   (Step 6, not yet implemented)
-        save_step08=True,    # RGB composites        (Step 8, not yet implemented)
-        save_step09=True,    # Series composites     (Step 9, not yet implemented)
-        save_step10=True,    # Animated GIF          (Step 10)
-        save_step11=True,    # Summary contact sheet (Step 11)
+        save_step01=True,    # SER Crop output files (Step 1)
+        save_step02=True,    # Lucky-stacked TIF files (Step 2)
+        save_step03=True,    # Quality scores CSV (Step 3)
+        save_step04=True,    # De-rotated master TIFs (Step 4)
+        save_step05=True,    # Wavelet-sharpened master PNGs (Step 5)
+        save_step06=True,    # RGB composites (Step 6)
+        save_step07=True,    # Wavelet preview PNGs (Step 7)
+        save_step08=True,    # Animated GIF (Step 8)
+        save_step09=True,    # Summary contact sheet (Step 9)
 
         # ── Wavelet parameters (WaveSharp-compatible, 0–200 scale) ────────────
         wavelet=WaveletConfig(
@@ -72,8 +71,8 @@ def main() -> None:
             border_taper_px=30,
         ),
 
-        # ── PIPP parameters (Step 1) ───────────────────────────────────────────
-        pipp=PippConfig(
+        # ── SER Crop parameters (Step 1) ──────────────────────────────────────
+        ser_crop=SerCropConfig(
             roi_size=448,         # output crop size in pixels (square)
             min_diameter=50,      # minimum planet diameter to accept a frame
             size_tolerance=0.05,  # 5% tolerance vs. sliding-window median
@@ -144,53 +143,43 @@ def main() -> None:
         filters=["IR", "R", "G", "B", "CH4"],
     )
 
-    # ── Step 1: PIPP preprocessing (frame reject + crop) ─────────────────────
-    print("\n=== Step 1: PIPP Preprocessing ===")
-    results_01 = step01_pipp.run(config)
+    # ── Step 1: SER Crop (frame reject + crop) ────────────────────────────────
+    print("\n=== Step 1: SER Crop ===")
+    results_01 = ser_crop.run(config)
 
     # ── Step 2: Lucky stacking (SER → TIF, AS!4-style local AP warp) ─────────
     print("\n=== Step 2: Lucky Stacking ===")
-    results_02 = step02_lucky_stack.run(config)
-    # After step 2, use its output as input for step 3+ (wavelet / derotation).
+    results_02 = lucky_stack.run(config)
     if results_02 and config.save_step02:
         config.input_dir = config.step_dir(2, "lucky_stack")
 
-    # ── Step 3: Wavelet sharpening preview ────────────────────────────────────
-    print("\n=== Step 3: Wavelet Sharpening (Preview) ===")
-    results_03 = step03_wavelet_sharpen.run(config)
+    # ── Step 3: Quality assessment (all sliding windows) ──────────────────────
+    print("\n=== Step 3: Quality Assessment ===")
+    results_03 = quality_assess.run(config)
 
-    # ── Step 4: Quality assessment ─────────────────────────────────────────────
-    print("\n=== Step 4: Quality Assessment ===")
-    results_04 = step04_quality_assess.run(config)  # re-reads original TIFs
-    #
-    # ── [HUMAN CHECKPOINT] ────────────────────────────────────────────────────
-    # Review output/step04_quality/windows_summary.txt
-    # Confirm or override the automatically selected windows before Step 5.
-    # To override: edit windows.json or pass custom window indices to Step 5.
+    # ── Step 4: De-rotation stacking ──────────────────────────────────────────
+    print("\n=== Step 4: De-rotation Stacking ===")
+    results_04 = derotate_stack.run(config, results_03)
 
-    # ── Step 5: De-rotation stacking ──────────────────────────────────────────
-    print("\n=== Step 5: De-rotation Stacking ===")
-    results_05 = step05_derotate_stack.run(config, results_04)
+    # ── Step 5: Wavelet sharpening (master) ───────────────────────────────────
+    print("\n=== Step 5: Wavelet Master ===")
+    results_05 = wavelet_master.run(config, results_04)
 
-    # ── Step 6: Wavelet sharpening (master) ───────────────────────────────────
-    print("\n=== Step 6: Wavelet Sharpening (Master) ===")
-    results_06 = step06_wavelet_master.run(config, results_05)
+    # ── Step 6: RGB compositing ────────────────────────────────────────────────
+    print("\n=== Step 6: RGB Composite ===")
+    results_06 = rgb_composite.run(config, results_05)
 
-    # ── Step 8: RGB compositing (master) ──────────────────────────────────────
-    print("\n=== Step 8: RGB Compositing (Master) ===")
-    results_08 = step08_rgb_composite.run(config, results_06)
+    # ── Step 7: Wavelet preview ────────────────────────────────────────────────
+    print("\n=== Step 7: Wavelet Preview ===")
+    wavelet_preview.run(config)
 
-    # ── Step 9: Time-series compositing ───────────────────────────────────────
-    print("\n=== Step 9: Time-series RGB Compositing ===")
-    results_09 = step09_series_composite.run(config, results_03)
+    # ── Step 8: Animated GIF ──────────────────────────────────────────────────
+    print("\n=== Step 8: Animated GIF ===")
+    gif.run(config, results_06)
 
-    # ── Step 10: Animated GIF ─────────────────────────────────────────────────
-    print("\n=== Step 10: Animated GIF ===")
-    step10_gif.run(config, results_09)
-
-    # ── Step 11: Summary contact sheet ────────────────────────────────────────
-    print("\n=== Step 11: Summary Contact Sheet ===")
-    step11_summary_grid.run(config, results_08, results_05)
+    # ── Step 9: Summary contact sheet ─────────────────────────────────────────
+    print("\n=== Step 9: Summary Grid ===")
+    summary_grid.run(config, results_04, results_05, results_06)
 
     print("\n=== Pipeline finished ===")
 

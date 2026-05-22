@@ -1,10 +1,10 @@
-"""SER frame preview widget — used by Step 1 (PIPP preprocessing).
+"""SER frame preview widget — used by Step 1 (SER Crop).
 
 Loads a middle frame from one SER file found in ``input_dir``, runs
 planet detection, and shows:
   - Left : raw frame scaled to fit, with detected-planet bounding box
             (cyan) and ROI crop area (green) overlaid.
-  - Right: ROI-cropped result (what PIPP would output for this frame).
+  - Right: ROI-cropped result (SER Crop output for this frame).
 
 Auto-renders on first show; re-renders (debounced 400 ms) when params change.
 """

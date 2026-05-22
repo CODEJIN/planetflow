@@ -1,7 +1,7 @@
 """
-Step 9 – Animated GIF.
+Step 8 – Animated GIF.
 
-Assembles the time-ordered series of composite PNGs from Step 8 into one
+Assembles the time-ordered series of composite PNGs from Step 6 into one
 animated GIF per composite type (RGB, IR-RGB, CH4-G-IR, …).
 
 GIF output:  per-frame Floyd-Steinberg dithering (256-colour, improved quality)
@@ -11,12 +11,12 @@ One correction is applied before writing:
 **Planet centering** (jitter fix):
    Each composite frame's planet disk is detected and shifted to the image
    centre.  Without this, the GIF flickers because the phase-correlation
-   reference channel used inside Step 8's compose() may vary per frame,
+   reference channel used inside Step 6's compose() may vary per frame,
    causing the composite planet to sit at slightly different sub-pixel
    positions even after per-filter centering.
 
-Output (when config.save_step09 is True):
-    <output_base>/step09_gif/
+Output (when config.save_step08 is True):
+    <output_base>/step08_gif/
         RGB_animation.gif
         IR-RGB_animation.gif
         CH4-G-IR_animation.gif
@@ -33,31 +33,31 @@ from pipeline.config import PipelineConfig
 from pipeline.modules import image_io
 
 
-# ── Disk-based Step 8 result loader ───────────────────────────────────────────
+# ── Disk-based Step 6 result loader ───────────────────────────────────────────
 
-def _load_step08_from_disk(
+def _load_step06_from_disk(
     config: PipelineConfig,
 ) -> Dict[str, List[tuple]]:
-    """Reconstruct Step 8 results by scanning step08_series/ on disk.
+    """Reconstruct Step 6 results by scanning step06_rgb_composite/ on disk.
 
-    Used when step09 is run standalone (Step 8 results not in memory).
-    Scans each frame_XXX_* directory for *_composite.png files.
+    Used when step08 is run standalone (Step 6 results not in memory).
+    Scans each window_NN/ directory for *_composite.png files.
     """
-    step08_dir = config.step_dir(8, "series")
-    if not step08_dir.exists():
+    step06_dir = config.step_dir(6, "rgb_composite")
+    if not step06_dir.exists():
         return {}
 
     results: Dict[str, List[tuple]] = {}
-    for frame_dir in sorted(step08_dir.iterdir()):
-        if not frame_dir.is_dir():
+    for win_dir in sorted(step06_dir.iterdir()):
+        if not win_dir.is_dir():
             continue
-        frame_label = frame_dir.name
-        frame_results = []
-        for png in sorted(frame_dir.glob("*_composite.png")):
+        win_label = win_dir.name
+        win_results = []
+        for png in sorted(win_dir.glob("*_composite.png")):
             comp_name = png.stem[: -len("_composite")]
-            frame_results.append((png, comp_name))
-        if frame_results:
-            results[frame_label] = frame_results
+            win_results.append((png, comp_name))
+        if win_results:
+            results[win_label] = win_results
 
     return results
 
@@ -178,47 +178,47 @@ def _write_gif_dithered(
 
 def run(
     config: PipelineConfig,
-    results_08: Dict[str, List[Tuple[Optional[Path], str]]],
+    results_06: Dict[str, List[Tuple[Optional[Path], str]]],
     progress_callback=None,
     cancel_event=None,
 ) -> Dict[str, Dict[str, Optional[Path]]]:
-    """Build one GIF per composite type from Step 8 series.
+    """Build one GIF per composite type from Step 6 RGB composites.
 
     Args:
         config:      Pipeline configuration (gif params in config.gif).
-        results_08:  Output of step08_series_composite.run():
-                     ``{frame_label: [(png_path_or_None, composite_name), ...]}``
+        results_06:  Output of rgb_composite.run():
+                     ``{window_label: [(png_path_or_None, composite_name), ...]}``
 
     Returns:
         ``{composite_name: {"gif": path_or_None}}``
     """
-    if not results_08:
-        print("  [INFO] Step 8 results not in memory — scanning disk...")
-        results_08 = _load_step08_from_disk(config)
+    if not results_06:
+        print("  [INFO] Step 6 results not in memory — scanning disk...")
+        results_06 = _load_step06_from_disk(config)
 
-    if not results_08:
-        print("  [WARNING] No Step 8 results found on disk — Step 9 skipped.")
+    if not results_06:
+        print("  [WARNING] No Step 6 results found on disk — Step 8 skipped.")
         return {}
 
     # ── Collect per-composite frame lists (time-ordered) ──────────────────────
     composite_frames: Dict[str, List[Path]] = {}
-    for frame_label in sorted(results_08.keys()):
-        for png_path, comp_name in results_08[frame_label]:
+    for win_label in sorted(results_06.keys()):
+        for png_path, comp_name in results_06[win_label]:
             if png_path is not None and png_path.exists():
                 composite_frames.setdefault(comp_name, []).append(png_path)
 
     if not composite_frames:
-        print("  [WARNING] No composite PNGs found in Step 8 results.")
+        print("  [WARNING] No composite PNGs found in Step 6 results.")
         return {}
 
     # ── Output directory ───────────────────────────────────────────────────────
     out_dir: Optional[Path] = None
-    if config.save_step09:
-        out_dir = config.step_dir(9, "gif")
+    if config.save_step08:
+        out_dir = config.step_dir(8, "gif")
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"  Output → {out_dir}")
     else:
-        print("  save_step09=False: animations not written to disk")
+        print("  save_step08=False: animations not written to disk")
 
     gif_cfg = config.gif
     duration_ms = int(1000.0 / gif_cfg.fps)
@@ -239,7 +239,7 @@ def run(
 
     for comp_name, frame_paths in _sorted_composites:
         if cancel_event is not None and cancel_event.is_set():
-            print("  [CANCELLED] Stopping Step 9.", flush=True)
+            print("  [CANCELLED] Stopping Step 8.", flush=True)
             break
         n = len(frame_paths)
         print(f"\n  [{comp_name}]  {n} frames", end="", flush=True)
@@ -298,7 +298,7 @@ def run(
             results[comp_name] = {"gif": None}
 
     ok = len(results) - len(failed)
-    print(f"\n  Step 9 complete: {ok}/{len(results)} composite types → {ok} GIF files")
+    print(f"\n  Step 8 complete: {ok}/{len(results)} composite types → {ok} GIF files")
     if failed:
         print(f"  [WARNING] Failed composites: {', '.join(failed)}")
     return results

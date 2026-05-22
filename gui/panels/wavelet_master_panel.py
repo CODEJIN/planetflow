@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import StepStatusWidget
 from gui.widgets.wavelet_preview import WaveletPreviewWidget
 
 _SPINBOX_STYLE = (
@@ -198,7 +199,7 @@ def _make_combined_row(
     return row, sharp_spin, dn_spin
 
 
-class Step05Panel(BasePanel):
+class WaveletMasterPanel(BasePanel):
     STEP_ID   = "05"
     TITLE_KEY = "step05.title"
     DESC_KEY  = "step05.desc"
@@ -233,12 +234,10 @@ class Step05Panel(BasePanel):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self._input_lbl = QLineEdit()
-        self._input_lbl.setReadOnly(True)
-        self._input_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_in = QLabel(S("step05.input_dir"))
-        lbl_in.setToolTip(S("step05.input_dir.tooltip"))
-        fl.addRow(lbl_in, self._input_lbl)
+        self._step_status = StepStatusWidget(steps=[4])
+        lbl_req = QLabel(S("common.requires"))
+        lbl_req.setStyleSheet("color: #888;")
+        fl.addRow(lbl_req, self._step_status)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
@@ -320,8 +319,8 @@ class Step05Panel(BasePanel):
         out = data.get("output_dir", "")
         if out:
             p = Path(out)
-            self._input_lbl.setText(str(p / "step04_derotated"))
             self._output_lbl.setText(str(p / "step05_wavelet_master"))
+            self._step_status.refresh(p)
             if hasattr(self, "_preview"):
                 self._preview.set_input_dir(p / "step04_derotated")
 
@@ -351,9 +350,10 @@ class Step05Panel(BasePanel):
 
     def set_output_dir(self, path: Path | str) -> None:
         self._output_dir = Path(path) if path else None
-        step05_dir = self._output_dir / "step04_derotated" if self._output_dir else None
+        self._step_status.refresh(self._output_dir)
+        step04_dir = self._output_dir / "step04_derotated" if self._output_dir else None
         if hasattr(self, "_preview"):
-            self._preview.set_input_dir(step05_dir)
+            self._preview.set_input_dir(step04_dir)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 

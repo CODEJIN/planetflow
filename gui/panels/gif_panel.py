@@ -1,4 +1,4 @@
-"""Step 9 — Animated GIF panel."""
+"""Step 8 — Animated GIF panel."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import StepStatusWidget
 
 _SPINBOX_STYLE = (
     "QDoubleSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
@@ -27,10 +28,10 @@ _READONLY_STYLE = (
 )
 
 
-class Step09Panel(BasePanel):
-    STEP_ID   = "09"
-    TITLE_KEY = "step09.title"
-    DESC_KEY  = "step09.desc"
+class GifPanel(BasePanel):
+    STEP_ID   = "08"
+    TITLE_KEY = "step08.title"
+    DESC_KEY  = "step08.desc"
     OPTIONAL  = True
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -45,19 +46,17 @@ class Step09Panel(BasePanel):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        # Folder display (auto-derived, read-only)
-        self._input_lbl = QLineEdit()
-        self._input_lbl.setReadOnly(True)
-        self._input_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_in = QLabel(S("step09.input_dir"))
-        lbl_in.setToolTip(S("step09.input_dir.tooltip"))
-        fl.addRow(lbl_in, self._input_lbl)
+        # Step status dots (auto-derived)
+        self._step_status = StepStatusWidget(steps=[6])
+        lbl_req = QLabel(S("common.requires"))
+        lbl_req.setStyleSheet("color: #888;")
+        fl.addRow(lbl_req, self._step_status)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
         self._output_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_out = QLabel(S("step09.output_dir"))
-        lbl_out.setToolTip(S("step09.output_dir.tooltip"))
+        lbl_out = QLabel(S("step08.output_dir"))
+        lbl_out.setToolTip(S("step08.output_dir.tooltip"))
         fl.addRow(lbl_out, self._output_lbl)
 
         self._fps = QDoubleSpinBox()
@@ -66,9 +65,9 @@ class Step09Panel(BasePanel):
         self._fps.setDecimals(1)
         self._fps.setSingleStep(0.5)
         self._fps.setValue(6.0)
-        self._fps.setToolTip(S("step09.fps.tooltip"))
-        lbl_fps = QLabel(S("step09.fps"))
-        lbl_fps.setToolTip(S("step09.fps.tooltip"))
+        self._fps.setToolTip(S("step08.fps.tooltip"))
+        lbl_fps = QLabel(S("step08.fps"))
+        lbl_fps.setToolTip(S("step08.fps.tooltip"))
         fl.addRow(lbl_fps, self._fps)
 
         self._resize_factor = QDoubleSpinBox()
@@ -77,13 +76,16 @@ class Step09Panel(BasePanel):
         self._resize_factor.setDecimals(1)
         self._resize_factor.setSingleStep(0.1)
         self._resize_factor.setValue(1.0)
-        self._resize_factor.setToolTip(S("step09.resize.tooltip"))
-        lbl_resize = QLabel(S("step09.resize"))
-        lbl_resize.setToolTip(S("step09.resize.tooltip"))
+        self._resize_factor.setToolTip(S("step08.resize.tooltip"))
+        lbl_resize = QLabel(S("step08.resize"))
+        lbl_resize.setToolTip(S("step08.resize.tooltip"))
         fl.addRow(lbl_resize, self._resize_factor)
 
         idx = self._form_layout.count() - 1
         self._form_layout.insertWidget(idx, form_widget)
+
+    def retranslate(self) -> None:
+        pass
 
     def get_config_updates(self) -> dict[str, Any]:
         return {
@@ -95,9 +97,9 @@ class Step09Panel(BasePanel):
         out = data.get("output_dir", "")
         if out:
             p = Path(out)
-            self._input_lbl.setText(str(p / "step08_series"))
-            self._output_lbl.setText(str(p / "step09_gif"))
+            self._output_lbl.setText(str(p / "step08_gif"))
             self._output_dir = p
+            self._step_status.refresh(p)
         self._fps.setValue(float(data.get("fps", 6.0)))
         self._resize_factor.setValue(float(data.get("resize_factor", 1.0)))
 
@@ -106,18 +108,19 @@ class Step09Panel(BasePanel):
         issues = []
         if not batch_mode:
             out_base = config.get("output_dir", "").strip()
-            input_path = str(Path(out_base) / "step08_series") if out_base else ""
-            if not count_files(input_path, "**/*.png", "**/*.PNG", "**/*.tif", "**/*.TIF"):
-                issues.append(ValidationIssue("error", S("validate.no_series_result")))
+            input_path = str(Path(out_base) / "step06_rgb_composite") if out_base else ""
+            if not count_files(input_path, "**/*.png", "**/*.PNG"):
+                issues.append(ValidationIssue("error", S("validate.no_rgb_composite_result")))
         return issues
 
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
             return []
-        step_dir = self._output_dir / "step09_gif"
+        step_dir = self._output_dir / "step08_gif"
         if step_dir.exists():
             return sorted(step_dir.glob("*.gif"))
         return []
 
     def set_output_dir(self, path: Path | str) -> None:
         self._output_dir = Path(path) if path else None
+        self._step_status.refresh(self._output_dir)

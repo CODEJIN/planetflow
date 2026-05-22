@@ -12,7 +12,7 @@ from typing import Any
 SESSION_DIR  = Path.home() / ".astropipe"
 SESSION_FILE = SESSION_DIR / "session.json"
 
-SESSION_VERSION = 9   # bump when _DEFAULTS or migration logic changes
+SESSION_VERSION = 13  # bump when _DEFAULTS or migration logic changes
 
 # Default values written on first run
 _DEFAULTS: dict[str, Any] = {
@@ -41,11 +41,10 @@ _DEFAULTS: dict[str, Any] = {
     "lucky_n_workers":    0,   # kept for migration compat; UI uses global_max_workers
     "global_max_workers": 0,   # 0=auto (all cores); Step 1 caps at 4, Step 2 uses all
     "lucky_n_ser_parallel": 1, # SER-level parallelism; 0=auto (cpu//4)
-    "save_mono_frames": False,
-    # Which optional steps are enabled (01=PIPP off by default; 02=LuckyStack on)
+    # Which optional steps are enabled (01=SER Crop off by default; 02=LuckyStack on)
     "enabled_steps":    {"01": False, "02": True,  "03": True, "04": True,
                          "05": True,  "06": True,  "07": False,
-                         "08": True,  "09": True,  "10": False},
+                         "08": True,  "09": True},
     # Last known status of each step
     "step_status":      {},
 }
@@ -120,6 +119,36 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     # and the merge logic in load() fills in new defaults for missing keys.
 
     # v8→v9: active_profile key added. No migration needed — merge logic handles it.
+
+    # v9→v10: Step 08 (Time-Series Composite) deleted; GIF 09→08, Summary 10→09.
+    if ver < 10:
+        old_enabled = data.get("enabled_steps", {})
+        remap = {"09": "08", "10": "09"}
+        new_enabled = {}
+        for k, v in old_enabled.items():
+            if k == "08":
+                continue  # old series composite step removed
+            new_enabled[remap.get(k, k)] = v
+        data["enabled_steps"] = new_enabled
+
+    # v10→v11: global_normalize moved from Step 6 to Step 8 as normalize_frames.
+    if ver < 11:
+        if "global_normalize" in data and "normalize_frames" not in data:
+            data["normalize_frames"] = data["global_normalize"]
+        data.pop("global_normalize", None)
+
+    # v11→v12: normalize_frames moved back to Step 6 as global_normalize.
+    if ver < 12:
+        if "normalize_frames" in data and "global_normalize" not in data:
+            data["global_normalize"] = data["normalize_frames"]
+        data.pop("normalize_frames", None)
+
+    # v12→v13: step01 output dir renamed from step01_pipp to step01_ser_crop.
+    if ver < 13:
+        for key in ("step01_output_dir",):
+            val = data.get(key, "")
+            if val and "step01_pipp" in val:
+                data[key] = val.replace("step01_pipp", "step01_ser_crop")
 
     data["session_version"] = SESSION_VERSION
     return data

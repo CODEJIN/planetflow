@@ -5,14 +5,14 @@
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Step 01 — PIPP Pre-processing](#2-step-01--pipp-pre-processing)
+2. [Step 01 — SER Crop](#2-step-01--ser-crop)
 3. [Step 02 — Lucky Stacking](#3-step-02--lucky-stacking)
 4. [Step 03 — Quality Assessment & Window Detection](#4-step-03--quality-assessment--window-detection)
 5. [Step 04 — De-rotation Stacking](#5-step-04--de-rotation-stacking)
 6. [Step 05 / 07 — Wavelet Sharpening](#6-step-05--07--wavelet-sharpening)
-7. [Step 06 / 08 — RGB Compositing](#7-step-06--08--rgb-compositing)
-8. [Step 09 — Animated GIF](#8-step-09--animated-gif)
-9. [Step 10 — Summary Grid](#9-step-10--summary-grid)
+7. [Step 06 — RGB Compositing](#7-step-06--rgb-compositing)
+8. [Step 08 — Animated GIF](#8-step-08--animated-gif)
+9. [Step 09 — Summary Grid](#9-step-09--summary-grid)
 10. [Common Module: Disk Detection](#10-common-module-disk-detection-find_disk_center)
 11. [Common Module: Sub-pixel Alignment](#11-common-module-sub-pixel-alignment)
 
@@ -32,15 +32,15 @@ pipeline/
 │   ├── quality.py          # Step 03: Image quality assessment and window selection
 │   ├── derotation.py       # Step 04: De-rotation warp and stacking
 │   ├── wavelet.py          # Step 05/07: À trous wavelet sharpening
-│   └── composite.py        # Step 06/08: RGB/LRGB compositing
+│   └── composite.py        # Step 06: RGB/LRGB compositing
 └── config.py               # Global configuration (dataclass-based)
 ```
 
 ---
 
-## 2. Step 01 — PIPP Pre-processing
+## 2. Step 01 — SER Crop
 
-**Source**: `pipeline/modules/planet_detect.py`, `pipeline/steps/step01_pipp.py`
+**Source**: `pipeline/modules/planet_detect.py`, `pipeline/steps/ser_crop.py`
 
 ```
 Input frame
@@ -86,7 +86,7 @@ Implemented with OpenCV's `THRESH_TRIANGLE` flag. Determines the threshold by fi
 
 ### Bounding Box Center Crop
 
-Jupiter has non-uniform brightness due to belts and the Great Red Spot. A brightness-weighted centroid would introduce systematic bias toward bright structures. Following PIPP's approach, **bounding box center** `(x + w/2, y + h/2)` is used to prevent this bias.
+Jupiter has non-uniform brightness due to belts and the Great Red Spot. A brightness-weighted centroid would introduce systematic bias toward bright structures. To prevent centering bias, **bounding box center** `(x + w/2, y + h/2)` is used.
 
 ---
 
@@ -261,7 +261,7 @@ Per candidate window × per filter:
 Geometric mean across filters → window_quality
     │
     ▼
-Select top N windows under non-overlap constraint
+Enumerate ALL sliding windows chronologically (find_all_windows)
     │
     ▼
 Output: windows.json / *_ranking.csv
@@ -272,9 +272,7 @@ Output: windows.json / *_ranking.csv
 | GUI Parameter | Default | Internal Behavior |
 |---|---|---|
 | **Window (frames)** | 3 | Window length in filter cycle counts. Actual window time = frames × cycle seconds. Used as `n_expected = window_frames` for snr_factor calculation |
-| **Cycle Seconds** | 225 | Duration of one filter cycle (IR→R→G→B→CH4→IR). Used only to compute expected frame count `n_expected = window_minutes / cycle_minutes`. Independent from Step 8's cycle seconds |
-| **N Windows** | 1 | Number of optimal windows to detect. Step 04 uses 1 window; Step 08 time-series uses multiple |
-| **Allow Overlap** | Off | Off: each window center must be ≥ window_minutes away from all already-selected windows |
+| **Cycle Seconds** | 225 | Duration of one filter cycle (IR→R→G→B→CH4→IR). Used only to compute expected frame count `n_expected = window_minutes / cycle_minutes`. Independent from Step 09's cycle seconds |
 | **Min Quality Threshold** | 0.05 | Frames with `norm_score < threshold` are excluded from window quality calculation. 0.0 includes all frames |
 
 ### Internal Fixed Values
@@ -384,7 +382,7 @@ Detecting the disk independently per frame causes (cx, cy) to vary by a few pixe
 
 ### Satellite / Shadow Composite (exp9 Method)
 
-**Source**: `pipeline/steps/step04_derotate_stack.py` → `_apply_satellite_composite()`
+**Source**: `pipeline/steps/derotate_stack.py` → `_apply_satellite_composite()`
 
 When **Satellite Composite** is enabled, Europa and its shadow are composited into every filter's de-rotated TIF using the exp9 multi-rate Gaussian-blend method.
 
@@ -444,7 +442,7 @@ Shadow positions require two JPL NAIF BSP kernel files:
 
 Storage resolution order: `PLANETFLOW_SKYFIELD_DIR` env var → `~/.planetflow/skyfield/` → `/tmp/skyfield/`. If files are missing but internet is reachable, they are downloaded automatically via `urllib.request.urlretrieve` on first run.
 
-The **BSP status indicator** (coloured label next to the checkbox in the Step 04 / Step 08 panels) reflects a background thread check:
+The **BSP status indicator** (coloured label next to the checkbox in the Step 04 panel) reflects a background thread check:
 1. Import `skyfield` — if `ImportError`: red, checkbox disabled (`pip install skyfield` required)
 2. Check BSP file presence — if present: green (OK)
 3. Check internet (`naif.jpl.nasa.gov:443`) — if reachable: orange (files listed + "auto-download on first run"); if not: red, checkbox disabled
@@ -535,7 +533,7 @@ weight_L = 0.5 × (1 − cos(π × t))
 
 ---
 
-## 7. Step 06 / 08 — RGB Compositing
+## 7. Step 06 — RGB Compositing
 
 **Source**: `pipeline/modules/composite.py`
 
@@ -567,20 +565,10 @@ RGB PNG output
 | GUI Parameter | Default | Internal Behavior |
 |---|---|---|
 | **Max Channel Shift (px)** | 15.0 | If the phase-correlation-computed inter-channel shift exceeds this value, alignment is not applied (prevents runaway misalignment). Raise to 20–30 on nights with strong atmospheric dispersion |
+| **Global Normalize** | On | Scales each window's composite so its mean luminance matches the cross-window average. Applied after compositing. Eliminates inter-window brightness flicker in the GIF output |
+| **Global Filter Normalize** | Off | Computes the planet-disk median for each (filter, window) pair, then applies a per-window multiplicative scale so every window's disk has the same median per filter. Applied before compositing. Pure scaling — no shift — preserves the dark background and prevents dynamic range clipping. Corrects cross-window atmospheric transparency drift |
+| **Brightness Scale** | 1.0 | Scalar multiplier applied to every composite image after all other processing: `output = composite × brightness_scale`. Range 0.1–2.0. 1.0 = no change |
 | **Composite Specs (R/G/B/L channels)** | RGB, IR-RGB, CH4-G-IR | Defines the filter-to-channel mapping for each composite image. Specifying an L channel activates LRGB compositing mode |
-
-### Step 08 GUI Parameters → Internal Behavior (Mono mode)
-
-| GUI Parameter | Default | Internal Behavior |
-|---|---|---|
-| **Global Filter Normalize** | On | Unifies the brightness range of each filter across the entire time series. Reduces color inconsistency between frames in Step 9 GIF |
-| **Brightness Scale** | 1.00 | `composite × series_scale`. 1.0=no change |
-| **Window (frames)** | 3 | Sliding window size. Odd numbers recommended. 3=1 frame on each side. SNR improvement ∝ √N |
-| **Cycle Seconds** | 225 | Used for grouping Step 07 PNGs into time-series frame sets. Independent from Step 3's cycle seconds |
-| **Min Quality Filter** | 0.05 | Soft reduction of low-quality frame contributions (weight reduction, not complete exclusion) |
-| **Mono Frames per Filter** | Off | On: saves per-filter grayscale frames → Step 9 also generates per-filter grayscale GIFs |
-| **L1–L6 (series)** | [200, 200, 200, 0, 0, 0] | Wavelet sharpening applied independently to each time-series frame. Completely separate from Step 5 settings |
-| **Composite Specs** | RGB, IR-RGB, CH4-G-IR | Time-series-specific channel mapping, independent from Step 6 |
 
 ### Internal Fixed Values
 
@@ -609,12 +597,12 @@ Removes color fringing caused by wavelength-dependent limb darkening differences
 
 ---
 
-## 8. Step 09 — Animated GIF
+## 8. Step 08 — Animated GIF
 
-**Source**: `pipeline/steps/step09_gif.py`
+**Source**: `pipeline/steps/gif.py`
 
 ```
-Step 08 time-series composite PNGs (sorted by timestamp)
+step06_rgb_composite/ PNGs (sorted by timestamp)
     │
     ▼
 Bilinear resampling by scale_factor
@@ -636,11 +624,11 @@ GIF output (loop=0, infinite repeat)
 
 ---
 
-## 9. Step 10 — Summary Grid
+## 9. Step 09 — Summary Grid
 
-**Source**: `pipeline/steps/step10_summary_grid.py`
+**Source**: `pipeline/steps/summary_grid.py`
 
-Step 10 always produces `summary_grid_simple.png` and, when in mono mode with Step 05 output present, additionally produces `summary_grid.png` (two-zone) and optionally per-window analytic PNGs in `analytic/`.
+Step 09 always produces `summary_grid_simple.png` and, when in mono mode with Step 05 output present, additionally produces `summary_grid.png` (two-zone) and optionally per-window analytic PNGs in `analytic/`.
 
 ### Output Files
 
@@ -746,6 +734,8 @@ canvas_h = (pad + header_h
 
 | GUI Parameter | Default | Internal Behavior |
 |---|---|---|
+| **N Best Windows** | 0 | Number of windows to include in the grid, selected by descending `quality_score`. 0 = include all enumerated windows. When > 0, a greedy non-overlapping selection algorithm picks the top-N windows: candidates are sorted by quality score and accepted in order, skipping any candidate whose time range overlaps an already-accepted window |
+| **Allow Window Overlap** | Off | When Off (default), the greedy selection described above enforces non-overlap — each accepted window's time range must not intersect any previously accepted window. When On, all top-N windows by score are accepted regardless of temporal overlap |
 | **Black Point** | 0.04 | `pixel = clip((p − 0.04) / (1 − 0.04), 0, 1)`. Pushes background noise to pure black. 0.02–0.08 recommended |
 | **Gamma** | 0.9 | `pixel = pixel ^ (1/0.9) ≈ pixel ^ 1.11`. <1.0=brighter (0.9 default slightly brightens the planet), >1.0=darker, 1.0=no change |
 | **Cell Size (px)** | 300 | Each composite and filter image in the grid is resampled to this size. Both zones use the same cell size in the two-zone grid |
@@ -757,7 +747,7 @@ canvas_h = (pad + header_h
 
 **Source**: `pipeline/modules/derotation.py`
 
-Used in common across multiple Steps (04, 05, 06, 08).
+Used in common across multiple Steps (04, 05, 06).
 
 ```
 Phase 1 — Center detection (Otsu binary method)

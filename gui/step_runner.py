@@ -53,28 +53,26 @@ class _LogCapture(io.TextIOBase):
 def _import_steps():
     """Lazy-import step modules (avoids startup cost)."""
     from pipeline.steps import (
-        step01_pipp,
-        step02_lucky_stack,
-        step03_quality_assess,
-        step04_derotate_stack,
-        step05_wavelet_master,
-        step06_rgb_composite,
-        step07_wavelet_preview,
-        step08_series_composite,
-        step09_gif,
-        step10_summary_grid,
+        ser_crop,
+        lucky_stack,
+        quality_assess,
+        derotate_stack,
+        wavelet_master,
+        rgb_composite,
+        wavelet_preview,
+        gif,
+        summary_grid,
     )
     return {
-        "01": step01_pipp,
-        "02": step02_lucky_stack,
-        "03": step03_quality_assess,
-        "04": step04_derotate_stack,
-        "05": step05_wavelet_master,
-        "06": step06_rgb_composite,
-        "07": step07_wavelet_preview,
-        "08": step08_series_composite,
-        "09": step09_gif,
-        "10": step10_summary_grid,
+        "01": ser_crop,
+        "02": lucky_stack,
+        "03": quality_assess,
+        "04": derotate_stack,
+        "05": wavelet_master,
+        "06": rgb_composite,
+        "07": wavelet_preview,
+        "08": gif,
+        "09": summary_grid,
     }
 
 
@@ -187,11 +185,9 @@ class StepRunner(QThread):
             elif step_id == "07":
                 r = mods["07"].run(cfg, progress_callback=pcb, cancel_event=ce)
             elif step_id == "08":
-                r = mods["08"].run(cfg, res.get("07", {}), progress_callback=pcb, cancel_event=ce)
+                r = mods["08"].run(cfg, res.get("06", {}), progress_callback=pcb, cancel_event=ce)
             elif step_id == "09":
-                r = mods["09"].run(cfg, res.get("08", {}), progress_callback=pcb, cancel_event=ce)
-            elif step_id == "10":
-                r = mods["10"].run(cfg, res.get("06", {}), res.get("04", {}), res.get("05", {}), cancel_event=ce)
+                r = mods["09"].run(cfg, res.get("06", {}), res.get("04", {}), res.get("05", {}), cancel_event=ce)
             else:
                 print(f"  [WARN] Step {step_id} has no runner implementation.")
                 r = {}

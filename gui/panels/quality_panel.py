@@ -6,7 +6,6 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import FolderStatusDot
 
 _SPINBOX_STYLE = (
     "QDoubleSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
@@ -30,13 +30,6 @@ _INT_SPINBOX_STYLE = (
     "QSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
     " border-radius: 3px; padding: 3px 6px; }"
     "QSpinBox:focus { border-color: #4da6ff; }"
-)
-_CHECK_STYLE = (
-    "QCheckBox { color: #d4d4d4; }"
-    "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #666;"
-    " border-radius: 2px; background: #3c3c3c; }"
-    "QCheckBox::indicator:checked { background: #4da6ff; border-color: #4da6ff; }"
-    "QCheckBox::indicator:unchecked { background: #2a2a2a; border-color: #555; }"
 )
 _READONLY_STYLE = (
     "QLineEdit { background: #2a2a2a; color: #888; border: 1px solid #3a3a3a;"
@@ -81,7 +74,7 @@ def _dir_row(parent: QWidget, line_edit: QLineEdit) -> QHBoxLayout:
     return row
 
 
-class Step03Panel(BasePanel):
+class QualityPanel(BasePanel):
     STEP_ID   = "03"
     TITLE_KEY = "step03.title"
     DESC_KEY  = "step03.desc"
@@ -112,7 +105,10 @@ class Step03Panel(BasePanel):
         self._input_lbl.editingFinished.connect(self.dirs_changed)
         lbl_in = QLabel(S("step03.input_dir"))
         lbl_in.setToolTip(S("step03.input_dir.tooltip"))
-        fl.addRow(lbl_in, _dir_row(self, self._input_lbl))
+        self._input_dot = FolderStatusDot()
+        in_row = _dir_row(self, self._input_lbl)
+        in_row.insertWidget(0, self._input_dot)
+        fl.addRow(lbl_in, in_row)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
@@ -143,26 +139,6 @@ class Step03Panel(BasePanel):
         self._lbl_cyc.setToolTip(S("step03.cycle_seconds.tooltip"))
         fl.addRow(self._lbl_cyc, self._cycle_seconds)
 
-        # n_windows
-        self._n_windows = QSpinBox()
-        self._n_windows.setStyleSheet(_INT_SPINBOX_STYLE)
-        self._n_windows.setRange(1, 20)
-        self._n_windows.setSingleStep(1)
-        self._n_windows.setValue(1)
-        self._n_windows.setToolTip(S("step03.n_windows.tooltip"))
-        lbl_nwin = QLabel(S("step03.n_windows"))
-        lbl_nwin.setToolTip(S("step03.n_windows.tooltip"))
-        fl.addRow(lbl_nwin, self._n_windows)
-
-        # Allow overlap checkbox
-        self._allow_overlap = QCheckBox()
-        self._allow_overlap.setStyleSheet(_CHECK_STYLE)
-        self._allow_overlap.setChecked(False)
-        self._allow_overlap.setToolTip(S("step03.allow_overlap.tooltip"))
-        lbl_overlap = QLabel(S("step03.allow_overlap"))
-        lbl_overlap.setToolTip(S("step03.allow_overlap.tooltip"))
-        fl.addRow(lbl_overlap, self._allow_overlap)
-
         # Min quality threshold
         self._min_quality = QDoubleSpinBox()
         self._min_quality.setStyleSheet(_SPINBOX_STYLE)
@@ -183,8 +159,6 @@ class Step03Panel(BasePanel):
             "input_dir":                self._input_lbl.text().strip(),
             "window_frames":            self._window_frames.value(),
             "cycle_seconds":            self._cycle_seconds.value(),
-            "n_windows":                self._n_windows.value(),
-            "allow_overlap":            self._allow_overlap.isChecked(),
             "min_quality_threshold_03": self._min_quality.value(),
         }
         out_text = self._output_lbl.text().strip()
@@ -205,13 +179,11 @@ class Step03Panel(BasePanel):
                 issues.append(ValidationIssue("error", S("validate.no_tif_files", d=input_dir)))
                 return issues
             window_frames = int(config.get("window_frames", 3))
-            n_windows     = int(config.get("n_windows", 1))
-            required = window_frames * n_windows
-            if required > n_tif:
+            if window_frames > n_tif:
                 issues.append(ValidationIssue(
                     "error",
                     S("validate.files_insufficient",
-                      wf=window_frames, nw=n_windows, req=required, n=n_tif),
+                      wf=window_frames, nw=1, req=window_frames, n=n_tif),
                 ))
         threshold = float(config.get("min_quality_threshold_03", 0.05))
         if threshold > 0.5:
@@ -228,6 +200,8 @@ class Step03Panel(BasePanel):
         self._input_lbl.setText(inp)
         self._input_lbl.blockSignals(False)
         self._update_input_style(inp)
+        if hasattr(self, "_input_dot"):
+            self._input_dot.check(inp, ["*.tif", "*.TIF"])
         if out:
             self._output_lbl.setText(str(Path(out) / "step03_quality"))
 
@@ -252,8 +226,6 @@ class Step03Panel(BasePanel):
             old_cs = int(data.get("cycle_seconds", 270))
             self._window_frames.setValue(max(1, round(old_ws / old_cs)))
         self._cycle_seconds.setValue(int(data.get("cycle_seconds", 225)))
-        self._n_windows.setValue(int(data.get("n_windows", 1)))
-        self._allow_overlap.setChecked(bool(data.get("allow_overlap", False)))
         # Support both old key (top_fraction) and new key
         mq = data.get("min_quality_threshold_03",
                       data.get("min_quality_threshold_04",
@@ -264,6 +236,8 @@ class Step03Panel(BasePanel):
 
     def _on_input_changed(self, text: str) -> None:
         self._update_input_style(text)
+        if hasattr(self, "_input_dot"):
+            self._input_dot.check(text.strip(), ["*.tif", "*.TIF"])
 
     def _update_input_style(self, text: str) -> None:
         if text.strip():

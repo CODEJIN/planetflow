@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import FolderStatusDot
 from gui.widgets.lucky_stack_preview import LuckyStackPreviewWidget
 
 _INPUT_STYLE = (
@@ -75,7 +76,7 @@ def _dir_row(parent: QWidget, line_edit: QLineEdit) -> QHBoxLayout:
     return row
 
 
-class Step02Panel(BasePanel):
+class LuckyStackPanel(BasePanel):
     """Lucky Stacking panel: selects best SER frames and stacks to TIF."""
 
     STEP_ID   = "02"
@@ -123,7 +124,10 @@ class Step02Panel(BasePanel):
         self._ser_dir.editingFinished.connect(self._on_ser_editing_finished)
         lbl_ser = QLabel(S("step02.ser_dir"))
         lbl_ser.setToolTip(S("step02.ser_dir.tooltip"))
-        fl.addRow(lbl_ser, _dir_row(self, self._ser_dir))
+        self._ser_dot = FolderStatusDot()
+        ser_row = _dir_row(self, self._ser_dir)
+        ser_row.insertWidget(0, self._ser_dot)
+        fl.addRow(lbl_ser, ser_row)
 
         # ── Step02 output directory ───────────────────────────────────────────
         self._output_step2 = QLineEdit()
@@ -308,6 +312,8 @@ class Step02Panel(BasePanel):
         self._ser_dir.setText(ser_value)
         self._ser_dir.blockSignals(False)
         self._update_ser_style(ser_value)
+        if hasattr(self, "_ser_dot"):
+            self._ser_dot.check(ser_value, ["*.ser", "*.SER"])
 
         # Step02 output dir.
         # Reset the flag on every load so upstream cascade changes always trigger
@@ -370,6 +376,8 @@ class Step02Panel(BasePanel):
 
     def _on_ser_dir_changed(self, text: str) -> None:
         self._update_ser_style(text)
+        if hasattr(self, "_ser_dot"):
+            self._ser_dot.check(text.strip(), ["*.ser", "*.SER"])
         if hasattr(self, "_preview"):
             self._preview.set_input_dir(text.strip() or None)
 

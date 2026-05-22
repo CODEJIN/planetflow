@@ -7,24 +7,23 @@
 1. [Overview](#1-overview)
 2. [Main Window Layout](#2-main-window-layout)
 3. [Global Settings](#3-global-settings)
-4. [Step 01 — PIPP Preprocessing](#4-step-01--pipp-preprocessing)
+4. [Step 01 — SER Crop](#4-step-01--ser-crop)
 5. [Step 02 — Lucky Stacking](#5-step-02--lucky-stacking)
 6. [Step 03 — Quality Assessment & Window Detection](#6-step-03--quality-assessment--window-detection)
 7. [Step 04 — De-rotation Stacking](#7-step-04--de-rotation-stacking)
 8. [Step 05 — Wavelet Master Sharpening](#8-step-05--wavelet-master-sharpening)
 9. [Step 06 — RGB Composite (Master)](#9-step-06--rgb-composite-master)
 10. [Step 07 — Wavelet Preview](#10-step-07--wavelet-preview)
-11. [Step 08 — Time-Series RGB Composite](#11-step-08--time-series-rgb-composite)
-12. [Step 09 — Animated GIF](#12-step-09--animated-gif)
-13. [Step 10 — Summary Grid](#13-step-10--summary-grid)
-14. [Run All](#14-run-all)
-15. [Output Folder Structure](#15-output-folder-structure)
+11. [Step 08 — Animated GIF](#11-step-08--animated-gif)
+12. [Step 09 — Summary Grid](#12-step-09--summary-grid)
+13. [Run All](#13-run-all)
+14. [Output Folder Structure](#14-output-folder-structure)
 
 ---
 
 ## 1. Overview
 
-This tool automates the planetary imaging post-processing pipeline. Starting from raw SER video capture, it guides you through PIPP preprocessing → Lucky Stacking → quality assessment → de-rotation stacking → wavelet sharpening → RGB compositing → time-series animation → summary grid generation, all from within the GUI.
+This tool automates the planetary imaging post-processing pipeline. Starting from raw SER video capture, it guides you through SER Crop → Lucky Stacking → quality assessment → de-rotation stacking → wavelet sharpening → RGB compositing → animation GIF → summary grid generation, all from within the GUI.
 
 ### 1.1 Camera Modes
 
@@ -35,7 +34,7 @@ This pipeline supports two camera modes.
 | **Mono** | Monochrome camera with a filter wheel. Separate SER file per filter. | Multiple filters: IR, R, G, B, CH4, etc. |
 | **Color** | Single color (Bayer) camera. Continuous capture without filter switching. | COLOR (single channel) |
 
-Selecting the camera mode in Global Settings automatically switches the UI and parameters in Steps 03, 06, and 08.
+Selecting the camera mode in Global Settings automatically switches the UI and parameters in Steps 03 and 06.
 
 ### 1.2 Complete Workflow
 
@@ -43,19 +42,15 @@ Selecting the camera mode in Global Settings automatically switches the UI and p
 Raw SER Videos (from Firecapture)
          │
          ▼
-[Step 01] PIPP Preprocessing     ← SER → Cropped SER (Optional)
+[Step 01] SER Crop               ← SER → Cropped SER (Optional)
          │
          ▼
 [Step 02] Lucky Stacking         ← SER → TIF stacking (Optional)
-         │    │
-         │    ├──→ [Step 07] Wavelet Preview       ← TIF → Sharpened PNG (Optional)
-         │    │
-         │    └──→ [Step 08] Time-Series Composite ← Step 02 TIF-based per-epoch compositing (Optional)
-         │              │
-         │              └──→ [Step 09] Animated GIF ← Rotation time-series animation (Optional)
+         │
+         │    ├──→ [Step 07] Wavelet Preview  ← TIF → Sharpened PNG (Optional)
          │
          ▼
-[Step 03] Quality Assessment     ← Optimal time window detection (Required)
+[Step 03] Quality Assessment     ← All sliding windows enumerated (Required)
          │
          ▼
 [Step 04] De-rotation Stacking   ← Rotation correction + stacking (Required)
@@ -66,7 +61,9 @@ Raw SER Videos (from Firecapture)
          ▼
 [Step 06] RGB Composite (Master) ← Filter channel compositing (Required)
          │
-         └──→ [Step 10] Summary Grid  (Optional)
+         ├──→ [Step 08] Animated GIF   ← Rotation animation from Step 06 output (Optional)
+         │
+         └──→ [Step 09] Summary Grid   (Optional)
 ```
 
 ---
@@ -84,8 +81,8 @@ The left side of the screen contains the step navigation list.
 |---------|-------------|
 | **⌂ Home** | Returns to the welcome screen, which shows active profile, CPU, RAM, and GPU information. |
 | **⚙ Settings** | Opens the global settings panel. Configure planet preset, camera mode, filter list, and profiles. |
-| **Step List** | Click Step 01–Step 10 to navigate to the corresponding panel. |
-| **Optional** | Steps marked as optional can be skipped. (Steps 01, 02, 07, 08, 09, 10) |
+| **Step List** | Click Step 01–Step 09 to navigate to the corresponding panel. |
+| **Optional** | Steps marked as optional can be skipped. (Steps 01, 02, 07, 08, 09) |
 
 ### 2.2 Right Main Area
 
@@ -102,7 +99,7 @@ Each step panel has the following buttons at the bottom:
 |--------|-------------|
 | **▶ Run** | Executes only the current step. |
 | **⏹ Stop** | Appears while a step is running. Sends a cancellation signal to all active threads. The button changes to **"Stopping..."** immediately and then to **"Stopped ✓"** (green border) once all threads have truly halted. Resets automatically after 2.5 seconds. |
-| **Next Step →** | After running, automatically navigates to the next step panel. Not available on Step 10. |
+| **Next Step →** | After running, automatically navigates to the next step panel. Not available on Step 09. |
 
 ---
 
@@ -157,22 +154,22 @@ Whenever you save the session, the active profile (if any) is also updated autom
 
 ---
 
-## 4. Step 01 — PIPP Preprocessing
+## 4. Step 01 — SER Crop
 
 ![Step 01 panel](images_en/step01.png)
 *Figure 4-1: Step 01 panel — Left: form, Right: SER frame preview*
 
-Uses PIPP (Planetary Imaging PreProcessor) to crop SER videos centered on the planet and extract the Region of Interest (ROI).
+Built-in SER Crop preprocessing: crops SER videos centered on the planet and extracts the Region of Interest (ROI).
 
-> **Optional Step**: This step can be skipped if your SER files are already cropped or if you've run PIPP separately.
+> **Optional Step**: This step can be skipped if your SER files are already cropped.
 
 ### 4.1 Parameters
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | **SER Video Folder** | (Required) | — | Path to the folder containing SER files. Automatically searches all subfolders for `.SER` files. Browse with the `...` button or type the path directly. |
-| **Output Folder** | Auto-set | — | Folder where PIPP-processed SER files will be saved. |
-| **ROI Size (px)** | 448 | 64–1024 (step 16) | Square crop size for PIPP output. Set this large enough to encompass the planetary disc. 448–512px is typical for Jupiter. |
+| **Output Folder** | Auto-set | — | Folder where SER Crop-processed SER files will be saved. |
+| **ROI Size (px)** | 448 | 64–1024 (step 16) | Square crop size for SER Crop output. Set this large enough to encompass the planetary disc. |
 | **Min Disc Diameter (px)** | 50 | 10–500 (step 5) | Minimum disc size to be considered a valid planet detection. Frames where the detected disc is smaller than this value are discarded as bad frames. |
 
 ### 4.2 Live Preview
@@ -244,7 +241,7 @@ Peak active threads = 4 × 8 = 32 = n_workers
 ![Step 03 panel](images_en/step03.png)
 *Figure 6-1: Step 03 panel — Quality assessment configuration*
 
-Automatically evaluates the image quality of each TIF frame and detects the optimal time window for stacking.
+Automatically evaluates the image quality of each TIF frame and enumerates all possible sliding windows chronologically for stacking.
 
 > **Required Step**: This step cannot be skipped.
 
@@ -255,12 +252,14 @@ Automatically evaluates the image quality of each TIF frame and detects the opti
 | **Input Folder** | Auto-set | — | Automatically set to the Step 02 Lucky Stacking TIF folder. |
 | **Output Folder** | Auto-set | — | Quality score CSVs and window recommendation JSON are saved here. |
 | **Window (frames)** | 3 | 1–20 | De-rotation window length expressed as **number of filter cycles**. 1 frame = one complete filter cycle (IR→R→G→B→CH4). Actual window time = frames × filter cycle time. Example: 3 frames × 225s = 675s (~11 min). **Jupiter: 2–4 frames / Mars, Saturn: 3–6 frames** |
-| **Filter cycle (sec)** | 225 | 10–600 (step 15) | Time in seconds for one complete filter cycle (IR→R→G→B→CH4→IR). Set this to match your actual capture cadence. Example: 45s × 5 filters = 225s. **This value is used only for Step 03 window length calculation.** Step 08 has its own independent cycle time setting. |
-| **Number of Windows** | 1 | 1–20 | Number of optimal windows to detect. **1**: Find only the single best window (for Step 04 stacking). **2–3**: Detect multiple windows at different epochs (for Step 08 time-series). |
-| **Allow Overlap** | Off | — | Checked: Detected windows may overlap in time. Unchecked: Each window is non-overlapping (default). |
-| **Min Quality Threshold** | 0.05 | 0.0–1.0 (step 0.05) | Frames below this quality score are excluded from window optimization. 0.0 = include all frames. 0.2–0.3 = remove clearly bad frames. **Setting too high may leave too few valid frames.** |
+| **Filter cycle (sec)** | 225 | 10–600 (step 15) | Time in seconds for one complete filter cycle (IR→R→G→B→CH4→IR). Set this to match your actual capture cadence. Example: 45s × 5 filters = 225s. |
+| **Min Quality Threshold** | 0.05 | 0.0–1.0 (step 0.05) | Frames below this quality score are excluded from window scoring. 0.0 = include all frames. 0.2–0.3 = remove clearly bad frames. **Setting too high may leave too few valid frames.** |
+
+> **Note**: Step 03 enumerates **all** sliding windows in chronological order. Window selection (how many to keep and whether to allow overlap) is configured in Step 09 (Summary Grid).
 
 > **Color camera mode**: The "Filter cycle (sec)" label changes to **"Single frame interval (sec)"** with a default of 45s. In this case, 1 frame = the time to capture one color frame.
+
+
 
 ### 6.2 Output Files
 
@@ -364,6 +363,9 @@ Multiple composite types (RGB, LRGB, false color) can be defined and produced in
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | **Max Channel Shift (px)** | 15.0 | 0.0–100.0 | Maximum allowed shift in channel-to-channel phase correlation alignment. If the computed shift exceeds this value, alignment is skipped (prevents runaway misalignment). Raise to 20–30 on nights with strong atmospheric dispersion. |
+| **Global Normalize** | On | — | When enabled, scales each window's composite so its mean luminance matches the cross-window average. Eliminates inter-window brightness flicker in the GIF output. |
+| **Filter Normalize** | Off | — | When enabled, equalizes per-filter brightness across all windows before compositing. Computes the planet-disk median for each (filter, window) pair and scales each window so all windows share the same disk median per filter. Corrects atmospheric transparency differences without blowing out the dynamic range. |
+| **Brightness Scale** | 1.0 | 0.1–2.0 (step 0.05) | Multiplier applied to the composite output brightness. 1.0 = unchanged. Values below 1.0 darken; values above 1.0 brighten. |
 
 #### 9.A.2 Composite Specification Table
 
@@ -445,92 +447,30 @@ Applies wavelet sharpening to TIF files output by Step 02 Lucky Stacking and con
 
 ---
 
-## 11. Step 08 — Time-Series RGB Composite
+## 11. Step 08 — Animated GIF
 
-Uses **Step 02 Lucky Stacking TIF files** to create time-series RGB composite images at different epochs. Applies sliding-window stacking and its own wavelet sharpening independently from Step 07. Used for planetary rotation time-series analysis and GIF animation.
+![Step 08 panel](images_en/step08.png)
+*Figure 11-1: Step 08 panel — GIF animation configuration*
 
-> **Optional Step**: Skip if time-series compositing is not needed.
+Combines the RGB composite images from Step 06 into a planetary rotation animation GIF.
 
-> **Important**: Step 08 uses its **own independent composite specs** — it does not re-use Step 06 settings. It reads Step 02 TIF files directly and applies its own wavelet sharpening, independent of Step 07.
+> **Optional Step**: Only run when you want to produce a rotation animation.
 
-The parameters shown differ depending on camera mode.
-
----
-
-### 11.A Mono Camera Mode
-![Step 08 mono panel](images_en/step08_mono.png)
-*Figure 11-1: Step 08 mono panel — Time-series composite settings*
-
-#### 11.A.1 Parameters
+### 11.1 Parameters
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| **Global filter normalize** | On | — | Unifies the brightness range of each filter across all frames. Greatly reduces colour inconsistency between frames in Step 09 GIFs. **Recommended when using Step 09.** |
-| **Brightness scale** | 1.00 | 0.1–1.0 (step 0.05) | Multiplier applied to composite brightness. 1.0 = unchanged, 0.80 = 80% brightness. |
-| **Window (frames)** | 3 | 1–9 (odd recommended) | Sliding-window stacking frame count. 1 = single frame, 3 = ±1 frame (SNR ×√3), 5 = ±2 frames (SNR ×√5). |
-| **Filter cycle (seconds)** | 225 | 10–600 (step 15) | Time for one complete filter cycle (IR→R→G→B→CH4→IR). Used to group Step 07 PNGs into per-epoch time-series sets. **Set independently from Step 03's filter cycle time.** |
-| **Min quality filter** | 0.05 | 0.0–0.9 (step 0.05) | Quality filter for frames (0.0 = no filter). Low-quality frames receive reduced weighting (soft down-weighting, not hard exclusion). |
-| **Save mono filter GIFs** | Off | — | When checked: saves each filter's monochrome frames alongside the color composites. Step 09 will also generate per-filter monochrome GIFs. |
-| **Satellite Composite** | Off | — | Composites Europa and its shadow into each time-series frame. Requires Window ≥ 3 and Skyfield BSP files (same status indicator as Step 04 §7.4). |
-
-#### 11.A.2 Wavelet Sharpening (Series)
-
-Independent wavelet sharpening settings applied to each time-series frame. Separate from Step 05.
-
-| Level | Default | Description |
-|-------|---------|-------------|
-| L1–L6 | [200, 200, 200, 0, 0, 0] | Same structure as Step 05. Applied only to time-series frames. |
-
-#### 11.A.3 Series Composite Specs (Independent from Step 06)
-
-Defines composite channels specifically for the time-series, **independently of Step 06's composite specs**. The table structure is identical to Step 06 (Name, R/G/B/L channels, delete button).
-
-Default specs: RGB, IR-RGB, CH4-G-IR (same as Step 06 defaults)
-
----
-
-### 11.B Color Camera Mode
-![Step 08 color panel](images_en/step08_color.png)
-*Figure 11-2: Step 08 color panel — Time-series composite settings*
-
-In color camera mode, continuous COLOR channel frames are stacked using a sliding window.
-
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| **Brightness scale** | 1.00 | 0.1–1.0 (step 0.05) | Same as mono mode. |
-| **Capture interval (sec)** | 30 | 5–300 (step 5) | Continuous color capture interval in seconds. Unlike the mono "filter cycle", this is the time between individual color frames. |
-| **Window (frames)** | 5 | 1–99 (odd recommended) | Sliding-window stacking frame count. Color cameras capture faster, so larger values are practical. |
-| **Min quality filter** | 0.05 | 0.0–0.9 (step 0.05) | Same as mono mode. |
-| **Wavelet sharpening** | [200, 200, 200, 0, 0, 0] | — | Wavelet sharpening applied after stacking. |
-
-Processing order: sliding-window stacking → wavelet sharpening → auto WB + CA correction
-
----
-
-## 12. Step 09 — Animated GIF
-
-![Step 09 panel](images_en/step09.png)
-*Figure 12-1: Step 09 panel — GIF animation configuration*
-
-Combines the time-series composite results from Step 08 into a planetary rotation animation GIF.
-
-> **Optional Step**: Only available when Step 08 has been run.
-
-### 12.1 Parameters
-
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| **Input Folder** | Auto-set | — | Automatically set to the Step 08 time-series PNG folder. |
+| **Input Folder** | Auto-set | — | Automatically set to the `step06_rgb_composite/` folder. |
 | **Output Folder** | Auto-set | — | GIF file is saved here. |
 | **FPS** | 6.0 | 1.0–30.0 (step 0.5) | GIF playback speed in frames per second. 6–10 FPS is typical for planetary rotation animations. |
 | **Resize Factor** | 1.0 | 0.1–2.0 (step 0.1) | Output GIF size multiplier. 1.0 = original size, 0.5 = half size (reduces file size). |
 
 ---
 
-## 13. Step 10 — Summary Grid
+## 12. Step 09 — Summary Grid
 
-![Step 10 panel](images_en/step10.png)
-*Figure 13-1: Step 10 panel — Summary grid with levels adjustment (Left: controls, Right: live preview)*
+![Step 09 panel](images_en/step09.png)
+*Figure 12-1: Step 09 panel — Summary grid with levels adjustment (Left: controls, Right: live preview)*
 
 Applies levels correction to Step 06 RGB composite results and produces summary grid images. Used for generating final images for observation reports or forum posts.
 
@@ -543,25 +483,27 @@ Two output files are produced:
 
 > **Optional Step**: Use only when needed.
 
-### 13.1 Parameters
+### 12.1 Parameters
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | **Input Folder (Step 06)** | Auto-set | — | Automatically set to the Step 06 RGB composite result folder. |
 | **Input Folder (Step 05)** | Auto-set | — | Step 05 wavelet master folder. Used to populate the filter image zone in the two-zone grid (`summary_grid.png`). Only shown in mono mode. |
 | **Output Folder** | Auto-set | — | Summary grid PNGs are saved here. |
+| **N Best Windows** | 0 | 0–20 | Number of top-quality windows to include in the grid. **0 = All**: every window detected by Step 03 is included. **N > 0**: only the top N windows ranked by quality score are selected. |
+| **Allow Window Overlap** | Off | — | When N Best Windows > 0, controls whether selected windows may overlap in time. **Off** (default): greedy non-overlapping selection — each selected window is temporally distinct. **On**: top-N windows by score regardless of overlap. |
 | **Black Point** | 0.04 | 0.0–0.5 (step 0.01) | Pixels at or below this value are remapped to pure black (0). Suppresses background sky noise and gives the planet a clean dark border. Recommended range: **0.02–0.08**. |
 | **Gamma** | 0.9 | 0.1–3.0 (step 0.05) | Brightness gamma correction. **1.0** = no correction / **< 1.0** = brighter (typically 0.8–1.0 recommended) / **> 1.0** = darker. |
 | **Cell Size (px)** | 300 | 100–1024 (step 50) | Size in pixels of each composite image cell within the summary grid. |
 | **Save Analytic View** | Off | — | When checked, generates one `window_XX_analytic.png` per time window in the `analytic/` subdirectory. Only available in mono mode. |
 
-### 13.2 Live Preview
+### 12.2 Live Preview
 
 ![analytic_view](./images/analytic_view_sample.png)
 
 The right panel shows before/after levels adjustment previews. The preview automatically refreshes 400ms after changing any parameter.
 
-### 13.3 Analytic View Metric Reference
+### 12.3 Analytic View Metric Reference
 
 The Analytic View (`window_XX_analytic.png`) generates one image per time window. Below each image, two metric blocks are displayed.
 
@@ -598,14 +540,14 @@ For each composite (RGB, IR-RGB, etc.), shows how much each filter image was shi
 
 ---
 
-## 14. Run All
+## 13. Run All
 
 ![Run All](images_en/run_all.png)
-*Figure 14-1: Pipeline running state*
+*Figure 13-1: Pipeline running state*
 
 Clicking the Run All button in the left sidebar automatically executes all enabled steps in sequence.
 
-### 14.1 Start Point
+### 13.1 Start Point
 
 The button label changes dynamically based on whether Steps 01 and 02 are enabled.
 
@@ -617,20 +559,18 @@ The button label changes dynamically based on whether Steps 01 and 02 are enable
 
 > **Note**: Enabling Step 01 automatically enables and locks Step 02's checkbox.
 
-### 14.2 Execution Flow
+### 13.2 Execution Flow
 
 1. **Input validation**: Checks that input files exist in the starting step's folder. Aborts with a warning if none are found.
 2. **Confirmation dialog**: Displays the list of steps to run, the number of input files, and the output path for each step. Click "Run" to proceed.
 3. **Step-by-step execution**: Only enabled steps are executed; disabled optional steps are skipped.
 4. **Error handling**: If an error occurs during execution, the pipeline halts at that step and an error message is printed to the log.
 
-> **Step 09 dependency**: Enabling Step 09 (Animated GIF) automatically enables Step 08 (Time-Series Composite).
-
-> **Auto-skip for de-rotation steps**: If the number of input TIF files is too small to form even one de-rotation window, Steps 03–06 and 08–10 are automatically skipped and only Step 07 (Wavelet Preview) runs. A warning banner in the confirmation dialog explains how many files were found and how many are required.
+> **Auto-skip for de-rotation steps**: If the number of input TIF files is too small to form even one de-rotation window, Steps 03–06 and 08–09 are automatically skipped and only Step 07 (Wavelet Preview) runs. A warning banner in the confirmation dialog explains how many files were found and how many are required.
 
 ---
 
-## 15. Output Folder Structure
+## 14. Output Folder Structure
 
 After pipeline execution, the following folders are created under the output base folder (e.g., `260402_output/`):
 
@@ -659,12 +599,9 @@ After pipeline execution, the following folders are created under the output bas
 ├── step07_wavelet_preview/     # Step 07: Wavelet-processed preview PNGs
 │   ├── 2026-03-20-1046_1-U-IR-Jup_..._wavelet.png
 │   └── ...
-├── step08_series/              # Step 08: Time-series composite PNGs
-│   ├── 2026-03-20T10:46_RGB.png
-│   └── ...
-├── step09_gif/                 # Step 09: Animated GIF
+├── step08_gif/                 # Step 08: Animated GIF
 │   └── RGB_animation.gif
-└── step10_summary_grid/        # Step 10: Summary grid PNGs
+└── step09_summary_grid/        # Step 09: Summary grid PNGs
     ├── summary_grid_simple.png   # Composites only (always generated)
     ├── summary_grid.png          # Composites + filters (mono camera, when Step 05 data exists)
     └── analytic/

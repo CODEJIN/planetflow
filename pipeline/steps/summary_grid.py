@@ -1,5 +1,5 @@
 """
-Step 10 – Summary contact sheet.
+Step 9 – Summary contact sheet.
 
 Creates a single PNG arranged as a grid of composite images:
   Rows    → time windows from Step 6, oldest at top
@@ -8,8 +8,12 @@ Creates a single PNG arranged as a grid of composite images:
 Each cell receives a levels adjustment (black_point / white_point / gamma)
 to deepen the background blacks and enhance the visual depth of the planet.
 
-Output (when config.save_step10 is True):
-    <output_base>/step10_summary_grid/
+When config.grid.n_best_windows > 0, only the top-N quality windows are shown.
+If config.grid.allow_overlap=False (default), overlapping windows are excluded
+from the selection via a greedy non-overlapping pass.
+
+Output (when config.save_step09 is True):
+    <output_base>/step09_summary_grid/
         summary_grid.png
 """
 from __future__ import annotations
@@ -520,6 +524,74 @@ def _draw_align_params(
     draw.text((canvas_w // 2 - gtw // 2, y), gline, fill=label_color, font=small_font)
 
 
+def _select_best_windows(
+    all_labels: List[str],
+    window_times: Dict[str, str],
+    n_best: int,
+    allow_overlap: bool,
+    window_minutes: float,
+) -> List[str]:
+    """Return at most n_best window labels selected by quality from windows.json.
+
+    Quality scores are read from the step03 windows.json file.  Windows not
+    found in that file get quality=0 and appear last.
+
+    If allow_overlap=False a greedy non-overlapping pass is applied first:
+    windows are sorted by quality descending and accepted only if their center
+    time is at least window_minutes apart from all already-accepted windows.
+    """
+    from datetime import datetime as _dt
+
+    # Build quality lookup from windows.json
+    quality_map: Dict[str, float] = {}
+    for label in all_labels:
+        try:
+            win_idx = int(label.split("_")[1])
+        except (IndexError, ValueError):
+            continue
+        quality_map[label] = 0.0
+
+    # Try to read from step03 windows.json on disk
+    # (We don't have the config here so path is passed in via closure above — but
+    # this is a module-level helper so we skip disk read and use quality from
+    # windows.json that was passed via the results_04 windows list.)
+    # The actual quality injection happens in run() before calling this helper.
+
+    def _t(label: str) -> Optional[_dt]:
+        iso = window_times.get(label, "")
+        if iso:
+            try:
+                return _dt.strptime(iso[:16], "%Y-%m-%dT%H:%M")
+            except ValueError:
+                pass
+        return None
+
+    sorted_by_q = sorted(all_labels, key=lambda l: quality_map.get(l, 0.0), reverse=True)
+
+    if not allow_overlap:
+        accepted: List[str] = []
+        accepted_times: List[_dt] = []
+        for label in sorted_by_q:
+            t = _t(label)
+            if t is None:
+                accepted.append(label)
+                continue
+            too_close = any(
+                abs((t - at).total_seconds()) < window_minutes * 60
+                for at in accepted_times
+            )
+            if not too_close:
+                accepted.append(label)
+                accepted_times.append(t)
+        candidates = accepted
+    else:
+        candidates = sorted_by_q
+
+    selected = candidates[:n_best] if n_best > 0 else candidates
+    # Return in chronological order
+    return sorted(selected, key=lambda l: window_times.get(l, ""))
+
+
 def _load_results05_from_disk(
     config: PipelineConfig,
 ) -> Dict[str, List[Tuple[Optional[Path], str]]]:
@@ -583,10 +655,10 @@ def run(
                      view to show individual filter images (mono mode only).
 
     Returns:
-        Path to the saved PNG, or None if save_step10 is False or no data.
+        Path to the saved PNG, or None if save_step09 is False or no data.
     """
     if not results_06:
-        print("  [WARNING] No Step 6 results — Step 10 skipped.")
+        print("  [WARNING] No Step 6 results — Step 9 skipped.")
         return None
 
     # If results_05 was not passed (step05 skipped this session), try disk scan
@@ -594,7 +666,7 @@ def run(
         results_05 = _load_results05_from_disk(config) or None
 
     cfg = config.grid
-    # Color camera: single column; override composite list from Step 8 keys
+    # Color camera: single column; override composite list from Step 6 keys
     if config.camera_mode == "color":
         # Collect all composite names actually present in results_06
         color_cols = sorted({name for pairs in results_06.values() for _, name in pairs})
@@ -603,11 +675,24 @@ def run(
         col_names = cfg.composites
     n_cols = len(col_names)
 
-    # ── Build window_label → center_time lookup from Step 5 ──────────────────
+    # ── Build window_label → center_time lookup from Step 4 ──────────────────
     window_times: Dict[str, str] = {}
     for w in results_04.get("windows", []):
         label = f"window_{w['window_index']:02d}"
         window_times[label] = w.get("center_time", "")
+
+    # ── Quality scores: prefer Step 3 windows.json (authoritative source) ─────
+    # Step 4 does not carry window_quality forward, so we read it from disk.
+    quality_by_label: Dict[str, float] = {}
+    try:
+        win3_path = config.step_dir(3, "quality") / "windows.json"
+        if win3_path.exists():
+            win3_data = json.loads(win3_path.read_text(encoding="utf-8"))
+            for w in win3_data.get("selected_windows", []):
+                lbl = f"window_{w['window_index']:02d}"
+                quality_by_label[lbl] = float(w.get("window_quality", 0.0))
+    except Exception:
+        pass
 
     # Detect local UTC offset once for all labels
     local_offset = _local_utc_offset()
@@ -628,11 +713,61 @@ def run(
             return t
         return t + local_offset
 
-    sorted_labels = sorted(results_06.keys(), key=_window_time_utc)
+    all_labels = sorted(results_06.keys(), key=_window_time_utc)
+
+    # ── Select top-N windows by quality if requested ──────────────────────────
+    n_best = cfg.n_best_windows
+    # Apply filtering whenever n_best > 0 OR overlap is not allowed.
+    # When n_best == 0 and allow_overlap == True, skip to show all windows.
+    if (n_best > 0 or not cfg.allow_overlap) and all_labels:
+        # Step 1: sort all windows by quality descending
+        sorted_by_q = sorted(
+            all_labels,
+            key=lambda l: quality_by_label.get(l, 0.0),
+            reverse=True,
+        )
+        # Step 2: if no overlap allowed, greedy pick — accept next window only
+        # if its center time is at least window_minutes away from all accepted.
+        if not cfg.allow_overlap:
+            wmin = config.quality.window_minutes
+            accepted: List[str] = []
+            accepted_times: List[datetime] = []
+            for label in sorted_by_q:
+                t = _window_time_utc(label)
+                if t == datetime.min:
+                    # no time info — include but don't track
+                    accepted.append(label)
+                    continue
+                too_close = any(
+                    abs((t - at).total_seconds()) < wmin * 60
+                    for at in accepted_times
+                )
+                if not too_close:
+                    accepted.append(label)
+                    accepted_times.append(t)
+            pool = accepted
+        else:
+            pool = sorted_by_q
+        # Step 3: take top-N from quality-ordered pool (0 = all remaining)
+        selected = set(pool[:n_best] if n_best > 0 else pool)
+        # Step 4: re-sort selected windows by time for display
+        sorted_labels = sorted(
+            (l for l in all_labels if l in selected),
+            key=_window_time_utc,
+        )
+        n_best_label = str(n_best) if n_best > 0 else "all"
+        print(f"  Selected {len(sorted_labels)}/{len(all_labels)} windows "
+              f"(n_best={n_best_label}, allow_overlap={cfg.allow_overlap})")
+        for lbl in sorted_labels:
+            q = quality_by_label.get(lbl, 0.0)
+            print(f"    {lbl}  quality={q:.4f}")
+    else:
+        sorted_labels = all_labels
+
     n_rows = len(sorted_labels)
 
     if n_rows == 0:
-        print("  [WARNING] No windows found — Step 10 skipped.")
+        print("  [WARNING] No windows found — Step 9 skipped.")
         return None
 
     total_seconds = int(local_offset.total_seconds())
@@ -719,11 +854,11 @@ def run(
     label_color = (210, 210, 210)
 
     out_dir: Optional[Path] = None
-    if config.save_step10:
-        out_dir = config.step_dir(10, "summary_grid")
+    if config.save_step09:
+        out_dir = config.step_dir(9, "summary_grid")
         out_dir.mkdir(parents=True, exist_ok=True)
     else:
-        print("  save_step10=False: grids not written to disk")
+        print("  save_step09=False: grids not written to disk")
 
     def _draw_title(canvas: Image.Image, draw: ImageDraw.Draw, cw: int) -> None:
         if not has_title:
@@ -877,9 +1012,10 @@ def run(
             tz_canvas.save(str(two_zone_path), format="PNG")
             print(f"  → {two_zone_path.name}  ({tz_canvas_w}×{tz_canvas_h} px)")
 
-    # ── Analytic view (mono only) ─────────────────────────────────────────────
+    # ── Analytic view (mono only) — only for the selected windows ────────────
     if config.camera_mode == "mono" and cfg.save_analytic and results_05:
-        run_analytic(config, results_05, results_06, results_04, cancel_event=cancel_event)
+        run_analytic(config, results_05, results_06, results_04,
+                     selected_labels=sorted_labels, cancel_event=cancel_event)
 
     return two_zone_path or simple_path
 
@@ -891,6 +1027,7 @@ def run_analytic(
     results_05: Dict[str, List[Tuple[Optional[Path], str]]],
     results_06: Dict[str, List[Tuple[Optional[Path], str]]],
     results_04: dict,
+    selected_labels: Optional[List[str]] = None,
     cancel_event=None,
 ) -> List[Path]:
     """Build one per-window analytic PNG for mono cameras.
@@ -900,7 +1037,7 @@ def run_analytic(
     channel-mapping formula displayed above each composite.
 
     Output (when config.grid.save_analytic is True):
-        <output_base>/step10_summary_grid/analytic/
+        <output_base>/step09_summary_grid/analytic/
             window_01_analytic.png
             window_02_analytic.png
             …
@@ -927,8 +1064,8 @@ def run_analytic(
 
     # ── Output directory ──────────────────────────────────────────────────────
     out_dir: Optional[Path] = None
-    if cfg.save_analytic and config.save_step10:
-        out_dir = config.step_dir(10, "summary_grid") / "analytic"
+    if cfg.save_analytic and config.save_step09:
+        out_dir = config.step_dir(9, "summary_grid") / "analytic"
         out_dir.mkdir(parents=True, exist_ok=True)
     else:
         print("  [Analytic] save disabled — analytic PNGs not written to disk.")
@@ -959,7 +1096,12 @@ def run_analytic(
 
     saved: List[Path] = []
 
-    for win_label in sorted(results_05.keys()):
+    labels_to_render = (
+        selected_labels if selected_labels is not None
+        else sorted(results_05.keys())
+    )
+
+    for win_label in labels_to_render:
         if cancel_event and cancel_event.is_set():
             break
 

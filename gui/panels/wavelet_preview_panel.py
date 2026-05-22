@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import FolderStatusDot
 from gui.widgets.wavelet_preview import WaveletPreviewWidget
 
 _SPINBOX_STYLE = (
@@ -214,7 +215,10 @@ class _Step07MonoWidget(QWidget):
         self._input_lbl.textChanged.connect(self._on_input_changed)
         lbl_in = QLabel(S("step07.input_dir"))
         lbl_in.setToolTip(S("step07.input_dir.tooltip"))
-        fl.addRow(lbl_in, _make_dir_row(self._input_lbl, self._browse_input))
+        self._input_dot = FolderStatusDot()
+        in_row = _make_dir_row(self._input_lbl, self._browse_input)
+        in_row.insertWidget(0, self._input_dot)
+        fl.addRow(lbl_in, in_row)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
@@ -259,6 +263,8 @@ class _Step07MonoWidget(QWidget):
         self._input_lbl.setText(inp)
         self._input_lbl.blockSignals(False)
         self._update_input_style(inp)
+        if hasattr(self, "_input_dot"):
+            self._input_dot.check(inp, ["*.tif", "*.TIF"])
 
         if inp:
             self._preview.set_input_dir(inp)
@@ -330,6 +336,8 @@ class _Step07MonoWidget(QWidget):
 
     def _on_input_changed(self, text: str) -> None:
         self._update_input_style(text)
+        if hasattr(self, "_input_dot"):
+            self._input_dot.check(text.strip(), ["*.tif", "*.TIF"])
         self._preview.set_input_dir(text.strip())
         inp = text.strip()
         if inp:
@@ -388,7 +396,10 @@ class _Step07ColorWidget(QWidget):
         self._input_lbl.textChanged.connect(self._on_input_changed)
         lbl_in = QLabel(S("step07.input_dir"))
         lbl_in.setToolTip(S("step07.input_dir.tooltip"))
-        fl.addRow(lbl_in, _make_dir_row(self._input_lbl, self._browse_input))
+        self._input_dot = FolderStatusDot()
+        in_row = _make_dir_row(self._input_lbl, self._browse_input)
+        in_row.insertWidget(0, self._input_dot)
+        fl.addRow(lbl_in, in_row)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
@@ -454,6 +465,8 @@ class _Step07ColorWidget(QWidget):
         self._input_lbl.setText(inp)
         self._input_lbl.blockSignals(False)
         self._update_input_style(inp)
+        if hasattr(self, "_input_dot"):
+            self._input_dot.check(inp, ["*.tif", "*.TIF"])
 
         if inp:
             self._preview.set_input_dir(inp)
@@ -528,6 +541,8 @@ class _Step07ColorWidget(QWidget):
 
     def _on_input_changed(self, text: str) -> None:
         self._update_input_style(text)
+        if hasattr(self, "_input_dot"):
+            self._input_dot.check(text.strip(), ["*.tif", "*.TIF"])
         self._preview.set_input_dir(text.strip())
         inp = text.strip()
         if inp:
@@ -558,7 +573,7 @@ class _Step07ColorWidget(QWidget):
 
 # ── Wrapper panel ──────────────────────────────────────────────────────────────
 
-class Step07Panel(BasePanel):
+class WaveletPreviewPanel(BasePanel):
     STEP_ID   = "07"
     TITLE_KEY = "step07.title"
     DESC_KEY  = "step07.desc"

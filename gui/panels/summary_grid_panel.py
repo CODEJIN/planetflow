@@ -1,4 +1,4 @@
-"""Step 10 — Summary grid panel."""
+"""Step 9 — Summary grid panel."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import StepStatusWidget
 from gui.widgets.levels_preview import LevelsPreviewWidget
 
 _SPINBOX_STYLE = (
@@ -37,10 +38,10 @@ _READONLY_STYLE = (
 )
 
 
-class Step10Panel(BasePanel):
-    STEP_ID   = "10"
-    TITLE_KEY = "step10.title"
-    DESC_KEY  = "step10.desc"
+class SummaryGridPanel(BasePanel):
+    STEP_ID   = "09"
+    TITLE_KEY = "step09.title"
+    DESC_KEY  = "step09.desc"
     OPTIONAL  = True
     HAS_NEXT  = False
 
@@ -71,27 +72,36 @@ class Step10Panel(BasePanel):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        # Folder display (auto-derived, read-only)
-        self._input05_lbl = QLineEdit()
-        self._input05_lbl.setReadOnly(True)
-        self._input05_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_in05 = QLabel(S("step10.input05_dir"))
-        lbl_in05.setToolTip(S("step10.input05_dir.tooltip"))
-        fl.addRow(lbl_in05, self._input05_lbl)
+        # Step status dots
+        self._step_status = StepStatusWidget(steps=[3, 4, 5, 6])
+        lbl_req = QLabel(S("common.requires"))
+        lbl_req.setStyleSheet("color: #888;")
+        fl.addRow(lbl_req, self._step_status)
 
-        self._input_lbl = QLineEdit()
-        self._input_lbl.setReadOnly(True)
-        self._input_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_in = QLabel(S("step10.input_dir"))
-        lbl_in.setToolTip(S("step10.input_dir.tooltip"))
-        fl.addRow(lbl_in, self._input_lbl)
-
+        # Output folder (auto-derived, read-only)
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
         self._output_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_out = QLabel(S("step10.output_dir"))
-        lbl_out.setToolTip(S("step10.output_dir.tooltip"))
+        lbl_out = QLabel(S("step09.output_dir"))
+        lbl_out.setToolTip(S("step09.output_dir.tooltip"))
         fl.addRow(lbl_out, self._output_lbl)
+
+        self._n_best_windows = QSpinBox()
+        self._n_best_windows.setStyleSheet(_INT_SPINBOX_STYLE)
+        self._n_best_windows.setRange(0, 20)
+        self._n_best_windows.setSingleStep(1)
+        self._n_best_windows.setValue(0)
+        self._n_best_windows.setSpecialValueText(S("step09.n_best_windows.all"))
+        self._n_best_windows.setToolTip(S("step09.n_best_windows.tooltip"))
+        lbl_nbest = QLabel(S("step09.n_best_windows"))
+        lbl_nbest.setToolTip(S("step09.n_best_windows.tooltip"))
+        fl.addRow(lbl_nbest, self._n_best_windows)
+
+        self._allow_overlap = QCheckBox(S("step09.allow_overlap"))
+        self._allow_overlap.setChecked(False)
+        self._allow_overlap.setToolTip(S("step09.allow_overlap.tooltip"))
+        self._allow_overlap.setStyleSheet("QCheckBox { color: #d4d4d4; }")
+        fl.addRow("", self._allow_overlap)
 
         self._black_point = QDoubleSpinBox()
         self._black_point.setStyleSheet(_SPINBOX_STYLE)
@@ -99,9 +109,9 @@ class Step10Panel(BasePanel):
         self._black_point.setDecimals(2)
         self._black_point.setSingleStep(0.01)
         self._black_point.setValue(0.04)
-        self._black_point.setToolTip(S("step10.black_point.tooltip"))
-        lbl_bp = QLabel(S("step10.black_point"))
-        lbl_bp.setToolTip(S("step10.black_point.tooltip"))
+        self._black_point.setToolTip(S("step09.black_point.tooltip"))
+        lbl_bp = QLabel(S("step09.black_point"))
+        lbl_bp.setToolTip(S("step09.black_point.tooltip"))
         fl.addRow(lbl_bp, self._black_point)
 
         self._gamma = QDoubleSpinBox()
@@ -110,9 +120,9 @@ class Step10Panel(BasePanel):
         self._gamma.setDecimals(2)
         self._gamma.setSingleStep(0.05)
         self._gamma.setValue(0.9)
-        self._gamma.setToolTip(S("step10.gamma.tooltip"))
-        lbl_gamma = QLabel(S("step10.gamma"))
-        lbl_gamma.setToolTip(S("step10.gamma.tooltip"))
+        self._gamma.setToolTip(S("step09.gamma.tooltip"))
+        lbl_gamma = QLabel(S("step09.gamma"))
+        lbl_gamma.setToolTip(S("step09.gamma.tooltip"))
         fl.addRow(lbl_gamma, self._gamma)
 
         self._cell_size = QSpinBox()
@@ -120,14 +130,14 @@ class Step10Panel(BasePanel):
         self._cell_size.setRange(100, 1024)
         self._cell_size.setSingleStep(50)
         self._cell_size.setValue(300)
-        self._cell_size.setToolTip(S("step10.cell_size.tooltip"))
-        lbl_cell = QLabel(S("step10.cell_size"))
-        lbl_cell.setToolTip(S("step10.cell_size.tooltip"))
+        self._cell_size.setToolTip(S("step09.cell_size.tooltip"))
+        lbl_cell = QLabel(S("step09.cell_size"))
+        lbl_cell.setToolTip(S("step09.cell_size.tooltip"))
         fl.addRow(lbl_cell, self._cell_size)
 
-        self._save_analytic = QCheckBox(S("step10.save_analytic"))
+        self._save_analytic = QCheckBox(S("step09.save_analytic"))
         self._save_analytic.setChecked(True)
-        self._save_analytic.setToolTip(S("step10.save_analytic.tooltip"))
+        self._save_analytic.setToolTip(S("step09.save_analytic.tooltip"))
         self._save_analytic.setStyleSheet("QCheckBox { color: #d4d4d4; }")
         fl.addRow("", self._save_analytic)
 
@@ -151,6 +161,8 @@ class Step10Panel(BasePanel):
 
     def get_config_updates(self) -> dict[str, Any]:
         return {
+            "n_best_windows": self._n_best_windows.value(),
+            "allow_overlap":  self._allow_overlap.isChecked(),
             "black_point":    self._black_point.value(),
             "gamma":          self._gamma.value(),
             "cell_size_px":   self._cell_size.value(),
@@ -161,11 +173,12 @@ class Step10Panel(BasePanel):
         out = data.get("output_dir", "")
         if out:
             p = Path(out)
-            self._input05_lbl.setText(str(p / "step05_wavelet_master"))
-            self._input_lbl.setText(str(p / "step06_rgb_composite"))
-            self._output_lbl.setText(str(p / "step10_summary_grid"))
+            self._output_lbl.setText(str(p / "step09_summary_grid"))
+            self._step_status.refresh(p)
             if hasattr(self, "_preview"):
                 self._preview.set_input_dir(p / "step06_rgb_composite")
+        self._n_best_windows.setValue(int(data.get("n_best_windows", 0)))
+        self._allow_overlap.setChecked(bool(data.get("allow_overlap", False)))
         self._black_point.setValue(float(data.get("black_point", 0.04)))
         self._gamma.setValue(float(data.get("gamma", 0.9)))
         self._cell_size.setValue(int(data.get("cell_size_px", 300)))
@@ -194,19 +207,15 @@ class Step10Panel(BasePanel):
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
             return []
-        step_dir = self._output_dir / "step10_summary_grid"
+        step_dir = self._output_dir / "step09_summary_grid"
         if step_dir.exists():
             return sorted(step_dir.glob("*.png"))
         return []
 
     def set_output_dir(self, path: Path | str) -> None:
         self._output_dir = Path(path) if path else None
-        if self._output_dir:
-            self._input05_lbl.setText(str(self._output_dir / "step05_wavelet_master"))
-            step06_dir = self._output_dir / "step06_rgb_composite"
-        else:
-            self._input05_lbl.setText("")
-            step06_dir = None
+        self._step_status.refresh(self._output_dir)
+        step06_dir = self._output_dir / "step06_rgb_composite" if self._output_dir else None
         if hasattr(self, "_preview"):
             self._preview.set_input_dir(step06_dir)
 

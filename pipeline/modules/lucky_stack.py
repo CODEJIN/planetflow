@@ -2921,7 +2921,7 @@ def lucky_stack_ser(
     """Run the full lucky stacking pipeline on a single SER file.
 
     Args:
-        ser_path:          Path to a PIPP-preprocessed SER file.
+        ser_path:          Path to a SER Crop output SER file.
         cfg:               LuckyStackConfig.
         progress_callback: Optional (done, total) callback for UI progress bars.
         session_aps:       Pre-computed AP positions from reference SER (session-wide mode).

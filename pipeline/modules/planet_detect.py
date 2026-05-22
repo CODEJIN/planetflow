@@ -1,11 +1,11 @@
 """
-Planet detection utilities for PIPP-style preprocessing.
+Planet detection utilities for SER Crop preprocessing.
 
 Detects the planet disk in a raw (mono/Bayer) or RGB frame, validates that
 the planet is fully on-screen and not deformed, and returns its geometric
 centre and bounding-box dimensions.
 
-Key design decisions (matching PIPP behaviour):
+Key design decisions:
   - Geometric centroid (bounding-box centre) rather than brightness-weighted
     centroid avoids systematic drift caused by Jupiter's uneven atmospheric bands.
   - Triangle auto-threshold (Zack 1977) works well across a wide range of

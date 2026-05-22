@@ -1,23 +1,23 @@
 """
-Step 1 – PIPP-style SER preprocessing.
+Step 1 – SER Crop: frame rejection and ROI crop for raw SER files.
 
 For each raw SER file in ``config.ser_input_dir``:
   1. **Frame rejection** — discard frames where the planet is:
        - partially outside the frame (clipping check)
        - deformed / non-circular (aspect-ratio check)
        - cut by a straight data-transfer artefact (straight-edge check)
-       - too small (below ``pipp.min_diameter``)
+       - too small (below ``ser_crop.min_diameter``)
        - an abnormal size relative to adjacent accepted frames
-         (sliding-window median check with ``pipp.size_tolerance``)
-  2. **Centre-align & crop** — crop a square ROI of ``pipp.roi_size`` pixels,
+         (sliding-window median check with ``ser_crop.size_tolerance``)
+  2. **Centre-align & crop** — crop a square ROI of ``ser_crop.roi_size`` pixels,
        centred on the geometric centroid of the planet disk.
   3. **Write** the accepted, cropped frames to a new SER file in
-       ``<output_base>/step01_pipp/``.
+       ``<output_base>/step01_ser_crop/``.
 
 Output (when ``config.save_step01`` is True):
-    <output_base>/step01_pipp/
-        2026-04-02-1231_5-U-IR-Jup_pipp.ser
-        2026-04-02-1231_5-U-IR-Jup_pipp.txt   ← rejection stats
+    <output_base>/step01_ser_crop/
+        2026-04-02-1231_5-U-IR-Jup_ser_crop.ser
+        2026-04-02-1231_5-U-IR-Jup_ser_crop.txt   ← rejection stats
         ...
 
 Return value::
@@ -65,7 +65,7 @@ def run(config: PipelineConfig, progress_callback=None, cancel_event=None) -> Di
         if config.step01_output_dir is not None:
             out_dir = Path(config.step01_output_dir)
         else:
-            out_dir = config.step_dir(1, "pipp")
+            out_dir = config.step_dir(1, "ser_crop")
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"  Output → {out_dir}")
 
@@ -73,7 +73,7 @@ def run(config: PipelineConfig, progress_callback=None, cancel_event=None) -> Di
     print(f"  Found {n_files} SER file(s) in {ser_dir}")
 
     # ── Worker count: cap at 4 to avoid disk I/O contention ──────────────────
-    _cfg_workers = int(getattr(config.pipp, "n_workers", 0))
+    _cfg_workers = int(getattr(config.ser_crop, "n_workers", 0))
     _cpu         = _mp.cpu_count() or 1
     _step1_max   = min(4, _cfg_workers if _cfg_workers > 0 else _cpu)
     _step1_max   = max(1, _step1_max)
@@ -161,7 +161,7 @@ def _process_one(
     frames_offset: int = 0,
     total_frames: int = 0,
 ) -> Dict:
-    pipp = config.pipp
+    ser_crop = config.ser_crop
     stem = ser_path.stem
     print(f"\n  [{stem}]", end="", flush=True)
 
@@ -180,8 +180,8 @@ def _process_one(
         out_stem = image_io.infer_winjupos_stem(
             ser_path, filter_name=filter_name, target=config.target
         )
-        out_path = out_dir / (out_stem + "_pipp.ser")
-        writer = ser_io.SERWriter(out_path, reader.header, pipp.roi_size, pipp.roi_size)
+        out_path = out_dir / (out_stem + "_ser_crop.ser")
+        writer = ser_io.SERWriter(out_path, reader.header, ser_crop.roi_size, ser_crop.roi_size)
 
     # Counters
     accepted = 0
@@ -200,9 +200,9 @@ def _process_one(
 
             info = planet_detect.analyze_planet(
                 raw,
-                min_diameter=pipp.min_diameter,
-                aspect_ratio_limit=pipp.aspect_ratio_limit,
-                straight_edge_limit=pipp.straight_edge_limit,
+                min_diameter=ser_crop.min_diameter,
+                aspect_ratio_limit=ser_crop.aspect_ratio_limit,
+                straight_edge_limit=ser_crop.straight_edge_limit,
             )
 
             if info is None:
@@ -217,8 +217,8 @@ def _process_one(
                 ref_w = float(np.median(w_history))
                 ref_h = float(np.median(h_history))
                 if (
-                    curr_w < ref_w * (1.0 - pipp.size_tolerance)
-                    or curr_h < ref_h * (1.0 - pipp.size_tolerance)
+                    curr_w < ref_w * (1.0 - ser_crop.size_tolerance)
+                    or curr_h < ref_h * (1.0 - ser_crop.size_tolerance)
                 ):
                     rejected_size += 1
                     continue  # rejected frame does NOT update the reference
@@ -226,7 +226,7 @@ def _process_one(
             # Frame accepted — update sliding window
             w_history.append(curr_w)
             h_history.append(curr_h)
-            if len(w_history) > pipp.window_size:
+            if len(w_history) > ser_crop.window_size:
                 w_history.pop(0)
                 h_history.pop(0)
 
@@ -241,7 +241,7 @@ def _process_one(
             if is_bayer:
                 cx = round(cx / 2) * 2
                 cy = round(cy / 2) * 2
-            roi = pipp.roi_size if not is_bayer else (pipp.roi_size // 2) * 2
+            roi = ser_crop.roi_size if not is_bayer else (ser_crop.roi_size // 2) * 2
             cropped = planet_detect.get_cropped_frame(raw, (cx, cy), roi)
             if writer is not None:
                 writer.write_frame(cropped, timestamps[i])
@@ -278,7 +278,7 @@ def _process_one(
     # Write a small stats sidecar for inspection
     if out_dir is not None:
         _write_stats(
-            out_dir / (stem + "_pipp.txt"),
+            out_dir / (stem + "_ser_crop.txt"),
             ser_path, num_frames, accepted,
             rejected_detect, rejected_size,
         )

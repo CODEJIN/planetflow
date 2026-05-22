@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from gui.i18n import S
 from gui.panels.base_panel import BasePanel
+from gui.panels.step_status_widget import StepStatusWidget
 
 _SPINBOX_STYLE = (
     "QDoubleSpinBox { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;"
@@ -36,7 +37,7 @@ _READONLY_STYLE = (
 
 # ── Panel ──────────────────────────────────────────────────────────────────────
 
-class Step04Panel(BasePanel):
+class DerotatePanel(BasePanel):
     STEP_ID   = "04"
     TITLE_KEY = "step04.title"
     DESC_KEY  = "step04.desc"
@@ -57,20 +58,11 @@ class Step04Panel(BasePanel):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        # Folder display (auto-derived, read-only)
-        self._input_lbl = QLineEdit()
-        self._input_lbl.setReadOnly(True)
-        self._input_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_in = QLabel(S("step04.input_dir"))
-        lbl_in.setToolTip(S("step04.input_dir.tooltip"))
-        fl.addRow(lbl_in, self._input_lbl)
-
-        self._quality_lbl = QLineEdit()
-        self._quality_lbl.setReadOnly(True)
-        self._quality_lbl.setStyleSheet(_READONLY_STYLE)
-        lbl_q = QLabel(S("step04.quality_dir"))
-        lbl_q.setToolTip(S("step04.quality_dir.tooltip"))
-        fl.addRow(lbl_q, self._quality_lbl)
+        # Step status dots (auto-derived)
+        self._step_status = StepStatusWidget(steps=[3])
+        lbl_req = QLabel(S("common.requires"))
+        lbl_req.setStyleSheet("color: #888;")
+        fl.addRow(lbl_req, self._step_status)
 
         self._output_lbl = QLineEdit()
         self._output_lbl.setReadOnly(True)
@@ -145,14 +137,12 @@ class Step04Panel(BasePanel):
         inp = data.get("input_dir", "")
         out = data.get("output_dir", "")
         if inp:
-            self._input_lbl.setText(inp)
             self._input_dir = Path(inp)
         if out:
             p = Path(out)
-            if hasattr(self, "_quality_lbl"):
-                self._quality_lbl.setText(str(p / "step03_quality"))
             self._output_lbl.setText(str(p / "step04_derotated"))
             self._output_dir = p
+            self._step_status.refresh(p)
 
         self._min_quality.setValue(float(data.get("min_quality_threshold", 0.05)))
         self._normalize.setChecked(bool(data.get("normalize_brightness", False)))
@@ -171,3 +161,4 @@ class Step04Panel(BasePanel):
 
     def set_output_dir(self, path: Path | str) -> None:
         self._output_dir = Path(path) if path else None
+        self._step_status.refresh(self._output_dir)

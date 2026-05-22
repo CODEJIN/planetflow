@@ -25,7 +25,7 @@ import numpy as np
 
 from pipeline.config import PipelineConfig
 from pipeline.modules import image_io, wavelet
-from pipeline.steps.step06_rgb_composite import _auto_color_correct
+from pipeline.steps.rgb_composite import _auto_color_correct
 
 
 

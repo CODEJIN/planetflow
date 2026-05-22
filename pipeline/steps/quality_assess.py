@@ -1,14 +1,14 @@
 """
-Step 3 – Automated quality assessment and optimal time-window selection.
+Step 3 – Automated quality assessment and sliding-window enumeration.
 
 Evaluates every stacked TIF with sharpness and contrast metrics computed
-on the planet disk only, then identifies 1–3 overlapping time windows
-where all required filters have simultaneously good quality.
+on the planet disk only, then enumerates all non-overlapping time windows
+where all required filters are present (sorted chronologically).
 
 Output (when config.save_step03 is True):
     <output_base>/step03_quality/
         quality_scores.csv      — per-file scores and per-filter rankings
-        windows.json            — recommended windows (machine-readable)
+        windows.json            — all windows (machine-readable)
         windows_summary.txt     — human-readable window summary
         <FILTER>_ranking.csv    — per-filter sorted ranking
 """
@@ -39,7 +39,7 @@ def run(
     Returns:
         {
           "scores":  {filter: [row_dict, ...]},        # normalised
-          "windows": [window_dict, ...],               # top-N windows
+          "windows": [window_dict, ...],               # all windows, chronological
           "groups":  {filter: [(path, meta), ...]},    # for downstream steps
         }
     """
@@ -89,20 +89,16 @@ def run(
     cycle_min  = config.quality.cycle_minutes
     window_min = config.quality.window_minutes
 
-    overlap_note = " [overlap-allowed]" if config.quality.allow_overlap else ""
-    print(f"\n  Searching for top de-rotation windows "
+    print(f"\n  Enumerating all de-rotation windows "
           f"(window={window_min:.1f} min, "
           f"cycle={cycle_min:.2f} min, "
-          f"n={config.quality.n_windows}, "
-          f"σ={config.quality.outlier_sigma}{overlap_note})…")
-    windows = quality.find_best_windows(
+          f"σ={config.quality.outlier_sigma})…")
+    windows = quality.find_all_windows(
         scores,
         required_filters=list(scores.keys()) if config.camera_mode == "color" else config.filters,
         window_minutes=window_min,
         cycle_minutes=cycle_min,
-        n_windows=config.quality.n_windows,
         outlier_sigma=config.quality.outlier_sigma,
-        allow_overlap=config.quality.allow_overlap,
     )
     print(f"  Found {len(windows)} de-rotation window(s)")
 

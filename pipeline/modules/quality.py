@@ -434,6 +434,122 @@ def find_best_windows(
     return selected
 
 
+def find_all_windows(
+    scores: Dict[str, List[dict]],
+    required_filters: Optional[List[str]] = None,
+    window_minutes: float = 15.0,
+    cycle_minutes: float = 4.5,
+    outlier_sigma: float = 1.5,
+) -> List[dict]:
+    """Return all sliding windows, sorted chronologically (overlaps included).
+
+    Unlike :func:`find_best_windows`, this function returns every valid window
+    (one per anchor frame) without any quality rank or overlap filtering, so
+    that Steps 04–06 process the full observation session as a slide.
+    Step 09 (Summary Grid) handles top-N selection and non-overlap filtering.
+
+    Returns the same window dict format as :func:`find_best_windows`, but
+    ordered by ``center_time`` (ascending) instead of quality.
+    """
+    if required_filters is None:
+        required_filters = sorted(scores.keys())
+
+    anchor_filter = "IR" if "IR" in required_filters else required_filters[0]
+    anchor_rows = scores.get(anchor_filter, [])
+    if not anchor_rows:
+        return []
+
+    by_filter: Dict[str, List[dict]] = {
+        filt: scores.get(filt, []) for filt in required_filters
+    }
+    half_window = timedelta(minutes=window_minutes / 2)
+    n_expected = window_minutes / cycle_minutes
+
+    candidates: List[dict] = []
+
+    for anchor_row in anchor_rows:
+        t_center = anchor_row["timestamp"]
+        t_start = t_center - half_window
+        t_end   = t_center + half_window
+
+        per_filter: Dict[str, dict] = {}
+        complete = True
+
+        for filt in required_filters:
+            in_window = [
+                r for r in by_filter[filt]
+                if t_start <= r["timestamp"] <= t_end
+            ]
+            if not in_window:
+                complete = False
+                break
+
+            n_total = len(in_window)
+            scores_arr = np.array([r["norm_score"] for r in in_window])
+            mean_pre = float(scores_arr.mean())
+            std_pre  = float(scores_arr.std()) if n_total > 1 else 0.0
+
+            threshold = mean_pre - outlier_sigma * std_pre
+            included = [r for r in in_window if r["norm_score"] >= threshold]
+            excluded = [r for r in in_window if r["norm_score"] < threshold]
+            if not included:
+                included = [max(in_window, key=lambda r: r["norm_score"])]
+                excluded = []
+
+            n_included  = len(included)
+            incl_scores = np.array([r["norm_score"] for r in included])
+            mean_post   = float(incl_scores.mean())
+            std_post    = float(incl_scores.std()) if n_included > 1 else 0.0
+
+            snr_factor = float(min(1.0, np.sqrt(n_included / n_expected)))
+            cv        = std_post / mean_post if mean_post > 1e-9 else 1.0
+            stability = 1.0 / (1.0 + cv)
+            filter_quality = mean_post * snr_factor * stability
+
+            per_filter[filt] = {
+                "n_total":        n_total,
+                "n_included":     n_included,
+                "n_excluded":     len(excluded),
+                "quality_pre":    round(mean_pre, 4),
+                "quality_post":   round(mean_post, 4),
+                "snr_factor":     round(snr_factor, 4),
+                "stability":      round(stability, 4),
+                "filter_quality": round(filter_quality, 4),
+                "included":       included,
+                "excluded":       excluded,
+            }
+
+        if not complete:
+            continue
+
+        fq_vals = [per_filter[f]["filter_quality"] for f in required_filters]
+        if all(v > 0 for v in fq_vals):
+            window_quality = float(np.prod(fq_vals) ** (1.0 / len(fq_vals)))
+        else:
+            window_quality = 0.0
+
+        all_times = [
+            r["timestamp"]
+            for filt in required_filters
+            for r in per_filter[filt]["included"]
+        ]
+        t_min_w, t_max_w = min(all_times), max(all_times)
+        rotation_deg = (t_max_w - t_min_w).total_seconds() / 60.0 * 0.6
+
+        candidates.append({
+            "center_time":      t_center,
+            "window_start":     t_start,
+            "window_end":       t_end,
+            "window_quality":   round(window_quality, 4),
+            "rotation_degrees": round(rotation_deg, 2),
+            "per_filter":       per_filter,
+        })
+
+    # Return all windows sorted chronologically — overlaps are intentional.
+    # Non-overlapping selection is Step 09's responsibility (Summary Grid).
+    return sorted(candidates, key=lambda w: w["center_time"])
+
+
 # ── I/O helpers ────────────────────────────────────────────────────────────────
 
 def scores_to_csv_rows(scores: Dict[str, List[dict]]) -> List[dict]:

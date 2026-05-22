@@ -29,23 +29,22 @@ from gui import profile_manager
 from gui.i18n import S
 from gui.panels.settings_panel import SettingsPanel
 from gui.panels.welcome_panel import WelcomePanel
-from gui.panels.step01_panel import Step01Panel
-from gui.panels.step02_panel import Step02Panel
-from gui.panels.step03_panel import Step03Panel
-from gui.panels.step04_panel import Step04Panel
-from gui.panels.step05_panel import Step05Panel
-from gui.panels.step06_panel import Step06Panel
-from gui.panels.step07_panel import Step07Panel
-from gui.panels.step08_panel import Step08Panel
-from gui.panels.step09_panel import Step09Panel
-from gui.panels.step10_panel import Step10Panel
+from gui.panels.ser_crop_panel import SerCropPanel
+from gui.panels.lucky_stack_panel import LuckyStackPanel
+from gui.panels.quality_panel import QualityPanel
+from gui.panels.derotate_panel import DerotatePanel
+from gui.panels.wavelet_master_panel import WaveletMasterPanel
+from gui.panels.rgb_composite_panel import RgbCompositePanel
+from gui.panels.wavelet_preview_panel import WaveletPreviewPanel
+from gui.panels.gif_panel import GifPanel
+from gui.panels.summary_grid_panel import SummaryGridPanel
 from gui.step_runner import StepRunner
 from gui.widgets.log_widget import LogWidget
 from gui.widgets.step_item import StepItem
 from pipeline.config import (
     PipelineConfig,
     LuckyStackConfig,
-    PippConfig,
+    SerCropConfig,
     WaveletConfig,
     QualityConfig,
     DerotationConfig,
@@ -172,7 +171,7 @@ DARK_STYLE = _build_dark_style()
 
 # Steps that belong to the de-rotation pipeline and are auto-skipped when
 # there are too few files to form even one de-rotation window.
-_DEROTATION_STEPS = {"03", "04", "05", "06", "08", "09", "10"}
+_DEROTATION_STEPS = {"03", "04", "05", "06", "08", "09"}
 
 # ── Step definitions ───────────────────────────────────────────────────────────
 
@@ -185,10 +184,8 @@ _STEP_DEFS = [
     ("05", "sidebar.step05", False),
     ("06", "sidebar.step06", False),
     ("07", "sidebar.step07", True),
-    # separator before optional final steps
-    ("08", "sidebar.step08", True),
-    ("09", "sidebar.step09", True),
-    ("10", "sidebar.step10", True),
+    ("08", "sidebar.step08", True),   # GIF (구 Step 09)
+    ("09", "sidebar.step09", True),   # Summary Grid (구 Step 10)
 ]
 
 # Which step IDs get a separator _before_ them in the sidebar
@@ -315,7 +312,7 @@ class MainWindow(QMainWindow):
                 step_list_layout.addWidget(sep)
 
             # Steps 02, 08, 09 default to enabled even though they are optional
-            _default_on = {"02", "08", "09"}
+            _default_on = {"02", "08"}
             enabled = enabled_steps.get(step_id, True if step_id in _default_on else not optional)
             item = StepItem(step_id, S(label), optional=optional, enabled=enabled)
             item.clicked.connect(self._on_step_clicked)
@@ -371,16 +368,15 @@ class MainWindow(QMainWindow):
         # Step panels
         self._step_panels: dict[str, QWidget] = {}
         panel_classes = {
-            "01": Step01Panel,
-            "02": Step02Panel,
-            "03": Step03Panel,
-            "04": Step04Panel,
-            "05": Step05Panel,
-            "06": Step06Panel,
-            "07": Step07Panel,
-            "08": Step08Panel,
-            "09": Step09Panel,
-            "10": Step10Panel,
+            "01": SerCropPanel,
+            "02": LuckyStackPanel,
+            "03": QualityPanel,
+            "04": DerotatePanel,
+            "05": WaveletMasterPanel,
+            "06": RgbCompositePanel,
+            "07": WaveletPreviewPanel,
+            "08": GifPanel,
+            "09": SummaryGridPanel,
         }
 
         for step_id, cls in panel_classes.items():
@@ -436,10 +432,9 @@ class MainWindow(QMainWindow):
         """Remove all step panels and recreate them so every S() label picks up
         the newly loaded language.  Session data is already saved at this point."""
         panel_classes = {
-            "01": Step01Panel, "02": Step02Panel, "03": Step03Panel,
-            "04": Step04Panel, "05": Step05Panel, "06": Step06Panel,
-            "07": Step07Panel, "08": Step08Panel, "09": Step09Panel,
-            "10": Step10Panel,
+            "01": SerCropPanel, "02": LuckyStackPanel, "03": QualityPanel,
+            "04": DerotatePanel, "05": WaveletMasterPanel, "06": RgbCompositePanel,
+            "07": WaveletPreviewPanel, "08": GifPanel, "09": SummaryGridPanel,
         }
 
         # Remove old panels from the stack
@@ -537,16 +532,8 @@ class MainWindow(QMainWindow):
                     item._check.setChecked(enabled)
                     item._check.blockSignals(False)
 
-        # Enforce Step 09 dependency on Step 08 (GIF needs series output)
-        if not self._enabled_steps.get("08", True):
-            item09 = self._step_items.get("09")
-            if item09:
-                item09.set_checkbox_enabled(False)
-                item09.set_enabled_visual(False)
-                self._enabled_steps["09"] = False
-
         # Load step panels that use load_session() to populate derived folder fields
-        for sid in ("01", "02", "03", "04", "05", "06", "07", "08", "09", "10"):
+        for sid in ("01", "02", "03", "04", "05", "06", "07", "08", "09"):
             panel = self._step_panels.get(sid)
             if panel and hasattr(panel, "load_session"):
                 panel.load_session(self._session_data)
@@ -652,7 +639,7 @@ class MainWindow(QMainWindow):
         if step_id in self._step_items:
             self._step_items[step_id].set_enabled_visual(enabled)
 
-        # Step 01 (PIPP) checked → force Step 02 ON and lock its checkbox
+        # Step 01 (SER Crop) checked → force Step 02 ON and lock its checkbox
         if step_id == "01":
             item02 = self._step_items.get("02")
             if item02 and item02._check is not None:
@@ -672,29 +659,7 @@ class MainWindow(QMainWindow):
             self._update_run_all_button()
             return
 
-        # Step 09 (GIF) requires Step 08 (series) output — enforce dependency
-        if step_id == "08":
-            item09 = self._step_items.get("09")
-            if item09:
-                if not enabled:
-                    # Step 08 disabled → uncheck Step 09 (checkbox stays clickable)
-                    item09.set_checkbox_enabled(False)
-                    item09.set_enabled_visual(False)
-                    self._enabled_steps["09"] = False
-                else:
-                    # Step 08 re-enabled → restore Step 09 to checked/enabled
-                    if item09._check is not None:
-                        item09._check.blockSignals(True)
-                        item09._check.setChecked(True)
-                        item09._check.blockSignals(False)
-                    item09.set_enabled_visual(True)
-                    self._enabled_steps["09"] = True
-        elif step_id == "09" and enabled:
-            # Step 09 enabled → cascade: also enable Step 08 if it was off
-            if not self._enabled_steps.get("08", False):
-                item08 = self._step_items.get("08")
-                if item08 is not None and item08._check is not None:
-                    item08._check.setChecked(True)  # triggers _on_step_toggled("08", True)
+        pass  # no cascade dependencies beyond Step 01→02
 
     def _update_run_all_button(self) -> None:
         """Update batch run button label based on the current starting step."""
@@ -742,7 +707,7 @@ class MainWindow(QMainWindow):
             self._session_data["output_dir"] = new_output_dir
             self._output_dir_label.setText(S("label.output", d=new_output_dir))
         # Cascade to all downstream steps regardless of whether step02_out changed
-        for sid in ("03", "04", "05", "06", "07", "08", "09", "10"):
+        for sid in ("03", "04", "05", "06", "07", "08", "09"):
             dep = self._step_panels.get(sid)
             if dep and hasattr(dep, "load_session"):
                 dep.load_session(self._session_data)
@@ -773,8 +738,8 @@ class MainWindow(QMainWindow):
                 self._session_data["step02_output_dir"] = step02_out
                 self._session_data["input_dir"]         = step02_out
 
-            # 2) Load step03-10 with updated session (input_dir now reflects step02 output).
-            for sid in ("03", "04", "05", "06", "07", "08", "09", "10"):
+            # 2) Load step03-09 with updated session (input_dir now reflects step02 output).
+            for sid in ("03", "04", "05", "06", "07", "08", "09"):
                 dep = self._step_panels.get(sid)
                 if dep and hasattr(dep, "load_session"):
                     dep.load_session(self._session_data)
@@ -794,7 +759,7 @@ class MainWindow(QMainWindow):
         if panel03 and hasattr(panel03, "load_session"):
             panel03.load_session(self._session_data)
         # Cascade to all downstream steps.
-        for sid in ("04", "05", "06", "07", "08", "09", "10"):
+        for sid in ("04", "05", "06", "07", "08", "09"):
             dep = self._step_panels.get(sid)
             if dep and hasattr(dep, "load_session"):
                 dep.load_session(self._session_data)
@@ -842,7 +807,7 @@ class MainWindow(QMainWindow):
             self._refresh_profile_ui()
 
         # 2. Refresh panels with the updated session (updates _is_color in step06/07/08)
-        for sid in ("01", "03", "04", "05", "06", "07", "08", "09", "10"):
+        for sid in ("01", "03", "04", "05", "06", "07", "08", "09"):
             panel = self._step_panels.get(sid)
             if panel and hasattr(panel, "load_session"):
                 panel.load_session(self._session_data)
@@ -961,17 +926,16 @@ class MainWindow(QMainWindow):
     ) -> tuple[bool, int, int]:
         """Return (feasible, n_files, required) for de-rotation window search."""
         window_frames = int(d.get("window_frames", 3))
-        n_windows     = int(d.get("n_windows", 1))
-        required      = window_frames * n_windows
+        required      = window_frames
 
         if start_from == "01":
-            # step01 reads from the raw SER dir; step02_ser_dir (PIPP output)
+            # step01 reads from the raw SER dir; step02_ser_dir (SER Crop output)
             # doesn't exist yet, so always count from ser_input_dir.
             ser_dir = d.get("ser_input_dir", "")
             p = Path(ser_dir)
             n = len([f for pat in ("*.ser", "*.SER") for f in p.glob(pat)])
         elif start_from == "02":
-            # step02 reads from PIPP output; fall back to raw dir if not set.
+            # step02 reads from SER Crop output; fall back to raw dir if not set.
             ser_dir = d.get("step02_ser_dir", "") or d.get("ser_input_dir", "")
             p = Path(ser_dir)
             n = len([f for pat in ("*.ser", "*.SER") for f in p.glob(pat)])
@@ -1052,9 +1016,8 @@ class MainWindow(QMainWindow):
             "05": "step05_wavelet_master",
             "06": "step06_rgb_composite",
             "07": "step07_wavelet_preview",
-            "08": "step08_series_composite",
-            "09": "step09_gif",
-            "10": "step10_summary_grid",
+            "08": "step08_gif",
+            "09": "step09_summary_grid",
         }
 
         def _out(step_id: str) -> str:
@@ -1137,7 +1100,7 @@ class MainWindow(QMainWindow):
                         new_output_dir = str(Path(out).parent)
                         self._session_data["output_dir"] = new_output_dir
                         self._output_dir_label.setText(S("label.output", d=new_output_dir))
-                for sid in ("03", "04", "05", "06", "07", "08", "09", "10"):
+                for sid in ("03", "04", "05", "06", "07", "08", "09"):
                     dep = self._step_panels.get(sid)
                     if dep and hasattr(dep, "load_session"):
                         dep.load_session(self._session_data)
@@ -1151,22 +1114,18 @@ class MainWindow(QMainWindow):
                 dep = self._step_panels.get("05")
                 if dep and hasattr(dep, "load_session"):
                     dep.load_session(self._session_data)
-            # After step 05 completes (wavelet master) → refresh step 06 rgb composite and step 10
+            # After step 05 completes (wavelet master) → refresh step 06 rgb composite and step 09
             if step_id == "05":
-                for dep_id in ("06", "10"):
+                for dep_id in ("06", "09"):
                     dep = self._step_panels.get(dep_id)
                     if dep and hasattr(dep, "load_session"):
                         dep.load_session(self._session_data)
-            # After step 06 completes (RGB composite) → refresh step 10 summary grid
+            # After step 06 completes (RGB composite) → refresh step 08 gif and step 09 summary grid
             if step_id == "06":
-                dep = self._step_panels.get("10")
-                if dep and hasattr(dep, "load_session"):
-                    dep.load_session(self._session_data)
-            # After step 07 completes (wavelet preview) → refresh step 08 paths
-            if step_id == "07":
-                dep = self._step_panels.get("08")
-                if dep and hasattr(dep, "load_session"):
-                    dep.load_session(self._session_data)
+                for dep_id in ("08", "09"):
+                    dep = self._step_panels.get(dep_id)
+                    if dep and hasattr(dep, "load_session"):
+                        dep.load_session(self._session_data)
             if panel and hasattr(panel, "refresh_after_run"):
                 panel.refresh_after_run()
 
@@ -1223,10 +1182,10 @@ class MainWindow(QMainWindow):
             debayer               = bool(d.get("lucky_debayer", True)),
         )
 
-        pipp = PippConfig(
+        ser_crop = SerCropConfig(
             roi_size     = int(d.get("roi_size", 448)),
             min_diameter = int(d.get("min_diameter", 50)),
-            n_workers    = _global_workers,   # step01_pipp.py caps at 4 internally
+            n_workers    = _global_workers,   # ser_crop.py caps at 4 internally
         )
 
         _dn_zero = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -1239,9 +1198,6 @@ class MainWindow(QMainWindow):
             master_amounts         = list(d.get("master_amounts",         [200.0, 200.0, 200.0, 0.0, 0.0, 0.0])),
             master_denoise_amounts = list(d.get("master_denoise_amounts",  _dn_zero)),
             master_filter_type     = str(d.get("master_filter_type",     "gaussian")),
-            series_amounts         = list(d.get("series_amounts",         [200.0, 200.0, 200.0, 0.0, 0.0, 0.0])),
-            series_denoise_amounts = list(d.get("series_denoise_amounts",  _dn_zero)),
-            series_filter_type     = str(d.get("series_filter_type",     "gaussian")),
             border_taper_px        = int(d.get("border_taper_px", 0)),
             auto_params            = True,
         )
@@ -1259,8 +1215,6 @@ class MainWindow(QMainWindow):
         quality = QualityConfig(
             window_frames         = window_frames,
             cycle_minutes         = cycle_sec  / 60.0,
-            n_windows             = int(d.get("n_windows", 1)),
-            allow_overlap         = bool(d.get("allow_overlap", False)),
             min_quality_threshold = float(d.get("min_quality_threshold_03", 0.0)),
         )
 
@@ -1275,10 +1229,9 @@ class MainWindow(QMainWindow):
 
         _sat_composite_on = bool(d.get("satellite_composite_enabled", False))
         satellite = SatelliteConfig(
-            enabled                  = _sat_composite_on,   # composite requires tracking
+            enabled                  = _sat_composite_on,
             composite_enabled        = _sat_composite_on,
             composite_coverage_scale = float(d.get("satellite_coverage_scale", 2.5)),
-            series_composite_enabled = bool(d.get("series_satellite_composite_enabled", False)),
         )
 
         def _parse_specs(raw: list | None):
@@ -1296,34 +1249,20 @@ class MainWindow(QMainWindow):
                 for s in raw if s.get("name")
             ] or None
 
-        # Build CompositeSpec lists from session data
-        specs        = _parse_specs(d.get("composite_specs"))         # step06 specs
-        series_specs = _parse_specs(d.get("series_composite_specs"))  # step08 series specs
-
-        # series_cycle_seconds: step8-specific; fall back to step4's cycle_seconds
-        _series_cyc = float(d.get("series_cycle_seconds",
-                                   d.get("cycle_seconds", 270)))
+        specs = _parse_specs(d.get("composite_specs"))
         composite = CompositeConfig(
-            max_shift_px                  = float(d.get("max_shift_px", 8.0)),
-            global_normalize              = bool(d.get("global_normalize", True)),
-            global_filter_normalize       = bool(d.get("global_filter_normalize", True)),
-            series_scale                  = float(d.get("series_scale", 1.00)),
-            cycle_seconds                 = _series_cyc,
-            stack_window_n                = int(d.get("stack_window_n", 5)),
-            stack_min_quality             = float(d.get("stack_min_quality", 0.05)),
-            save_mono_frames              = bool(d.get("save_mono_frames", False)),
-            stretch_enabled               = bool(d.get("stretch_enabled", False)),
-            saturation_boost              = bool(d.get("saturation_boost", True)),
-            series_stretch_enabled        = bool(d.get("series_stretch_enabled", False)),
-            series_saturation_boost       = bool(d.get("series_saturation_boost", True)),
-            series_global_normalize_color = bool(d.get("series_global_normalize_color", True)),
+            max_shift_px            = float(d.get("max_shift_px", 8.0)),
+            global_normalize        = bool(d.get("global_normalize", True)),
+            global_filter_normalize = bool(d.get("global_filter_normalize", False)),
+            brightness_scale        = float(d.get("brightness_scale", 1.0)),
+            stretch_enabled         = bool(d.get("stretch_enabled", False)),
+            saturation_boost        = bool(d.get("saturation_boost", True)),
             **({"specs": specs} if specs else {}),
-            **({"series_specs": series_specs} if series_specs else {}),
         )
 
         gif = GifConfig(
-            fps           = float(d.get("fps", 6.0)),
-            resize_factor = float(d.get("resize_factor", 1.0)),
+            fps              = float(d.get("fps", 6.0)),
+            resize_factor    = float(d.get("resize_factor", 1.0)),
         )
 
         # Derive composite column names from the step06 composite_specs so the
@@ -1335,11 +1274,13 @@ class MainWindow(QMainWindow):
             grid_composites = ["RGB", "IR-RGB", "CH4-G-IR"]
 
         grid = SummaryGridConfig(
-            black_point    = float(d.get("black_point", 0.04)),
-            gamma          = float(d.get("gamma", 0.8)),
-            cell_size_px   = int(d.get("cell_size_px", 300)),
-            composites     = grid_composites,
-            save_analytic  = bool(d.get("save_analytic", True)),
+            black_point     = float(d.get("black_point", 0.04)),
+            gamma           = float(d.get("gamma", 0.8)),
+            cell_size_px    = int(d.get("cell_size_px", 300)),
+            composites      = grid_composites,
+            save_analytic   = bool(d.get("save_analytic", True)),
+            n_best_windows  = int(d.get("n_best_windows", 0)),
+            allow_overlap   = bool(d.get("allow_overlap", False)),
         )
 
         filters_raw = d.get("filters", "IR,R,G,B,CH4")
@@ -1365,7 +1306,7 @@ class MainWindow(QMainWindow):
             step01_output_dir = step01_out,
             step02_ser_dir    = step02_ser,
             step02_output_dir = step02_out,
-            pipp            = pipp,
+            ser_crop        = ser_crop,
             lucky_stack     = lucky_stack,
             wavelet         = wavelet,
             quality         = quality,

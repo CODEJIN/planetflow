@@ -153,9 +153,9 @@ def _color_passthrough(
     config: PipelineConfig,
     results_05: Dict[str, List[Tuple[Optional[Path], str]]],
 ) -> Dict[str, List[Tuple[Optional[Path], str]]]:
-    """Color-camera Step 6: per-window WB + CA correction with optional global norm.
+    """Color-camera Step 6: per-window WB + CA correction.
 
-    Two-pass when global_normalize is True:
+    Two-pass:
       Pass 1 — correct each window, cache the corrected image (no stretch/saturation).
       Pass 2 — compute global mean luminance, apply scalar scale per window, then
                apply stretch and saturation, then save.
@@ -193,14 +193,13 @@ def _color_passthrough(
         cache[win_label] = corrected
         params_cache[win_label] = params
 
-    # ── Global luminance normalization ─────────────────────────────────────────
+    # ── Pass 2: global normalize + stretch + saturation + save ───────────────
     global_mean_lum: Optional[float] = None
     if config.composite.global_normalize:
         valid = [img.mean() for img in cache.values() if img is not None]
         if len(valid) > 1:
             global_mean_lum = float(np.mean(valid))
 
-    # ── Pass 2: normalize + stretch + saturation + save ────────────────────────
     all_results: Dict[str, List[Tuple[Optional[Path], str]]] = {}
 
     for win_label in sorted(results_05.keys()):
@@ -296,11 +295,59 @@ def run(
     sat_phigh    = config.composite.saturation_phigh
     sat_headroom = config.composite.saturation_headroom
 
+    gfn       = config.composite.global_filter_normalize
+    gn        = config.composite.global_normalize
+    bscale    = config.composite.brightness_scale
+
     print(f"  Composites: {[s.name for s in specs]}")
     print(f"  Channel alignment: {'enabled' if align else 'disabled'}  "
           f"  Stretch: [{plow}%, {phigh}%] → {target_hi:.2f}  "
           f"  Saturation boost: {'p{:.0f}→{:.0f}%max'.format(sat_phigh, sat_headroom*100) if saturate else 'off'}  "
-          f"  Global normalize: {'on' if config.composite.global_normalize else 'off'}")
+          f"  Filter normalize: {'on' if gfn else 'off'}  "
+          f"  Global normalize: {'on' if gn else 'off'}  "
+          f"  Brightness scale: {bscale:.2f}")
+
+    # ── Pre-pass: per-filter disk-median normalization ────────────────────────
+    # When global_filter_normalize is True, compute the planet-disk median for
+    # every (filter, window) pair, then build a scale factor so every window's
+    # disk has the same median for that filter.  Pure scaling — no shift — so
+    # the dark background is preserved and the dynamic range is not blown out.
+    filter_scales: Dict[str, Dict[str, float]] = {}   # {filt: {win_label: scale}}
+    if gfn and len(results_05) > 1:
+        from pipeline.modules.derotation import find_disk_center
+        print("  Computing per-filter disk-median scales across all windows…")
+        all_filters: set = set()
+        for spec in specs:
+            for f in (spec.R, spec.G, spec.B, spec.L):
+                if f:
+                    all_filters.add(f)
+        for filt in sorted(all_filters):
+            win_medians: Dict[str, float] = {}
+            for win_label, filter_entries in results_05.items():
+                fp_map = {fn: p for p, fn in filter_entries}
+                p = fp_map.get(filt)
+                if p is None or not p.exists():
+                    continue
+                img = image_io.read_png(p)
+                if img.ndim == 3:
+                    img = img.mean(axis=2).astype(np.float32)
+                try:
+                    cx, cy, sr, _, _ = find_disk_center(img)
+                    H, W = img.shape
+                    yy, xx = np.ogrid[:H, :W]
+                    mask = (xx - cx) ** 2 + (yy - cy) ** 2 <= sr ** 2
+                    med = float(np.median(img[mask])) if mask.sum() > 100 else float(np.median(img))
+                except Exception:
+                    med = float(np.median(img))
+                if med > 1e-6:
+                    win_medians[win_label] = med
+            if len(win_medians) < 2:
+                continue
+            global_med = float(np.mean(list(win_medians.values())))
+            scales = {wl: global_med / wm for wl, wm in win_medians.items()}
+            filter_scales[filt] = scales
+            print(f"    {filt}: disk_median={global_med:.4f}  "
+                  f"scales=[{min(scales.values()):.3f}–{max(scales.values()):.3f}]")
 
     # ── Pass 1: compose all windows, cache results (saturation deferred) ───────
     # {win_label: {spec_name: comp_img or None}}
@@ -346,7 +393,10 @@ def run(
             for f in list(filter_images.keys()):
                 img = filter_images[f]
                 if img.ndim == 3:
-                    filter_images[f] = img.mean(axis=2).astype("float32")
+                    img = img.mean(axis=2).astype("float32")
+                if f in filter_scales and win_label in filter_scales[f]:
+                    img = np.clip(img * filter_scales[f][win_label], 0.0, 1.0).astype("float32")
+                filter_images[f] = img
 
             try:
                 comp_img, log = composite.compose(
@@ -369,11 +419,10 @@ def run(
             cache[win_label][spec.name] = comp_img
             log_cache[win_label]["composites"][spec.name] = log
 
-    # ── Global luminance normalization: per composite spec across all windows ───
-    # Normalises brightness of same-type composites so step10 grid rows are
-    # visually consistent.  Only meaningful when multiple windows are present.
+    # ── Pass 2: global normalize + saturation + save ──────────────────────────
+    # Pre-compute global mean luminance per spec for cross-window normalization.
     global_means: Dict[str, Optional[float]] = {}
-    if config.composite.global_normalize and len(cache) > 1:
+    if gn and len(cache) > 1:
         for spec in specs:
             vals = [
                 float(win_comps[spec.name].mean())
@@ -382,7 +431,6 @@ def run(
             ]
             global_means[spec.name] = float(np.mean(vals)) if len(vals) > 1 else None
 
-    # ── Pass 2: normalize + saturation + save ──────────────────────────────────
     all_results: Dict[str, List[Tuple[Optional[Path], str]]] = {}
     total_written = 0
 
@@ -396,7 +444,7 @@ def run(
                 win_results.append((None, spec.name))
                 continue
 
-            # Global luminance scale
+            # Cross-window mean-luminance normalization
             gm = global_means.get(spec.name)
             if gm is not None:
                 frame_lum = float(comp_img.mean())
@@ -406,6 +454,10 @@ def run(
             # Saturation boost (deferred from compose())
             if saturate:
                 comp_img = composite.auto_saturate(comp_img, phigh=sat_phigh, headroom=sat_headroom)
+
+            # Brightness scale
+            if abs(bscale - 1.0) > 1e-6:
+                comp_img = np.clip(comp_img * bscale, 0.0, 1.0).astype(np.float32)
 
             out_path: Optional[Path] = None
             if win_out_dir is not None:

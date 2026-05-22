@@ -57,19 +57,6 @@ class WaveletConfig:
     preview_stretch_enabled: bool = False
     preview_saturation_boost: bool = True   # color camera only (ignored for mono)
 
-    # Step 8 – time-series animation frames (independent from Step 5)
-    # Defaults match master_amounts so existing behaviour is unchanged.
-    # Tune separately if the animation needs gentler/stronger sharpening.
-    series_amounts: List[float] = field(
-        default_factory=lambda: [200.0, 200.0, 200.0, 0.0, 0.0, 0.0]
-    )
-    series_power: float = 1.0
-    series_sharpen_filter: float = 0.0
-    series_denoise_amounts: List[float] = field(
-        default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    )
-    series_filter_type: str = 'gaussian'
-
     # Rectangular border taper before wavelet sharpening (Step 7 and Step 5).
     # Cosine-fades the outermost border_taper_px pixels on all 4 sides to 0,
     # removing de-rotation stacking boundary gradients before wavelet can
@@ -78,15 +65,12 @@ class WaveletConfig:
     # 0 = disabled.  For 280×280 images (background ~44 px), 30 is safe.
     border_taper_px: int = 0
 
-    # Disk-edge feathering factor for sharpen_disk_aware (Steps 6 & 8).
+    # Disk-edge feathering factor for sharpen_disk_aware (Steps 5 & 7).
     # Per-level feather width = 2^L × edge_feather_factor pixels.
     # With pre-fill + disk_expand_px active, kernel contamination is eliminated
     # and the feather only suppresses the de-rotation coverage gradient.
     # 2.0 is typically sufficient when disk_expand_px is set correctly.
     edge_feather_factor: float = 2.0
-
-    # Same as edge_feather_factor but applied only to Step 8 time-series frames.
-    series_edge_feather_factor: float = 2.0
 
     # Extra pixels to expand the disk mask boundary beyond what find_disk_center
     # detects.  find_disk_center uses Otsu thresholding on the contour, which
@@ -122,10 +106,6 @@ class QualityConfig:
     window_frames: int = 3               # Number of frames (filter cycles) per window
     cycle_minutes: float = 3.75          # One filter cycle = 225 s (IR→R→G→B→CH4)
     outlier_sigma: float = 1.5           # Sigma threshold for outlier exclusion
-    n_windows: int = 1                   # Number of windows to find
-    # When True windows may overlap in time; when False each window must be at
-    # least window_minutes away from every other selected window (non-overlapping).
-    allow_overlap: bool = False
     #   Jupiter rotates ~0.6°/min; 13.5 min = ~8° rotation (practical limit ~20°)
 
     @property
@@ -177,10 +157,6 @@ class SatelliteConfig:
     # 2.5 → α≈0.92 at streak endpoints (validated in exp9 on 2026-05-05 Jupiter data).
     composite_coverage_scale: float = 2.5
 
-    # Multi-rate satellite compositing for Step 8 series composite (independent from step04).
-    # When True, each sliding-window stack in Step 8 applies the same exp9 Gaussian blend
-    # before centering and sharpening.  pole_pa is read from step04's derotation_log.json.
-    series_composite_enabled: bool = False
 
 
 # ── Step 4 / 8 / 9: De-rotation ───────────────────────────────────────────────
@@ -251,7 +227,7 @@ class CompositeSpec:
 
 @dataclass
 class CompositeConfig:
-    """Configuration for Step 8 RGB/LRGB compositing."""
+    """Configuration for Step 6 RGB/LRGB compositing."""
     specs: List[CompositeSpec] = field(default_factory=lambda: [
         CompositeSpec("RGB",      R="R",   G="G", B="B"),
         CompositeSpec("IR-RGB",   R="R",   G="G", B="B",  L="IR"),
@@ -273,69 +249,25 @@ class CompositeConfig:
     saturation_phigh: float = 99.5    # percentile of disk chroma used as reference
     saturation_headroom: float = 0.15 # p(phigh) targets headroom × 127 (Lab max chroma)
 
-    # Step 6 – cross-window luminance normalization (mean-matching, per composite spec).
-    # When True and multiple windows exist, each composite is scaled so its mean
-    # brightness matches the global average across all windows.  Applied per composite
-    # type (e.g. RGB windows are normalized against other RGB windows) to preserve
-    # relative brightness differences between composite variants.
-    # No-op when only one window is present.
+    # Output brightness scale applied to every composite.
+    # Simple multiplication: comp *= brightness_scale.  1.0 = no change.
+    brightness_scale: float = 1.0
+
+    # Cross-window mean-luminance normalization (Step 6).
+    # After compositing, each window's composite is scaled so all windows share
+    # the same mean luminance.  Eliminates inter-window flicker in GIF output.
     global_normalize: bool = True
 
-    # Step 8 – series-specific stretch / saturation (independent from Step 6)
-    series_stretch_enabled: bool = False
-    series_saturation_boost: bool = True
-    # Step 8 color camera: cross-frame luminance normalization (mean-matching)
-    # Scales each frame so its mean luminance matches the global mean across all
-    # frames.  Preserves color ratios (only scalar scale applied to all channels).
-    series_global_normalize_color: bool = True
-
-    # Output brightness scale applied to every Step 8 series composite.
-    # Simple multiplication: comp *= series_scale.  1.0 = no change.
-    # 0.80 makes the result slightly darker while preserving the pixel
-    # distribution (no clipping or stretching of any channel).
-    series_scale: float = 0.80
-
-    # Global per-filter normalisation across ALL series frames (Step 8).
-    # When True a lightweight first pass reads all Step 7 PNGs, computes the
-    # 0.5th–99.5th percentile lo/hi for every filter across every frame, and
-    # applies that single mapping before compositing.  This ensures that the
-    # same filter has the same brightness range in every frame, eliminating
-    # frame-to-frame colour shifts caused by varying atmospheric transparency.
-    # Recommended: True when producing animated GIFs (Step 9).
-    global_filter_normalize: bool = True
-
-    # Duration of one complete filter cycle in Step 8 (seconds).
-    # Used to group raw TIF frames into per-cycle sets before compositing.
-    # Typical value: 270 s (45 s × 5 filters + overhead).
-    # Kept separate from QualityConfig.cycle_minutes (Step 3) so the two
-    # steps can be tuned independently.
-    cycle_seconds: float = 225.0
-
-    # Sliding-window stacking (Step 8).
-    # stack_window_n: number of consecutive filter cycles to stack per output
-    #   frame.  1 = single-frame mode (current behaviour).  Odd values keep the
-    #   centre frame as the reference time.  Recommended: 1–5.
-    # stack_min_quality: normalised quality threshold [0, 1].  Frames whose
-    #   Laplacian-variance score (computed from the Step 7 wavelet PNG) is below
-    #   this fraction of the per-filter maximum are excluded from the stack.
-    #   0.0 = accept all frames.
-    stack_window_n: int = 3
-    stack_min_quality: float = 0.05
-
-    # Save per-filter monochrome frames alongside the composites (Step 8).
-    # When True each filter's de-rotated grayscale image is saved as
-    # {filter}_mono.png in every frame directory, and Step 9 will also
-    # produce {filter}_animation.gif / .apng for each filter.
-    save_mono_frames: bool = False
-
-    # Series-specific composite specs (Step 8).  When set, these override
-    # `specs` for Step 8 time-series compositing, allowing different channel
-    # mappings from the Step 6 master composites.  None = use `specs`.
-    series_specs: Optional[List[CompositeSpec]] = None
+    # Global per-filter disk-median normalization across ALL windows (Step 6).
+    # When True a first pass computes the planet-disk median for every filter
+    # in every window, then scales each (filter, window) by global_median /
+    # window_median.  This corrects inter-window atmospheric transparency
+    # differences before compositing without stretching the dynamic range.
+    global_filter_normalize: bool = False
 
 
 
-# ── Step 10: Summary contact sheet ────────────────────────────────────────────
+# ── Step 09: Summary contact sheet ────────────────────────────────────────────
 
 @dataclass
 class SummaryGridConfig:
@@ -366,13 +298,19 @@ class SummaryGridConfig:
     time_format: str = "%H%M"     # strftime format for row labels (e.g. "1233")
     save_analytic: bool = True             # per-window analytic PNG (mono only)
     analytic_filter_cell_ratio: float = 0.65  # filter cell size relative to cell_size_px
+    # Top-N window selection for the summary grid.
+    # 0 = show all windows; N > 0 = show only the N highest-quality windows.
+    n_best_windows: int = 0
+    # When True, selected top-N windows may overlap in time.
+    # When False (default), already-selected window times are excluded.
+    allow_overlap: bool = False
 
 
 # ── Step 09: Animated GIF ─────────────────────────────────────────────────────
 
 @dataclass
 class GifConfig:
-    """Parameters for Step 9 animated GIF output."""
+    """Parameters for Step 8 animated GIF output."""
     fps: float = 6.0              # playback speed (frames per second)
     loop: int = 0                 # 0 = infinite loop
     resize_factor: float = 1.0   # downscale factor for smaller file (1.0 = no resize)
@@ -690,11 +628,11 @@ class LuckyStackConfig:
             self.ap_step = self.ap_size // 2
 
 
-# ── Step 1: PIPP preprocessing ────────────────────────────────────────────────
+# ── Step 1: SER Crop preprocessing ───────────────────────────────────────────
 
 @dataclass
-class PippConfig:
-    """Frame rejection and ROI crop parameters (PIPP-style preprocessing).
+class SerCropConfig:
+    """Frame rejection and ROI crop parameters for SER preprocessing.
 
     Applies to raw SER files before any stacking or sharpening.
 
@@ -713,7 +651,7 @@ class PippConfig:
     aspect_ratio_limit: float = 0.2
     straight_edge_limit: float = 0.5
     # Parallel file processing: number of SER files processed simultaneously.
-    # Capped at 4 in step01_pipp.py regardless of this value (I/O contention).
+    # Capped at 4 in ser_crop.py regardless of this value (I/O contention).
     # 0 = auto (min(4, cpu_count)); 1 = sequential.
     n_workers: int = 0
 
@@ -726,7 +664,7 @@ class PipelineConfig:
     ser_input_dir: Path = field(default_factory=lambda: Path("/data/astro_test/260402"))
     input_dir: Path = field(default_factory=lambda: Path("/data/astro_test/AS_P25"))
     output_base_dir: Path = field(default_factory=lambda: Path("/data/astro_test/output"))
-    # When set, step01_pipp writes here instead of output_base_dir/step01_pipp/
+    # When set, ser_crop writes here instead of output_base_dir/step01_ser_crop/
     step01_output_dir: Optional[Path] = None
     # When set, step02 reads SER files from here (GUI panel choice, highest priority)
     step02_ser_dir: Optional[Path] = None
@@ -736,19 +674,18 @@ class PipelineConfig:
     step07_output_dir: Optional[Path] = None
 
     # ── Step save flags ────────────────────────────────────────────────────────
-    save_step01: bool = True   # PIPP-processed SER files
+    save_step01: bool = True   # SER Crop output files
     save_step02: bool = True   # Lucky-stacked TIF files
     save_step03: bool = True   # Quality scores CSV + ranked file list
     save_step04: bool = True   # De-rotated master TIFs per filter
     save_step05: bool = True   # Wavelet-sharpened master PNGs
     save_step06: bool = True   # RGB / IR-RGB / CH4-G-IR composites
     save_step07: bool = True   # Wavelet preview PNGs
-    save_step08: bool = True   # RGB composites per time-series set
-    save_step09: bool = True   # Animated GIF
-    save_step10: bool = True   # Summary contact sheet
+    save_step08: bool = True   # Animated GIF
+    save_step09: bool = True   # Summary contact sheet
 
     # ── Sub-configs ────────────────────────────────────────────────────────────
-    pipp: PippConfig = field(default_factory=PippConfig)
+    ser_crop: SerCropConfig = field(default_factory=SerCropConfig)
     lucky_stack: LuckyStackConfig = field(default_factory=LuckyStackConfig)
     wavelet: WaveletConfig = field(default_factory=WaveletConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)

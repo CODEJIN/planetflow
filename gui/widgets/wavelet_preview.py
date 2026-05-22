@@ -74,7 +74,7 @@ class _Worker(QObject):
 
             working = orig
             if self._color_correct and orig.ndim == 3:
-                from pipeline.steps.step06_rgb_composite import _auto_color_correct
+                from pipeline.steps.rgb_composite import _auto_color_correct
                 working, _ = _auto_color_correct(orig)
 
             if self._auto_params or self._edge_feather_factor > 0.0:
