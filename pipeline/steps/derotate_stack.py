@@ -28,6 +28,7 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from pipeline.config import PipelineConfig
@@ -762,10 +763,26 @@ def _calibrate_warp_scale(
     polar_eq = float(np.clip(semi_b / max(semi_a, 1.0), 0.85, 1.0))
     dt = (rows[-1]["timestamp"] - rows[0]["timestamp"]).total_seconds()
 
+    # High-pass filter to remove limb darkening before NCC.
+    # Raw NCC is dominated by the smooth radial limb-darkening gradient
+    # (which is identical in both frames and gives a high static baseline).
+    # Any warp distorts that gradient → NCC decreases monotonically with scale,
+    # so the minimum scale always wins regardless of belt alignment quality.
+    # Subtracting a wide Gaussian removes the DC/smooth component and lets the
+    # belt features drive the NCC peak at the correct scale (~0.70–0.80).
+    _HP_SIGMA = 30.0
+
+    def _highpass(img: np.ndarray) -> np.ndarray:
+        blurred = cv2.GaussianBlur(img, (0, 0), _HP_SIGMA)
+        return img - blurred
+
+    lum_e_hp = _highpass(lum_e)
+    lum_l_hp = _highpass(lum_l)
+
     h, w = lum_e.shape
     yy, xx = np.mgrid[:h, :w].astype(np.float32)
     disk_mask = ((xx - cx) ** 2 + (yy - cy) ** 2) < (0.7 * semi_a) ** 2
-    ref_px = lum_l[disk_mask].astype(np.float64)
+    ref_px = lum_l_hp[disk_mask].astype(np.float64)
     if ref_px.std() < 1e-6:
         print(f"  [warp_scale] Reference frame featureless → config default ({default})")
         return default
@@ -785,7 +802,7 @@ def _calibrate_warp_scale(
             pole_pa_deg=session_pole_pa,
             polar_equatorial_ratio=polar_eq,
         )
-        pred_px = warped[disk_mask].astype(np.float64)
+        pred_px = _highpass(warped)[disk_mask].astype(np.float64)
         ncc = float(np.corrcoef(ref_px, pred_px)[0, 1]) if pred_px.std() > 1e-6 else 0.0
         ncc_pairs.append((float(scale), ncc))
         if ncc > best_ncc:

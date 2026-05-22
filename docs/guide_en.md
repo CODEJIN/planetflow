@@ -292,7 +292,11 @@ Stacks frames within the optimal windows detected in Step 03, correcting for pla
 
 Step 04 automatically queries the NASA JPL Horizons API to retrieve the planet's north pole angle (NP.ang) at the time of observation. The **Horizons ID** in Global Settings must be set correctly. An internet connection is required.
 
-### 7.3 Satellite / Shadow Composite
+### 7.3 Warp Scale Auto-calibration
+
+The de-rotation warp intensity (warp scale) is automatically calibrated for each window using a high-pass NCC sweep between the earliest and latest frames in the window. A Gaussian high-pass filter (σ=30 px) is applied before cross-correlation to remove limb darkening bias, allowing the belt structure to drive the optimal scale selection. The calibrated value is logged in `derotation_log.json` as `warp_scale` (typically 0.75–0.85 for Jupiter). No user input is required.
+
+### 7.4 Satellite / Shadow Composite
 
 When **Satellite Composite** is checked, Europa and its shadow are handled separately from the planet de-rotation and blended into every filter stack.
 

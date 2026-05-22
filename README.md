@@ -15,7 +15,7 @@ Supports both **monochrome cameras** (filter wheel, multi-filter SER) and **colo
 - **9-step configurable pipeline** with per-step enable/disable controls
 - **Dual camera mode**: monochrome filter-wheel workflow and single color-camera workflow
 - **Frame quality assessment** using Laplacian sharpness scoring
-- **Planetary de-rotation** via JPL Horizons ephemeris (astroquery), with warp-scale auto-tune
+- **Planetary de-rotation** via JPL Horizons ephemeris (astroquery); warp-scale auto-calibrated per window via high-pass NCC sweep; pre-warp disk-center alignment eliminates warp-induced alignment bias
 - **Wavelet sharpening** (à trous algorithm, WaveSharp-compatible 0–500 scale) with limb feather control
 - **Flexible multi-channel compositing**: user-defined RGB/LRGB specs (RGB, IR-RGB, CH4-G-IR, and custom)
 - **Auto white balance + chromatic aberration correction** for color camera mode (Step 06)
@@ -40,7 +40,7 @@ Supports both **monochrome cameras** (filter wheel, multi-filter SER) and **colo
 | 01 | SER Crop | Reject clipped/deformed frames, center-align, crop to square ROI (Optional) |
 | 02 | Lucky Stacking | Per-AP independent patch stacking with NCC alignment and wide Gaussian blending, AS!4-compatible AP grid, σ-clip (Optional) |
 | 03 | Quality Assessment | Score each TIF; enumerate all time windows across all filters |
-| 04 | De-rotation Stack | Spherical-warp de-rotation + quality-weighted mean stack; warp-scale auto-tune |
+| 04 | De-rotation Stack | Spherical-warp de-rotation + quality-weighted mean stack; high-pass NCC warp-scale calibration; pre-warp disk-center alignment |
 | 05 | Wavelet Master | Final wavelet sharpening on de-rotated master stacks with limb feathering |
 | 06 | RGB Composite | User-defined multi-channel composites per window; filter normalise + brightness scale; auto WB+CA for color mode |
 | 07 | Wavelet Preview | Apply wavelet sharpening to individual TIF stacks; export per-filter PNGs (Optional) |

@@ -321,11 +321,15 @@ Disk detection from reference frame (shared across entire window)
 NP.ang lookup (bundled table → user cache → live Horizons API)
     │
     ▼
+Warp scale auto-calibration (high-pass NCC sweep: earliest vs latest frame, σ=30 px)
+    │
+    ▼
 Per frame in window:
+    ├─ Disk center detected from raw frame → store pre-warp shift (dx, dy)
     ├─ Observation time Δt → longitude displacement Δλ_rad
     ├─ Oblate spheroid depth calculation → per-pixel drift
     ├─ remap (CUBIC interior / LINEAR limb, 12px cosine feather)
-    └─ Sub-pixel alignment (limb center → fallback: phase correlation)
+    └─ Sub-pixel alignment (pre-warp center → fallback: limb center → phase correlation)
     │
     ▼
 Quality-weighted accumulation → master TIF output
@@ -338,7 +342,7 @@ Quality-weighted accumulation → master TIF output
 | **Min Quality Threshold** | 0.05 | Frames with `norm_score < threshold` are excluded from stacking accumulation |
 | **Normalize Brightness** | Off | Normalizes each frame's brightness to match the reference frame before stacking. Use when inter-frame brightness variation is large |
 
-> **Warp Scale** (config-only): The spherical warp intensity multiplier (`drift = warp_scale × Δλ_rad × depth(x,y)`) is fixed at **0.80** in the GUI and configurable only via `config.py → DerotationConfig.warp_scale`. Theoretical value is 1.0; 0.80 is the experimentally optimal value for Jupiter under typical atmospheric blur and plate-scale uncertainty.
+> **Warp Scale** (auto-calibrated per window): The spherical warp intensity multiplier (`drift = warp_scale × Δλ_rad × depth(x,y)`) is automatically determined for each window via high-pass NCC sweep (see *Warp Scale Auto-calibration* below). Typically **0.75–0.85** for Jupiter. A fallback value can be set in `config.py → DerotationConfig.warp_scale` but is not used when auto-calibration succeeds.
 
 ### Internal Fixed Values
 
@@ -369,6 +373,50 @@ drift  = warp_scale × Δλ_rad × depth
 map_x  = x − drift × cos(pole_pa_rad)
 map_y  = y − drift × sin(pole_pa_rad)
 ```
+
+### Warp Scale Auto-calibration (NCC Sweep)
+
+**Source**: `pipeline/steps/derotate_stack.py` → `_calibrate_warp_scale()`
+
+The optimal `warp_scale` is found automatically for each window by sweeping over candidate values and selecting the one that maximizes normalized cross-correlation (NCC) between a de-rotation-predicted early frame and the actual late frame.
+
+**Why raw NCC fails**: The raw NCC is dominated by the smooth, radially-symmetric limb darkening gradient. Any warp distorts that gradient, so NCC decreases monotonically with increasing scale regardless of how well the belt structures align — the minimum scale always "wins." Running the sweep on raw frames therefore always returns `scale_min`.
+
+**Fix — Gaussian high-pass filter**: Before computing NCC, subtract a wide Gaussian blur (σ=30 px) from both frames. This removes the DC/low-frequency limb darkening component and leaves only fine-scale atmospheric belt and zone structures to drive the correlation peak at the correct scale.
+
+```python
+lum_hp = lum - GaussianBlur(lum, sigma=30)
+```
+
+**Procedure**:
+
+1. Select the earliest and latest TIF frames in the window as `frame_early` and `frame_late`
+2. Apply high-pass filter to both luminance images
+3. Sweep `scale` from 0.50 to 1.10 in 13 steps
+4. For each scale, apply `spherical_derotation_warp(frame_early, dt_total)` to predict `frame_early` at `frame_late`'s time
+5. Compute NCC between the high-pass-filtered predicted and actual frames using only the inner disk (r ≤ 0.7 × semi_a)
+6. Select the `scale` that maximizes NCC
+
+Typical result for Jupiter: **0.75–0.85**. The calibrated value is logged as `warp_scale` in `derotation_log.json`.
+
+### Pre-warp Disk Center Alignment
+
+**Source**: `pipeline/modules/derotation.py` → `derotate_filter()`
+
+After the de-rotation warp, frames must be sub-pixel aligned to correct for seeing-induced disk wobble — random per-frame pointing jitter of ~0–2 px.
+
+**Why post-warp alignment is biased**: The spherical warp redistributes atmospheric brightness — belt and zone features move to new pixel positions near the limb. `find_disk_center` detects the disk center from brightness gradients at the limb boundary. After the warp, limb-adjacent atmospheric features have shifted, so the detected apparent disk center shifts in the same direction as the warp, in proportion to `warp_scale × dt`. Correcting this apparent shift via post-warp `limb_center_align` partially undoes the de-rotation (empirically ~39% cancellation at the outermost frames).
+
+**Fix — pre-warp measurement**: For each frame, `find_disk_center` is called on the raw luminance image *before* applying the warp. The offset from the reference frame's disk center `(ref_cx − cx_i, ref_cy − cy_i)` is stored. After warping, this pre-warp shift is applied for alignment — it captures only genuine seeing-induced wobble, not warp-induced brightness redistribution.
+
+**Fallback chain** (logged in `derotation_log.json` as `align_method`):
+
+| `align_method` | Source | Condition |
+|---|---|---|
+| `"reference"` | No shift | The reference frame itself |
+| `"pre_warp_center"` | Pre-warp disk center | Normal case |
+| `"limb_center"` | Post-warp limb center alignment | Pre-warp detection failed (semi_a < 5 or exception) |
+| `"phase_correlate"` | Phase correlation | `limb_center` returned zero shift |
 
 ### Why a Shared Disk Center Matters
 

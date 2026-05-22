@@ -1041,6 +1041,11 @@ def derotate_filter(
     warped_images: List[np.ndarray] = []
     weights: List[float] = []
     log_frames: List[dict] = []
+    # Pre-warp disk center shifts: measured from raw frame before any warp is
+    # applied, so the shift is purely seeing-induced wobble and is not
+    # contaminated by the warp-induced brightness redistribution that biases
+    # post-warp limb_center_align toward partially undoing the de-rotation.
+    _pre_warp_shifts: dict = {}   # stem → (dx, dy)
 
     ref_img: Optional[np.ndarray] = None
 
@@ -1056,6 +1061,18 @@ def derotate_filter(
             # Mono mode: flatten to 2-D
             if img.ndim == 3:
                 img = img.mean(axis=2).astype(np.float32)
+
+        # Measure disk center from the raw (pre-warp) frame for later alignment.
+        _raw_lum = _to_luminance(img)
+        try:
+            _cx_i, _cy_i, _semi_i, *_ = find_disk_center(_raw_lum)
+            if _semi_i >= 5:
+                _dx = float(ref_cx - _cx_i)
+                _dy = float(ref_cy - _cy_i)
+                if abs(_dx) <= 15.0 and abs(_dy) <= 15.0:
+                    _pre_warp_shifts[row["stem"]] = (_dx, _dy)
+        except Exception:
+            pass
 
         dt_sec = (row["timestamp"] - t_reference).total_seconds()
         warped = spherical_derotation_warp(
@@ -1091,14 +1108,16 @@ def derotate_filter(
         )
         warped_images = normalize_brightness_to_reference(warped_images, ref_idx)
 
-    # ── Sub-pixel translation alignment (limb-center based) ──────────────────
-    # Primary: ellipse-fit disk center alignment (limb_center_align).
-    # Each warped frame's disk center is measured via ellipse fitting and
-    # shifted to match the reference center (ref_cx, ref_cy).
-    # This directly corrects whole-disk position wobble from atmospheric seeing
-    # without being biased by background noise as phaseCorrelate can be.
-    # Fallback: phaseCorrelate when limb_center_align returns (0, 0) for a
-    # non-reference frame (signals detection failure).
+    # ── Sub-pixel translation alignment (pre-warp center based) ─────────────
+    # Use disk centers measured from raw (pre-warp) frames.
+    # Post-warp limb_center_align is biased: the warp redistributes atmospheric
+    # brightness (belts/zones move), causing find_disk_center to shift in the
+    # same direction as the warp. Correcting that shift partially undoes the
+    # de-rotation (empirically: align_shift ∝ warp_scale × dt, cancelling
+    # ~40% of the warp). Pre-warp measurements capture only genuine
+    # seeing-induced disk wobble and are not contaminated by the warp.
+    # Fallback chain: pre_warp_center → limb_center (post-warp, if pre-warp
+    # detection failed) → phase_correlate (if limb_center also returns zero).
     if align and ref_img is not None and len(warped_images) > 1:
         aligned_images: List[np.ndarray] = []
         ref_lum = _to_luminance(ref_img)
@@ -1108,13 +1127,18 @@ def derotate_filter(
                 frame_log["align_shift_px"] = [0.0, 0.0]
                 frame_log["align_method"] = "reference"
             else:
-                img_lum = _to_luminance(img)
-                dx, dy = limb_center_align(ref_cx, ref_cy, img_lum)
-                method = "limb_center"
-                if dx == 0.0 and dy == 0.0:
-                    # Detection failed — fall back to phaseCorrelate
-                    dx, dy = subpixel_align(ref_lum, img_lum)
-                    method = "phase_correlate"
+                stem = frame_log["stem"]
+                if stem in _pre_warp_shifts:
+                    dx, dy = _pre_warp_shifts[stem]
+                    method = "pre_warp_center"
+                else:
+                    # Pre-warp detection failed — fall back to post-warp limb center
+                    img_lum = _to_luminance(img)
+                    dx, dy = limb_center_align(ref_cx, ref_cy, img_lum)
+                    method = "limb_center"
+                    if dx == 0.0 and dy == 0.0:
+                        dx, dy = subpixel_align(ref_lum, img_lum)
+                        method = "phase_correlate"
                 aligned = apply_shift(img, dx, dy)
                 aligned_images.append(aligned)
                 frame_log["align_shift_px"] = [round(dx, 3), round(dy, 3)]
