@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
         self._session_data: dict[str, Any] = {}
         self._results:      dict[str, Any] = {}
         self._runner: StepRunner | None = None
+        self._running_steps: list[str] = []
         self._step_items:   dict[str, StepItem]  = {}
         self._enabled_steps: dict[str, bool]      = {}
 
@@ -845,6 +846,7 @@ class MainWindow(QMainWindow):
                 if ret != QMessageBox.Yes:
                     return
         config = self.build_config()
+        self._running_steps = [step_id]
         self._runner = StepRunner(config, [step_id], self._results, parent=self)
         self._connect_runner(self._runner)
         self._runner.start()
@@ -915,6 +917,7 @@ class MainWindow(QMainWindow):
                 self._step_items[sid].set_status("skipped")
 
         config = self.build_config()
+        self._running_steps = list(steps)
         self._runner = StepRunner(config, steps, self._results, parent=self)
         self._connect_runner(self._runner)
         self._runner.start()
@@ -1114,6 +1117,9 @@ class MainWindow(QMainWindow):
                 dep = self._step_panels.get("05")
                 if dep and hasattr(dep, "load_session"):
                     dep.load_session(self._session_data)
+                # Standalone Step 04: show NCC warning immediately
+                if len(self._running_steps) == 1:
+                    self._maybe_show_ncc_warning(results)
             # After step 05 completes (wavelet master) → refresh step 06 rgb composite and step 09
             if step_id == "05":
                 for dep_id in ("06", "09"):
@@ -1140,6 +1146,27 @@ class MainWindow(QMainWindow):
                         panel.stop_requested.disconnect(self._runner.abort)
                     except RuntimeError:
                         pass
+        # Run All: show NCC warning after all steps complete (if Step 04 ran)
+        if len(self._running_steps) > 1 and "04" in self._running_steps:
+            self._maybe_show_ncc_warning(self._results.get("04"))
+
+    def _maybe_show_ncc_warning(self, results04: Any) -> None:
+        """Show NCC quality warning if Step 04 confidence is below threshold."""
+        if not results04:
+            return
+        measured = results04.get("derot_confidence_measured", False)
+        ncc = results04.get("derot_ncc_confidence", 1.0)
+        if not measured:
+            return
+        _NCC_WARN_THRESHOLD = 0.80
+        if ncc >= _NCC_WARN_THRESHOLD:
+            return
+        body = S("msg.ncc_warning.body").format(ncc=ncc)
+        QMessageBox.warning(
+            self,
+            S("msg.ncc_warning.title"),
+            body,
+        )
 
     def _on_cancelled(self) -> None:
         """Runner finished after a stop request — confirm to all visible panels."""

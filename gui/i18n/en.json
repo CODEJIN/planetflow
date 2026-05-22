@@ -397,5 +397,8 @@
   "bsp.ok":           "OK",
   "bsp.auto_download": "auto-downloaded on first use",
   "bsp.offline":      "Network connection required",
-  "bsp.no_skyfield":  "pip install skyfield required"
+  "bsp.no_skyfield":  "pip install skyfield required",
+  "msg.ncc_warning.title": "De-rotation Quality Warning",
+  "msg.ncc_warning.body": "De-rotation NCC confidence is low:\n\n  NCC = {ncc:.3f} < 0.8\n\nBelt structure may be too faint or blurry for reliable de-rotation at the current window size.\n\nConsider reducing the Window (frames) setting in Step 3 and re-running from Step 3.",
+  "msg.ncc_warning.dismiss": "OK"
 }

@@ -683,30 +683,49 @@ def _detect_tracker_flip_ns(
         return None, 0.0
 
 
-def _calibrate_warp_scale(
+def _measure_derot_confidence(
     windows: List[dict],
     config: "PipelineConfig",
     session_pole_pa: float,
     flip_ns: bool,
     scale_min: float = 0.50,
     scale_max: float = 1.20,
-    n_steps: int = 8,
-    min_rotation_deg: float = 5.0,
-) -> float:
-    """Auto-calibrate warp_scale via NCC sweep on the longest time-span window.
+    n_steps: int = 13,
+    min_rotation_deg: float = 3.0,
+) -> dict:
+    """Measure de-rotation confidence via high-pass NCC sweep.
 
-    Applies the spherical warp as a forward prediction (early frame → late frame)
-    across a grid of scale values and picks the value that maximises NCC inside
-    the inner disk (0.7R).  Falls back to config.derotation.warp_scale when the
-    session rotation is insufficient for reliable measurement.
+    warp_scale is a physical constant (empirically calibrated on best-seeing data,
+    default 0.80) and is NOT derived from this sweep.  Instead the sweep answers:
+    "given that we apply config.derotation.warp_scale, how much does the belt
+    structure actually support the de-rotation?"
 
-    Forward prediction uses flip_direction = not flip_ns (opposite of de-rotation)
-    because de-rotation undoes the drift while forward-prediction replicates it.
+    Returns a dict:
+        ncc_at_config_scale : NCC at config.derotation.warp_scale — primary
+                              confidence metric.  Low (<0.3) means belt structure
+                              is too blurry/absent for reliable de-rotation;
+                              consider using a shorter window.
+        estimated_peak_scale: scale where NCC peaks — diagnostic only, NOT used
+                              to set warp_scale.
+        best_ncc            : maximum NCC across sweep — diagnostic.
+        rotation_deg        : rotation span used for measurement.
+        measured            : False if measurement could not be performed.
+
+    Forward prediction uses flip_direction = not flip_ns because de-rotation undoes
+    the drift while forward-prediction replicates it.
     """
-    print("  [warp_scale] Auto-calibrating via NCC sweep…")
-    default = config.derotation.warp_scale
+    config_scale = config.derotation.warp_scale
+    fallback = {
+        "ncc_at_config_scale":  0.0,
+        "estimated_peak_scale": config_scale,
+        "best_ncc":             0.0,
+        "rotation_deg":         0.0,
+        "measured":             False,
+    }
 
-    # Select window with the longest time span (same criterion as flip_ns detection)
+    print("  [derot_conf] Measuring de-rotation confidence via NCC sweep…")
+
+    # Select the window with the longest time span.
     best_win: Optional[Tuple[dict, str]] = None
     best_span = 0.0
     for win in windows:
@@ -727,26 +746,26 @@ def _calibrate_warp_scale(
             best_win = (win, filt)
 
     if best_win is None:
-        print(f"  [warp_scale] No suitable window → config default ({default})")
-        return default
+        print("  [derot_conf] No suitable window → confidence unmeasured")
+        return fallback
 
     win, filt = best_win
     period_sec = config.derotation.rotation_period_hours * 3600.0
     rotation_deg = best_span / period_sec * 360.0
     if rotation_deg < min_rotation_deg:
         print(
-            f"  [warp_scale] Rotation {rotation_deg:.1f}° < {min_rotation_deg}° "
-            f"→ config default ({default})"
+            f"  [derot_conf] Rotation {rotation_deg:.1f}° < {min_rotation_deg}° "
+            "→ confidence unmeasured"
         )
-        return default
+        return {**fallback, "rotation_deg": rotation_deg}
 
     rows = sorted(win["per_filter"][filt]["included"], key=lambda r: r["timestamp"])
     try:
         raw_e = image_io.read_tif(rows[0]["path"])
         raw_l = image_io.read_tif(rows[-1]["path"])
     except Exception as exc:
-        warnings.warn(f"  [warp_scale] Frame read failed: {exc} → config default")
-        return default
+        warnings.warn(f"  [derot_conf] Frame read failed: {exc}")
+        return fallback
 
     def _lum(raw: np.ndarray) -> np.ndarray:
         img = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
@@ -757,65 +776,85 @@ def _calibrate_warp_scale(
 
     cx, cy, semi_a, semi_b, _ = find_disk_center(lum_e)
     if semi_a < 5:
-        print(f"  [warp_scale] Disk detection failed → config default ({default})")
-        return default
+        print("  [derot_conf] Disk detection failed → confidence unmeasured")
+        return fallback
 
     polar_eq = float(np.clip(semi_b / max(semi_a, 1.0), 0.85, 1.0))
     dt = (rows[-1]["timestamp"] - rows[0]["timestamp"]).total_seconds()
 
-    # High-pass filter to remove limb darkening before NCC.
-    # Raw NCC is dominated by the smooth radial limb-darkening gradient
-    # (which is identical in both frames and gives a high static baseline).
-    # Any warp distorts that gradient → NCC decreases monotonically with scale,
-    # so the minimum scale always wins regardless of belt alignment quality.
-    # Subtracting a wide Gaussian removes the DC/smooth component and lets the
-    # belt features drive the NCC peak at the correct scale (~0.70–0.80).
+    # High-pass filter (σ=30 px) removes limb darkening before NCC.
+    # Without it, the smooth radial limb-darkening gradient dominates and NCC
+    # decreases monotonically with scale, so scale=0 always wins.
     _HP_SIGMA = 30.0
 
     def _highpass(img: np.ndarray) -> np.ndarray:
-        blurred = cv2.GaussianBlur(img, (0, 0), _HP_SIGMA)
-        return img - blurred
-
-    lum_e_hp = _highpass(lum_e)
-    lum_l_hp = _highpass(lum_l)
+        return img - cv2.GaussianBlur(img, (0, 0), _HP_SIGMA)
 
     h, w = lum_e.shape
     yy, xx = np.mgrid[:h, :w].astype(np.float32)
     disk_mask = ((xx - cx) ** 2 + (yy - cy) ** 2) < (0.7 * semi_a) ** 2
-    ref_px = lum_l_hp[disk_mask].astype(np.float64)
+    ref_px = _highpass(lum_l)[disk_mask].astype(np.float64)
     if ref_px.std() < 1e-6:
-        print(f"  [warp_scale] Reference frame featureless → config default ({default})")
-        return default
+        print("  [derot_conf] Reference frame featureless → confidence unmeasured")
+        return fallback
 
-    # Forward prediction: replicate the drift (opposite of de-rotation direction)
+    # Forward prediction replicates the drift (opposite of de-rotation direction).
     forward_flip = not flip_ns
-    best_scale = default
+
+    # Sweep points: uniform grid + config_scale explicitly included.
+    sweep_scales = sorted(set(
+        [float(s) for s in np.linspace(scale_min, scale_max, n_steps)]
+        + [config_scale]
+    ))
+
     best_ncc = -1.0
+    estimated_peak_scale = config_scale
+    ncc_at_config_scale = 0.0
     ncc_pairs: List[Tuple[float, float]] = []
 
-    for scale in np.linspace(scale_min, scale_max, n_steps):
+    for scale in sweep_scales:
         warped = spherical_derotation_warp(
             lum_e, dt, cx, cy, semi_a,
             period_hours=config.derotation.rotation_period_hours,
-            scale=float(scale),
+            scale=scale,
             flip_direction=forward_flip,
             pole_pa_deg=session_pole_pa,
             polar_equatorial_ratio=polar_eq,
         )
         pred_px = _highpass(warped)[disk_mask].astype(np.float64)
         ncc = float(np.corrcoef(ref_px, pred_px)[0, 1]) if pred_px.std() > 1e-6 else 0.0
-        ncc_pairs.append((float(scale), ncc))
+        ncc_pairs.append((scale, ncc))
         if ncc > best_ncc:
             best_ncc = ncc
-            best_scale = float(scale)
+            estimated_peak_scale = scale
+        if abs(scale - config_scale) < 1e-9:
+            ncc_at_config_scale = ncc
 
     ncc_str = "  ".join(f"{s:.2f}:{n:.4f}" for s, n in ncc_pairs)
     print(
-        f"  [warp_scale] NCC sweep ({n_steps} steps, Δt={dt:.0f}s, "
+        f"  [derot_conf] NCC sweep ({len(sweep_scales)} pts, Δt={dt:.0f}s, "
         f"{rotation_deg:.1f}°, {filt}):\n    {ncc_str}"
     )
-    print(f"  [warp_scale] → {best_scale:.3f}  (NCC={best_ncc:.4f}, config={default})")
-    return best_scale
+    print(
+        f"  [derot_conf] config_scale={config_scale:.2f}  "
+        f"NCC@config={ncc_at_config_scale:.4f}  "
+        f"peak_scale={estimated_peak_scale:.3f}  best_NCC={best_ncc:.4f}"
+    )
+
+    if ncc_at_config_scale < 0.30:
+        print(
+            f"  [derot_conf] WARNING: NCC={ncc_at_config_scale:.3f} at scale={config_scale:.2f} "
+            "is low — belt structure may be too blurry for reliable de-rotation. "
+            "Consider using a shorter window in Step 03."
+        )
+
+    return {
+        "ncc_at_config_scale":  ncc_at_config_scale,
+        "estimated_peak_scale": estimated_peak_scale,
+        "best_ncc":             best_ncc,
+        "rotation_deg":         rotation_deg,
+        "measured":             True,
+    }
 
 
 def run(
@@ -875,8 +914,14 @@ def run(
             print(f"  [tracker] flip_ns = {tracker_flip_ns} "
                   f"(fallback to derot_flip — belt detection inconclusive)")
 
-    # ── Auto-calibrate warp_scale ──────────────────────────────────────────────
-    warp_scale = _calibrate_warp_scale(windows, config, session_pole_pa, derot_flip)
+    # ── warp_scale: fixed at config value (empirically calibrated from good-seeing data) ──
+    # The physical rotation rate does not change with seeing; the NCC sweep result
+    # is unreliable when belt structures are blurry (returns low scale instead of
+    # the true ~0.80).  Confidence is measured separately and logged for diagnostics.
+    warp_scale = config.derotation.warp_scale
+
+    # ── De-rotation confidence (diagnostic, does not change warp_scale) ────────
+    derot_conf = _measure_derot_confidence(windows, config, session_pole_pa, derot_flip)
 
     # ── SatelliteTracker ───────────────────────────────────────────────────────
     tracker = None
@@ -902,26 +947,38 @@ def run(
 
     # ── Process each window ────────────────────────────────────────────────────
     all_results: List[dict] = []
+    _conf_ncc  = derot_conf["ncc_at_config_scale"]
+    _conf_peak = derot_conf["estimated_peak_scale"]
+    _conf_ok   = derot_conf["measured"]
+
     summary_lines: List[str] = [
         "=== Step 4 De-rotation Summary ===",
         "",
-        f"  pole_pa         : {session_pole_pa:.2f}°",
-        f"  warp_scale      : {warp_scale:.4f}  (auto-calibrated)",
-        f"  derot_flip      : {derot_flip}",
-        f"  tracker_flip_ns : {tracker_flip_ns}",
-        f"  ncc_flip_false  : {_ncc_f:.4f}",
-        f"  ncc_flip_true   : {_ncc_t:.4f}",
+        f"  pole_pa          : {session_pole_pa:.2f}°",
+        f"  warp_scale       : {warp_scale:.4f}  (config fixed)",
+        (
+            f"  derot_confidence : {_conf_ncc:.4f}  "
+            f"(NCC@scale={warp_scale:.2f};  est. peak={_conf_peak:.3f})"
+            if _conf_ok else
+            f"  derot_confidence : unmeasured"
+        ),
+        f"  derot_flip       : {derot_flip}",
+        f"  tracker_flip_ns  : {tracker_flip_ns}",
+        f"  ncc_flip_false   : {_ncc_f:.4f}",
+        f"  ncc_flip_true    : {_ncc_t:.4f}",
         "",
     ]
 
     session_log = {
-        "pole_pa_deg":           session_pole_pa,
-        "warp_scale_calibrated": warp_scale,
-        "warp_scale_config":     config.derotation.warp_scale,
-        "derot_flip":            derot_flip,
-        "tracker_flip_ns":       tracker_flip_ns,
-        "ncc_flip_false":        _ncc_f,
-        "ncc_flip_true":         _ncc_t,
+        "pole_pa_deg":             session_pole_pa,
+        "warp_scale":              warp_scale,
+        "derot_ncc_confidence":    _conf_ncc,
+        "derot_estimated_scale":   _conf_peak,
+        "derot_confidence_valid":  _conf_ok,
+        "derot_flip":              derot_flip,
+        "tracker_flip_ns":         tracker_flip_ns,
+        "ncc_flip_false":          _ncc_f,
+        "ncc_flip_true":           _ncc_t,
     }
 
     n_windows = len(windows)
@@ -1055,8 +1112,13 @@ def run(
     print(summary_text)
     if out_base is not None:
         txt_path = out_base / "derotation_summary.txt"
-        with open(txt_path, "w") as f:
+        with open(txt_path, "w", encoding="utf-8") as f:
             f.write(summary_text)
         print(f"  → {txt_path}")
 
-    return {"windows": all_results}
+    return {
+        "windows":                  all_results,
+        "derot_ncc_confidence":     _conf_ncc,
+        "derot_confidence_measured": _conf_ok,
+        "session_pole_pa":          session_pole_pa,
+    }

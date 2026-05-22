@@ -130,7 +130,7 @@ def _save_csv(scores: dict, out_dir: Path) -> None:
     if not rows:
         return
     fieldnames = list(rows[0].keys())
-    with open(csv_path, "w", newline="") as f:
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
@@ -144,7 +144,7 @@ def _save_per_filter_rankings(scores: dict, out_dir: Path) -> None:
         csv_path = out_dir / f"{filt}_ranking.csv"
         fieldnames = ["rank", "norm_score", "raw_score", "laplacian",
                       "tenengrad", "norm_variance", "timestamp", "stem"]
-        with open(csv_path, "w", newline="") as f:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames,
                                     extrasaction="ignore")
             writer.writeheader()
