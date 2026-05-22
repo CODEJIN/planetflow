@@ -64,6 +64,46 @@ def _gaussian_mask(shape: Tuple[int, int], cx: float, cy: float, sigma: float) -
     return np.exp(-dist_sq / (2.0 * sigma ** 2)).astype(np.float32)
 
 
+def _capsule_gaussian_mask(
+    shape: Tuple[int, int],
+    traj_xy: List[Tuple[float, float]],
+    sigma_perp: float,
+) -> np.ndarray:
+    """Capsule-shaped Gaussian: exp(-min_dist_to_polyline² / 2σ²).
+
+    Area grows linearly with smearing length (vs quadratically for circular),
+    keeping the blend region tight along the trajectory axis.
+    """
+    H, W = shape
+    ys, xs = np.mgrid[0:H, 0:W]
+    xs_f = xs.astype(np.float32)
+    ys_f = ys.astype(np.float32)
+
+    if len(traj_xy) == 1:
+        dx = xs_f - traj_xy[0][0]
+        dy = ys_f - traj_xy[0][1]
+        return np.exp(-(dx ** 2 + dy ** 2) / (2.0 * sigma_perp ** 2)).astype(np.float32)
+
+    min_dist_sq = np.full((H, W), np.inf, dtype=np.float32)
+    for i in range(len(traj_xy) - 1):
+        p0 = np.array(traj_xy[i],     dtype=np.float64)
+        p1 = np.array(traj_xy[i + 1], dtype=np.float64)
+        seg = p1 - p0
+        seg_len_sq = float(np.dot(seg, seg))
+        dx = xs_f - p0[0]
+        dy = ys_f - p0[1]
+        if seg_len_sq < 1e-6:
+            dist_sq = dx ** 2 + dy ** 2
+        else:
+            t = np.clip((dx * seg[0] + dy * seg[1]) / seg_len_sq, 0.0, 1.0)
+            cx_s = (p0[0] + t * seg[0]).astype(np.float32)
+            cy_s = (p0[1] + t * seg[1]).astype(np.float32)
+            dist_sq = (xs_f - cx_s) ** 2 + (ys_f - cy_s) ** 2
+        min_dist_sq = np.minimum(min_dist_sq, dist_sq)
+
+    return np.exp(-min_dist_sq / (2.0 * sigma_perp ** 2)).astype(np.float32)
+
+
 def _apparent_radius_px(moon_name: str, t_ref, plate_scale: float) -> float:
     """Satellite apparent radius in pixels at t_ref (Skyfield + LTT correction)."""
     from pipeline.modules.satellite_tracker import _load_skyfield_kernels, _MOON_SF_ID
@@ -157,11 +197,20 @@ def _blend_one(
     sat_stack: Optional[np.ndarray],
     ref_pos,
     sigma: float,
+    traj_xy: Optional[List[Tuple[float, float]]] = None,
+    mask_shape: str = "circular",
 ) -> np.ndarray:
-    """Blend a single satellite or shadow stack into the planet image."""
+    """Blend a single satellite or shadow stack into the planet image.
+
+    mask_shape="circular": isotropic Gaussian at ref_pos with given sigma.
+    mask_shape="capsule":  Gaussian along traj_xy polyline; sigma = sigma_perp.
+    """
     if sat_stack is None or ref_pos is None or not ref_pos.on_disk:
         return planet
-    alpha = _gaussian_mask(planet.shape[:2], ref_pos.x_px, ref_pos.y_px, sigma)
+    if mask_shape == "capsule" and traj_xy:
+        alpha = _capsule_gaussian_mask(planet.shape[:2], traj_xy, sigma)
+    else:
+        alpha = _gaussian_mask(planet.shape[:2], ref_pos.x_px, ref_pos.y_px, sigma)
     if planet.ndim == 3:
         alpha = alpha[:, :, np.newaxis]
     return np.clip((1.0 - alpha) * planet + alpha * sat_stack, 0.0, 1.0)
@@ -288,6 +337,7 @@ def _apply_satellite_composite(
     t_center = window["center_time"]
     t_center_naive = t_center.replace(tzinfo=None) if t_center.tzinfo else t_center
     coverage_scale = config.satellite.composite_coverage_scale
+    mask_shape     = config.satellite.composite_mask_shape
 
     # ── Reference filter: plate_scale only ────────────────────────────────────
     ref_filt = next(
@@ -353,10 +403,16 @@ def _apply_satellite_composite(
                 continue
             positions = body_pos.get(moon_name, [None] * len(time_sorted))
             app_r = _apparent_radius_px(moon_name, t_center_naive, plate_scale)
-            sigma = _compute_sigma_from_motion(moon_name, positions, ref, app_r, coverage_scale)
+            if mask_shape == "capsule":
+                traj_xy = [(p.x_px, p.y_px) for p in positions if p is not None and p.on_disk]
+                sigma = app_r * coverage_scale
+                print(f"      [σ/{moon_name}] apparent_r={app_r:.2f}px  σ_perp={sigma:.2f}px  (capsule)")
+            else:
+                traj_xy = None
+                sigma = _compute_sigma_from_motion(moon_name, positions, ref, app_r, coverage_scale)
             stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
-            composite = _blend_one(composite, stack, ref, sigma)
-            composited.append(f"{moon_name}(σ={sigma:.1f}px)")
+            composite = _blend_one(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            composited.append(f"{moon_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
 
         # Shadow composites — any shadow on disk at t_center
         for shad_name, ref_list in canonical_shad.items():
@@ -366,10 +422,16 @@ def _apply_satellite_composite(
             moon_name = shad_name.replace("_shadow", "")
             positions = shad_pos.get(shad_name, [None] * len(time_sorted))
             app_r = _apparent_radius_px(moon_name, t_center_naive, plate_scale)
-            sigma = _compute_sigma_from_motion(shad_name, positions, ref, app_r, coverage_scale)
+            if mask_shape == "capsule":
+                traj_xy = [(p.x_px, p.y_px) for p in positions if p is not None and p.on_disk]
+                sigma = app_r * coverage_scale
+                print(f"      [σ/{shad_name}] apparent_r={app_r:.2f}px  σ_perp={sigma:.2f}px  (capsule)")
+            else:
+                traj_xy = None
+                sigma = _compute_sigma_from_motion(shad_name, positions, ref, app_r, coverage_scale)
             stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
-            composite = _blend_one(composite, stack, ref, sigma)
-            composited.append(f"{shad_name}(σ={sigma:.1f}px)")
+            composite = _blend_one(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            composited.append(f"{shad_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
 
         if not composited:
             print(f"    [{filt}] no on-disk bodies/shadows — composite skipped")

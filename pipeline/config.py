@@ -157,6 +157,14 @@ class SatelliteConfig:
     # 2.5 → α≈0.92 at streak endpoints (validated in exp9 on 2026-05-05 Jupiter data).
     composite_coverage_scale: float = 2.5
 
+    # Blend mask shape: "circular" (default) or "capsule".
+    # "circular": isotropic Gaussian centered at ref_pos.
+    #             sigma = max(max_motion_px, apparent_r_px) × coverage_scale
+    # "capsule":  Gaussian along trajectory polyline (min-dist-to-polyline).
+    #             sigma_perp = apparent_r_px × coverage_scale  (width fixed)
+    #             Area grows linearly with smearing, not quadratically.
+    composite_mask_shape: str = "capsule"
+
 
 
 # ── Step 4 / 8 / 9: De-rotation ───────────────────────────────────────────────
