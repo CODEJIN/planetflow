@@ -357,7 +357,7 @@ def _apply_satellite_composite(
     plate_scale = tracker.get_plate_scale(ref_sr, t_center_naive)
 
     # ── Per-filter composite ───────────────────────────────────────────────────
-    for filt, (out_path, _) in filter_results.items():
+    for filt, (out_path, flog) in filter_results.items():
         if out_path is None or not out_path.exists():
             continue
         rows = window.get("per_filter", {}).get(filt, {}).get("included", [])
@@ -373,16 +373,6 @@ def _apply_satellite_composite(
         planet_lum = planet.mean(axis=2) if is_color else planet
         disk_cx, disk_cy, disk_sr, _, _ = derotation.find_disk_center(planet_lum)
 
-        # Canonical positions at t_center — determines on_disk and reference coords
-        canonical_body = tracker.get_positions(
-            [t_center_naive], disk_cx, disk_cy, disk_sr,
-            pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
-        )
-        canonical_shad = tracker.get_shadow_positions(
-            [t_center_naive], disk_cx, disk_cy, disk_sr,
-            pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
-        )
-
         time_sorted = sorted(rows, key=lambda r: r["timestamp"])
         t_list = [r["timestamp"] for r in time_sorted]
         body_pos = tracker.get_positions(
@@ -394,15 +384,28 @@ def _apply_satellite_composite(
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
         )
 
+        # ref_pos = satellite/shadow position at exactly window["center_time"].
+        # The planet stack is de-rotated to this exact moment; querying the
+        # ephemeris at the same time eliminates the frame-discretisation error
+        # from the old approach (closest frame timestamp, off by up to half a
+        # frame interval).
+        body_ref = tracker.get_positions(
+            [t_center_naive], disk_cx, disk_cy, disk_sr,
+            pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
+        )
+        shad_ref = tracker.get_shadow_positions(
+            [t_center_naive], disk_cx, disk_cy, disk_sr,
+            pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
+        )
+
         composite = planet if is_color else planet_lum
         composited: List[str] = []
 
-        # Body composites — any moon on disk at t_center
-        for moon_name, ref_list in canonical_body.items():
-            ref = ref_list[0]
-            if not ref.on_disk:
+        # Body composites — any moon with a transit detected in the full-frame query
+        for moon_name, positions in body_pos.items():
+            ref = body_ref.get(moon_name, [None])[0]
+            if ref is None or not ref.on_disk:
                 continue
-            positions = body_pos.get(moon_name, [None] * len(time_sorted))
             app_r = _apparent_radius_px(moon_name, t_center_naive, plate_scale)
             if mask_shape == "capsule":
                 traj_xy = [(p.x_px, p.y_px) for p in positions if p is not None and p.on_disk]
@@ -415,13 +418,12 @@ def _apply_satellite_composite(
             composite = _blend_one(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
             composited.append(f"{moon_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
 
-        # Shadow composites — any shadow on disk at t_center
-        for shad_name, ref_list in canonical_shad.items():
-            ref = ref_list[0]
-            if not ref.on_disk:
+        # Shadow composites — any shadow with a transit detected in the full-frame query
+        for shad_name, positions in shad_pos.items():
+            ref = shad_ref.get(shad_name, [None])[0]
+            if ref is None or not ref.on_disk:
                 continue
             moon_name = shad_name.replace("_shadow", "")
-            positions = shad_pos.get(shad_name, [None] * len(time_sorted))
             app_r = _apparent_radius_px(moon_name, t_center_naive, plate_scale)
             if mask_shape == "capsule":
                 traj_xy = [(p.x_px, p.y_px) for p in positions if p is not None and p.on_disk]
