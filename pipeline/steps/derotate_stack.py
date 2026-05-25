@@ -661,45 +661,9 @@ def _apply_satellite_composite(
             stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
             bg    = _planet_bg_estimate(time_sorted, positions, ref, composite, keep_color=is_color)
             sat_signal = (stack.astype(np.float32) - bg.astype(np.float32)) if (stack is not None and bg is not None) else stack
-            # Build a synthetic clean shadow signal: circular Gaussian at ref_pos with
-            # depth measured from actual sat_signal.  Raw sat_signal has belt-structure
-            # artifacts (NEB dark patches) stronger than the shadow itself; the synthetic
-            # signal replaces that with a clean circular spot at the formula position,
-            # which both smearing removal and _blend_additive can work with correctly.
-            #
-            # Fallback: when depth_val >= 0 the shadow cannot be measured reliably from
-            # sat_signal (translate_stack brighter than bg_estimate due to atmospheric /
-            # calibration mismatch).  Use _blend_one instead to preserve the previous
-            # behaviour and avoid adding a bright artifact at ref_pos.
-            use_synthetic = False
-            sat_signal_clean = None
-            if sat_signal is not None:
-                shape2d = sat_signal.shape[:2]
-                spot_alpha = _gaussian_mask(shape2d, ref.x_px, ref.y_px, app_r)
-                spot_mask  = spot_alpha > np.exp(-0.5)
-                sig_arr = sat_signal.astype(np.float32)
-                if sig_arr.ndim == 3:
-                    depth_ch = np.array(
-                        [np.mean(sig_arr[:, :, c][spot_mask]) for c in range(sig_arr.shape[2])],
-                        dtype=np.float32,
-                    )
-                    if float(np.mean(depth_ch)) < 0:
-                        sat_signal_clean = (spot_alpha[:, :, np.newaxis] * depth_ch[np.newaxis, np.newaxis, :]).astype(np.float32)
-                        use_synthetic = True
-                    _d_log = depth_ch.tolist()
-                else:
-                    depth_val = float(np.mean(sig_arr[spot_mask])) if spot_mask.any() else 0.0
-                    if depth_val < 0:
-                        sat_signal_clean = (spot_alpha * depth_val).astype(np.float32)
-                        use_synthetic = True
-                    _d_log = depth_val
-                print(f"      [{shad_name}] shadow depth at ref_pos: {_d_log}  ({'synthetic' if use_synthetic else 'blend_one fallback'})")
-            if use_synthetic:
-                smearing    = _compute_smearing_map(time_sorted, positions, ref, sat_signal_clean, app_r, warp_params=warp_params)
-                planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
-                composite   = _blend_additive(planet_base, sat_signal_clean, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
-            else:
-                composite = _blend_one(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            smearing    = _compute_smearing_map(time_sorted, positions, ref, sat_signal, app_r, warp_params=warp_params)
+            planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
+            composite   = _blend_additive(planet_base, sat_signal, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
             composited.append(f"{shad_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
 
         if not composited:
