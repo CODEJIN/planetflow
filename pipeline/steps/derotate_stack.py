@@ -105,27 +105,6 @@ def _capsule_gaussian_mask(
     return np.exp(-min_dist_sq / (2.0 * sigma_perp ** 2)).astype(np.float32)
 
 
-def _apparent_radius_px(moon_name: str, t_ref, plate_scale: float) -> float:
-    """Satellite apparent radius in pixels at t_ref (Skyfield + LTT correction)."""
-    from pipeline.modules.satellite_tracker import _load_skyfield_kernels, _MOON_SF_ID
-    r_km = _SATELLITE_RADII_KM.get(moon_name, 1_560.8)
-    sf = _load_skyfield_kernels()
-    if sf is None:
-        return 3.0
-    ts, eph, jup_moons = sf
-    t_sf = ts.utc(t_ref.year, t_ref.month, t_ref.day,
-                  t_ref.hour, t_ref.minute, t_ref.second)
-    earth_km = eph["earth"].at(t_sf).position.km
-    jup_km_t = eph["jupiter barycenter"].at(t_sf).position.km
-    d_EJ_km  = float(np.linalg.norm(jup_km_t - earth_km))
-    lt_days  = d_EJ_km / (299_792.458 * 86_400.0)
-    t_emit   = ts.tt_jd(float(t_sf.tt) - lt_days)
-    sf_id    = _MOON_SF_ID.get(moon_name, moon_name.lower())
-    moon_km  = jup_moons[sf_id].at(t_emit).position.km
-    d_earth_sat = float(np.linalg.norm(moon_km - earth_km))
-    return r_km / d_earth_sat * 206_265.0 / plate_scale
-
-
 def _compute_sigma_from_motion(
     label: str,
     positions: List,
@@ -157,6 +136,29 @@ def _compute_sigma_from_motion(
     return sigma
 
 
+def _apparent_radius_px(moon_name: str, t_ref, plate_scale: float) -> float:
+    """Satellite apparent radius in pixels at t_ref (Skyfield + LTT correction)."""
+    from pipeline.modules.satellite_tracker import _load_skyfield_kernels, _MOON_SF_ID
+    r_km = _SATELLITE_RADII_KM.get(moon_name, 1_560.8)
+    sf = _load_skyfield_kernels()
+    if sf is None:
+        return 3.0
+    ts, eph, jup_moons = sf
+    t_sf = ts.utc(t_ref.year, t_ref.month, t_ref.day,
+                  t_ref.hour, t_ref.minute, t_ref.second)
+    earth_km = eph["earth"].at(t_sf).position.km
+    jup_km_t = eph["jupiter barycenter"].at(t_sf).position.km
+    d_EJ_km  = float(np.linalg.norm(jup_km_t - earth_km))
+    lt_days  = d_EJ_km / (299_792.458 * 86_400.0)
+    t_emit   = ts.tt_jd(float(t_sf.tt) - lt_days)
+    sf_id    = _MOON_SF_ID.get(moon_name, moon_name.lower())
+    moon_km  = jup_moons[sf_id].at(t_emit).position.km
+    d_earth_sat = float(np.linalg.norm(moon_km - earth_km))
+    return r_km / d_earth_sat * 206_265.0 / plate_scale
+
+
+
+
 def _satellite_translate_stack(
     rows: List[dict], positions: List, ref_pos,
     keep_color: bool = False,
@@ -174,6 +176,7 @@ def _satellite_translate_stack(
     from pipeline.modules.derotation import apply_shift, quality_weighted_stack
     if ref_pos is None:
         return None
+
     imgs: List[np.ndarray] = []
     weights: List[float] = []
     for i, row in enumerate(rows):
@@ -186,11 +189,204 @@ def _satellite_translate_stack(
             img = img.mean(axis=2)
         elif img.ndim == 2 and keep_color:
             img = np.stack([img, img, img], axis=2)
-        imgs.append(apply_shift(img, ref_pos.x_px - pos.x_px, ref_pos.y_px - pos.y_px))
+
+        adx, ady = row.get("align_shift_px", (0.0, 0.0))
+        imgs.append(apply_shift(img, ref_pos.x_px - pos.x_px + adx, ref_pos.y_px - pos.y_px + ady))
         weights.append(float(row["norm_score"]))
     if not imgs:
         return None
     return quality_weighted_stack(imgs, weights)
+
+
+def _planet_bg_estimate(
+    rows: List[dict],
+    positions: List,
+    ref_pos,
+    planet_bg: np.ndarray,
+    keep_color: bool = False,
+) -> Optional[np.ndarray]:
+    """Quality-weighted average of planet_bg shifted by the same translate as _satellite_translate_stack.
+
+    Estimates what the planet background looks like inside the satellite stack so
+    that (sat_stack − bg_estimate) isolates the satellite signal from the background.
+    Only on-disk frames (matching _satellite_translate_stack selection) are included.
+    """
+    from pipeline.modules.derotation import apply_shift, quality_weighted_stack
+    if ref_pos is None:
+        return None
+    imgs: List[np.ndarray] = []
+    weights: List[float] = []
+    bg_base = planet_bg
+    if bg_base.ndim == 3 and not keep_color:
+        bg_base = bg_base.mean(axis=2).astype(np.float32)
+    elif bg_base.ndim == 2 and keep_color:
+        bg_base = np.stack([bg_base, bg_base, bg_base], axis=2).astype(np.float32)
+    for i, row in enumerate(rows):
+        pos = positions[i]
+        if pos is None or not pos.on_disk:
+            continue
+        adx, ady = row.get("align_shift_px", (0.0, 0.0))
+        imgs.append(apply_shift(bg_base, ref_pos.x_px - pos.x_px + adx, ref_pos.y_px - pos.y_px + ady))
+        weights.append(float(row["norm_score"]))
+    if not imgs:
+        return None
+    return quality_weighted_stack(imgs, weights)
+
+
+def _compute_smearing_map(
+    rows: List[dict],
+    positions: List,
+    ref_pos,
+    sat_signal: np.ndarray,
+    app_r: float,
+    warp_params: Optional[dict] = None,
+) -> Optional[np.ndarray]:
+    """Estimate the satellite/shadow smearing baked into the planet composite.
+
+    Uses a clean Gaussian template (depth estimated from sat_signal, shape from
+    apparent radius) instead of sat_signal itself as the smearing kernel.
+    This avoids amplifying the raw-vs-derotated noise present in sat_signal.
+
+    warp_params: when provided, uses the de-rotation-warped shadow position
+    for each frame (not the raw position) to place the smearing template.
+    This is critical: the planet de-rotation warp displaces each frame's
+    shadow by drift*(cos_pa, sin_pa) relative to its raw position, so the
+    actual smearing pattern in the planet TIF is at warped positions, not
+    raw positions.  Without this correction the smearing map is placed up to
+    ~10 px away from the actual smear, leaving it un-subtracted and causing a
+    double-shadow artifact when sat_signal is additively blended in.
+    Keys: disk_cx, disk_cy, disk_r, period_hours, warp_scale, pole_pa_deg,
+          polar_eq_ratio (optional, default 1.0), t_reference (datetime).
+
+    Returns a map to subtract from planet before additive blending:
+      planet_base = planet - smearing
+      composite   = planet_base + alpha * sat_signal
+    """
+    from pipeline.modules.derotation import apply_shift
+    if ref_pos is None or sat_signal is None:
+        return None
+    total_quality = sum(
+        float(row["norm_score"])
+        for i, row in enumerate(rows)
+        if positions[i] is not None and positions[i].on_disk
+    )
+    if total_quality == 0:
+        return None
+
+    # Build a clean Gaussian template at ref_pos with sigma = app_r.
+    # Depth is the mean of sat_signal within the satellite/shadow spot.
+    # NOTE: apply_shift clips to [0,1], so we shift the non-negative spot_alpha
+    # and multiply by depth (which may be negative for a shadow) afterward.
+    shape2d = sat_signal.shape[:2]
+    spot_alpha = _gaussian_mask(shape2d, ref_pos.x_px, ref_pos.y_px, app_r)
+    spot_mask  = spot_alpha > np.exp(-0.5)  # pixels within 1σ of ref_pos
+    sig = sat_signal.astype(np.float32)
+    is_color_sig = sig.ndim == 3
+    if is_color_sig:
+        depth = np.array([np.mean(sig[:, :, c][spot_mask]) for c in range(sig.shape[2])],
+                         dtype=np.float32)
+        smearing_shape = sig.shape
+    else:
+        depth = float(np.mean(sig[spot_mask])) if spot_mask.any() else 0.0
+        smearing_shape = shape2d
+
+    # Pre-compute warp displacement parameters for warped-position smearing.
+    _warp_active = False
+    if warp_params is not None:
+        try:
+            _dcx       = float(warp_params["disk_cx"])
+            _dcy       = float(warp_params["disk_cy"])
+            _dr        = float(warp_params["disk_r"])
+            _ph        = float(warp_params["period_hours"])
+            _ws        = float(warp_params["warp_scale"])
+            _pa        = float(warp_params["pole_pa_deg"])
+            _per       = float(warp_params.get("polar_eq_ratio", 1.0))
+            _tref      = warp_params["t_reference"]
+            _period_sec = _ph * 3600.0
+            _cos_pa    = float(np.cos(np.radians(_pa)))
+            _sin_pa    = float(np.sin(np.radians(_pa)))
+            _warp_r    = _dr * 1.05
+            _polar_sq  = (1.0 / max(_per, 1e-3)) ** 2
+            _warp_active = True
+        except (KeyError, TypeError):
+            pass
+
+    # Shadows (depth < 0) are supported when sat_signal is a clean synthetic Gaussian
+    # (not raw sat_signal).  Raw sat_signal had Gaussian cross-talk that inflated the
+    # smearing map, but synthetic sat_signal has no such issue.
+    depth_scalar = float(np.mean(depth)) if is_color_sig else depth
+    if depth_scalar == 0.0:
+        return None
+
+    smearing = np.zeros(smearing_shape, dtype=np.float32)
+    for i, row in enumerate(rows):
+        pos = positions[i]
+        if pos is None or not pos.on_disk:
+            continue
+        q = float(row["norm_score"]) / total_quality
+
+        if _warp_active:
+            # Compute warped position: where this frame's shadow lands in the
+            # planet TIF after de-rotation warp is applied.
+            # output_pos = raw_pos + drift * (cos_pa, sin_pa)
+            t_frame = row["timestamp"]
+            if hasattr(t_frame, "tzinfo") and t_frame.tzinfo is not None:
+                t_frame = t_frame.replace(tzinfo=None)
+            dt_sec      = (t_frame - _tref).total_seconds()
+            delta_lam   = (dt_sec / _period_sec) * 2.0 * np.pi
+            rx          = pos.x_px - _dcx
+            ry          = pos.y_px - _dcy
+            rx_eq       = rx * _cos_pa + ry * _sin_pa
+            ry_pol      = -rx * _sin_pa + ry * _cos_pa
+            depth_sq    = _warp_r ** 2 - rx_eq ** 2 - _polar_sq * ry_pol ** 2
+            frame_depth = float(np.sqrt(max(0.0, depth_sq)))
+            drift       = _ws * delta_lam * frame_depth
+            warped_x    = pos.x_px + drift * _cos_pa
+            warped_y    = pos.y_px + drift * _sin_pa
+            dx          = warped_x - ref_pos.x_px
+            dy          = warped_y - ref_pos.y_px
+        else:
+            dx = pos.x_px - ref_pos.x_px
+            dy = pos.y_px - ref_pos.y_px
+
+        shifted_alpha = apply_shift(spot_alpha, dx, dy)  # [0,1] — no clipping issue
+        if is_color_sig:
+            smearing += q * (shifted_alpha[:, :, np.newaxis] * depth[np.newaxis, np.newaxis, :])
+        else:
+            smearing += q * (shifted_alpha * depth)
+    return smearing
+
+
+def _blend_additive(
+    planet: np.ndarray,
+    sat_signal: Optional[np.ndarray],
+    ref_pos,
+    sigma: float,
+    traj_xy: Optional[List[Tuple[float, float]]] = None,
+    mask_shape: str = "circular",
+) -> np.ndarray:
+    """Blend background-corrected satellite signal into planet additively.
+
+    composite = planet + alpha × sat_signal
+
+    sat_signal = sat_stack − bg_estimate (background already subtracted).
+    Because sat_signal ≈ 0 everywhere except at the satellite/shadow, a large
+    sigma does NOT shift the planet disk: alpha × 0 = 0 far from the satellite.
+
+    A per-channel DC bias in sat_signal (from imperfect bg_estimate) is corrected
+    by measuring sat_signal where alpha ≈ 0 (off-satellite region) and subtracting
+    that offset before blending.
+    """
+    if sat_signal is None or ref_pos is None or not ref_pos.on_disk:
+        return planet
+    if mask_shape == "capsule" and traj_xy:
+        alpha = _capsule_gaussian_mask(planet.shape[:2], traj_xy, sigma)
+    else:
+        alpha = _gaussian_mask(planet.shape[:2], ref_pos.x_px, ref_pos.y_px, sigma)
+
+    if planet.ndim == 3:
+        alpha = alpha[:, :, np.newaxis]
+    return np.clip(planet.astype(np.float32) + alpha * sat_signal.astype(np.float32), 0.0, 1.0)
 
 
 def _blend_one(
@@ -364,6 +560,21 @@ def _apply_satellite_composite(
         if not rows:
             continue
 
+        # Augment rows with disk-center alignment shifts from derotation.
+        # Each source frame has its own disk center; derotation corrects this
+        # wobble with align_shift_px before stacking. Without this correction,
+        # translate_stack applies ephemeris-based shadow shifts to un-aligned
+        # frames, so shadows from different frames land at different pixels →
+        # elongated "line" in the stacked result instead of a circular spot.
+        _align_map = {
+            f["stem"]: f.get("align_shift_px", [0.0, 0.0])
+            for f in flog.get("frames", [])
+        }
+        rows = [
+            {**r, "align_shift_px": _align_map.get(r["stem"], [0.0, 0.0])}
+            for r in rows
+        ]
+
         print(f"    [{filt}] satellite composite…")
 
         planet_raw = image_io.read_tif(out_path)
@@ -371,7 +582,18 @@ def _apply_satellite_composite(
                   else planet_raw.astype(np.float32))
         is_color = planet.ndim == 3
         planet_lum = planet.mean(axis=2) if is_color else planet
-        disk_cx, disk_cy, disk_sr, _, _ = derotation.find_disk_center(planet_lum)
+        disk_cx, disk_cy, disk_sr, disk_sr_b, _ = derotation.find_disk_center(planet_lum)
+        polar_eq_ratio = float(disk_sr_b) / float(disk_sr) if disk_sr > 0 else 1.0
+        warp_params = {
+            "disk_cx":       disk_cx,
+            "disk_cy":       disk_cy,
+            "disk_r":        disk_sr,
+            "period_hours":  config.derotation.rotation_period_hours,
+            "warp_scale":    config.derotation.warp_scale,
+            "pole_pa_deg":   pole_pa_deg,
+            "polar_eq_ratio": polar_eq_ratio,
+            "t_reference":   t_center_naive,
+        }
 
         time_sorted = sorted(rows, key=lambda r: r["timestamp"])
         t_list = [r["timestamp"] for r in time_sorted]
@@ -415,7 +637,11 @@ def _apply_satellite_composite(
                 traj_xy = None
                 sigma = _compute_sigma_from_motion(moon_name, positions, ref, app_r, coverage_scale)
             stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
-            composite = _blend_one(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            bg    = _planet_bg_estimate(time_sorted, positions, ref, composite, keep_color=is_color)
+            sat_signal = (stack.astype(np.float32) - bg.astype(np.float32)) if (stack is not None and bg is not None) else stack
+            smearing   = _compute_smearing_map(time_sorted, positions, ref, sat_signal, app_r, warp_params=warp_params)
+            planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
+            composite = _blend_additive(planet_base, sat_signal, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
             composited.append(f"{moon_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
 
         # Shadow composites — any shadow with a transit detected in the full-frame query
@@ -433,7 +659,47 @@ def _apply_satellite_composite(
                 traj_xy = None
                 sigma = _compute_sigma_from_motion(shad_name, positions, ref, app_r, coverage_scale)
             stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
-            composite = _blend_one(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            bg    = _planet_bg_estimate(time_sorted, positions, ref, composite, keep_color=is_color)
+            sat_signal = (stack.astype(np.float32) - bg.astype(np.float32)) if (stack is not None and bg is not None) else stack
+            # Build a synthetic clean shadow signal: circular Gaussian at ref_pos with
+            # depth measured from actual sat_signal.  Raw sat_signal has belt-structure
+            # artifacts (NEB dark patches) stronger than the shadow itself; the synthetic
+            # signal replaces that with a clean circular spot at the formula position,
+            # which both smearing removal and _blend_additive can work with correctly.
+            #
+            # Fallback: when depth_val >= 0 the shadow cannot be measured reliably from
+            # sat_signal (translate_stack brighter than bg_estimate due to atmospheric /
+            # calibration mismatch).  Use _blend_one instead to preserve the previous
+            # behaviour and avoid adding a bright artifact at ref_pos.
+            use_synthetic = False
+            sat_signal_clean = None
+            if sat_signal is not None:
+                shape2d = sat_signal.shape[:2]
+                spot_alpha = _gaussian_mask(shape2d, ref.x_px, ref.y_px, app_r)
+                spot_mask  = spot_alpha > np.exp(-0.5)
+                sig_arr = sat_signal.astype(np.float32)
+                if sig_arr.ndim == 3:
+                    depth_ch = np.array(
+                        [np.mean(sig_arr[:, :, c][spot_mask]) for c in range(sig_arr.shape[2])],
+                        dtype=np.float32,
+                    )
+                    if float(np.mean(depth_ch)) < 0:
+                        sat_signal_clean = (spot_alpha[:, :, np.newaxis] * depth_ch[np.newaxis, np.newaxis, :]).astype(np.float32)
+                        use_synthetic = True
+                    _d_log = depth_ch.tolist()
+                else:
+                    depth_val = float(np.mean(sig_arr[spot_mask])) if spot_mask.any() else 0.0
+                    if depth_val < 0:
+                        sat_signal_clean = (spot_alpha * depth_val).astype(np.float32)
+                        use_synthetic = True
+                    _d_log = depth_val
+                print(f"      [{shad_name}] shadow depth at ref_pos: {_d_log}  ({'synthetic' if use_synthetic else 'blend_one fallback'})")
+            if use_synthetic:
+                smearing    = _compute_smearing_map(time_sorted, positions, ref, sat_signal_clean, app_r, warp_params=warp_params)
+                planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
+                composite   = _blend_additive(planet_base, sat_signal_clean, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            else:
+                composite = _blend_one(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
             composited.append(f"{shad_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
 
         if not composited:
@@ -1024,10 +1290,10 @@ def run(
         sat_log: Dict = {}
         if tracker is not None:
             sat_log = {
-                "np_ang_deg":      np_ang_val,
-                "pole_pa_deg":     pole_pa_for_warp,
-                "derot_flip":      derot_flip,
-                "tracker_flip_ns": tracker_flip_ns,
+                "np_ang_deg":       np_ang_val,
+                "pole_pa_deg":      pole_pa_for_warp,
+                "derot_flip":       derot_flip,
+                "tracker_flip_ns":  tracker_flip_ns,
             }
 
         # ── De-rotate all filters ──────────────────────────────────────────────
