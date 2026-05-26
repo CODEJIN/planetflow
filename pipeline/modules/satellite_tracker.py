@@ -654,6 +654,12 @@ def detect_tracker_flip_ns(
 
 
 # ── CV-based fallback ──────────────────────────────────────────────────────────
+# NOTE: Dead code — not called anywhere in the current pipeline.
+# Purpose: last-resort fallback to detect satellite/shadow blobs directly from the image
+#          when Horizons/Skyfield ephemeris is unavailable. Filters atmospheric streaks
+#          via brightness threshold, circularity, and local contrast checks.
+# Unused because: Skyfield path (jup365.bsp) is always available in the target environment,
+#                 so the ephemeris fallback never triggers.
 
 def detect_satellites_cv(
     image: np.ndarray,
@@ -1205,6 +1211,12 @@ def _interp_ra_dec(
 
 
 # ── CV position refinement ────────────────────────────────────────────────────
+# NOTE: Dead code — not called anywhere in the current pipeline.
+# Purpose: refine a predicted ephemeris coordinate to the centroid of the brightest (body)
+#          or darkest (shadow) cluster within a local patch. Uses local percentile thresholding
+#          so it works even when the satellite is dim relative to the global disk peak.
+# Unused because: the pipeline relies solely on ephemeris-based prediction; CV-based
+#                 coordinate correction is explicitly prohibited by design policy.
 
 def _local_extremum_centroid(
     lum: np.ndarray,

@@ -12,3 +12,5 @@ Derotation_Paper_Dataset*/
 evaluation/
 experiments/
 Capsule_1543/
+diag*/
+diag*.py

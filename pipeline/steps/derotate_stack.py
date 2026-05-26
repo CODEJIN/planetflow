@@ -523,6 +523,7 @@ def _apply_satellite_composite(
     tracker,
     pole_pa_deg: float,
     np_ang_deg: float,
+    r_ref: float | None = None,
 ) -> None:
     """Apply multi-rate satellite compositing for all on-disk moons and shadows.
 
@@ -549,8 +550,9 @@ def _apply_satellite_composite(
     ref_lum = ref_raw.astype(np.float32) / 65535.0 if ref_raw.dtype == np.uint16 else ref_raw.astype(np.float32)
     if ref_lum.ndim == 3:
         ref_lum = ref_lum.mean(axis=2)
-    _, _, ref_sr, _, _ = derotation.find_disk_center(ref_lum)
-    plate_scale = tracker.get_plate_scale(ref_sr, t_center_naive)
+    if r_ref is None:
+        _, _, r_ref, _, _ = derotation.find_disk_center(ref_lum)
+    plate_scale = tracker.get_plate_scale(r_ref, t_center_naive)
 
     # ── Per-filter composite ───────────────────────────────────────────────────
     for filt, (out_path, flog) in filter_results.items():
@@ -1168,6 +1170,36 @@ def run(
         print(f"  [satellite] tracker enabled  "
               f"(tracker_flip_ns={tracker_flip_ns}, flip_ew={sat_cfg.flip_ew})")
 
+    # ── Session-wide median disk radius (for plate_scale stability) ────────────
+    session_r_ref: float | None = None
+    if tracker is not None:
+        _r_vals: list[float] = []
+        for _win in windows:
+            _filt = next(
+                (f for f in _FILT_PREF
+                 if f in _win.get("per_filter", {})
+                 and _win["per_filter"][f].get("included")),
+                None,
+            )
+            if _filt is None:
+                continue
+            for _row in _win["per_filter"][_filt]["included"]:
+                try:
+                    _raw = image_io.read_tif(_row["path"])
+                    _lum = _raw if _raw.ndim == 2 else _raw.mean(axis=2).astype(np.float32)
+                    _lum = _lum.astype(np.float32)
+                    if _lum.max() > 1.5:
+                        _lum /= 65535.0
+                    _, _, _r, *_ = derotation.find_disk_center(_lum)
+                    if _r > 5:
+                        _r_vals.append(_r)
+                except Exception:
+                    continue
+        if _r_vals:
+            session_r_ref = float(np.median(_r_vals))
+            print(f"  [satellite] session disk radius: median={session_r_ref:.3f}px "
+                  f"(n={len(_r_vals)}, range={min(_r_vals):.1f}–{max(_r_vals):.1f})")
+
     # ── Output directory ───────────────────────────────────────────────────────
     out_base: Optional[Path] = None
     if config.save_step04:
@@ -1289,6 +1321,7 @@ def run(
                 tracker=tracker,
                 pole_pa_deg=pole_pa_for_warp,
                 np_ang_deg=np_ang_val,
+                r_ref=session_r_ref,
             )
 
         # ── Build log and save JSON ────────────────────────────────────────────

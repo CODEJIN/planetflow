@@ -155,7 +155,7 @@ class SatelliteConfig:
     # Sigma scale factor for the motion-based Gaussian blend mask.
     # sigma = max(max_motion_px, apparent_radius_px) × composite_coverage_scale
     # 2.5 → α≈0.92 at streak endpoints (validated in exp9 on 2026-05-05 Jupiter data).
-    composite_coverage_scale: float = 2.5
+    composite_coverage_scale: float = 7.0
 
     # Blend mask shape: "circular" (default) or "capsule".
     # "circular": isotropic Gaussian centered at ref_pos.

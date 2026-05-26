@@ -504,6 +504,37 @@ The **BSP status indicator** (coloured label next to the checkbox in the Step 04
 2. Check BSP file presence — if present: green (OK)
 3. Check internet (`naif.jpl.nasa.gov:443`) — if reachable: orange (files listed + "auto-download on first run"); if not: red, checkbox disabled
 
+#### Shadow Position Algorithm (Oblate Spheroid Ray Intersection)
+
+**Source**: `pipeline/modules/satellite_tracker.py` → `_shadow_pos_skyfield()`
+
+For each frame timestamp `t_obs`, the shadow position is computed as follows:
+
+1. **Light-travel-time (LTT) correction**: Compute the Earth–Jupiter distance at `t_obs`, then back-date to `t_emit = t_obs − d_EJ/c` (≈ 47 min for Jupiter). All geometry (Sun, Jupiter, moon) is evaluated at `t_emit` so that the predicted position matches the Horizons apparent-position convention.
+
+2. **Ray-spheroid intersection**: Cast a ray from the Sun through the moon's ICRF position. Intersect it with Jupiter modelled as an oblate spheroid (R_eq = 71 492 km, R_pol = 66 854 km, pole axis = IAU 2009 ICRF direction). The near-hemisphere intersection point is the shadow location on Jupiter's surface.
+
+   ```
+   ray: P(λ) = sun_km + λ × (moon_km − sun_km)
+   Valid shadow: λ > 1  (Sun → Moon → Jupiter surface, in that order)
+   ```
+
+3. **RA/Dec projection**: Convert the shadow's ICRF position to apparent RA/Dec as seen from Earth at `t_obs`, then project to pixel coordinates using `plate_scale`, `pole_pa_deg + np_ang_deg`, and the flip convention.
+
+**Known limitation**: `plate_scale` is derived as `ang_radius_geometric / r_ref_photometric`, where the geometric angular radius (from Horizons) and the photometric disk radius (Otsu gradient peak, typically ~125 px) refer to different physical radii of the limb-darkened disk. This mismatch causes a systematic ~6% overestimation of `plate_scale`, which propagates to a proportional displacement error in all satellite and shadow position predictions. The magnitude depends on imaging conditions (IR filter, seeing) and cannot be corrected without an independent astrometric reference in the same field.
+
+#### Camera N/S Orientation Auto-detection
+
+**Source**: `pipeline/modules/satellite_tracker.py` → `detect_tracker_flip_ns()`
+
+When `tracker_flip_ns` is set to auto in the session configuration, the pipeline estimates whether the camera is North-up or South-up by analysing belt brightness asymmetry:
+
+- Jupiter's South Equatorial Belt (SEB) is consistently wider and darker than the North Equatorial Belt (NEB).
+- The vertical brightness profile through the disk centre is compared between the upper and lower image halves after rotating to align the equatorial belts horizontally.
+- A combined score (`0.7 × width_asymmetry + 0.3 × brightness_signal`) determines orientation. Confidence threshold: 0.25.
+- `flip_ns = True` → South-up camera (SEB appears at image top). `flip_ns = False` → North-up camera.
+- If confidence < 0.25, the result is inconclusive and the user-specified value is retained.
+
 ---
 
 ## 6. Step 05 / 07 — Wavelet Sharpening
