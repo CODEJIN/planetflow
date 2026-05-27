@@ -441,7 +441,7 @@ Detecting the disk independently per frame causes (cx, cy) to vary by a few pixe
 
 **Source**: `pipeline/steps/derotate_stack.py` → `_apply_satellite_composite()`
 
-When **Satellite Composite** is enabled, Europa and its shadow are composited into every filter's de-rotated TIF using the exp9 multi-rate Gaussian-blend method.
+When **Satellite Composite** is enabled, Europa and its shadow are composited into every filter's de-rotated TIF using a capsule-shaped mask and Poisson gradient-domain blending.
 
 ```
 For each filter TIF:
@@ -458,7 +458,7 @@ For each filter TIF:
     Translate-stack raw frames to align satellite at canonical ref position
         │
         ▼
-    Gaussian-blend satellite stack into planet stack
+    Solve Poisson equation inside capsule mask → splice satellite into planet
         │
         ▼
     Write result back to filter TIF (overwrite in-place)
@@ -472,21 +472,31 @@ After de-rotation, each filter's TIF may have its disk at a slightly different a
 
 By computing the satellite position in each filter's own disk coordinate system, the satellite's **disk-relative offset** is identical across all filter TIFs. Step 06's disk-alignment shift then moves the disk and the satellite by the same amount, preserving cross-filter co-location.
 
-#### Gaussian Blend Formula
+#### Blending — Capsule Mask + Poisson
+
+**Capsule mask**: Gaussian keyed on minimum distance to the trajectory polyline.
 
 ```
-alpha(x,y) = exp(−((x−sx)² + (y−sy)²) / (2σ²))
-result      = (1−alpha) × planet_stack + alpha × satellite_stack
-
-sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
+alpha(x,y) = exp(−min_dist_to_trajectory(x,y)² / (2 × sigma_perp²))
+sigma_perp  = apparent_radius_px × coverage_scale
 ```
+
+Unlike a circular mask (where `sigma ∝ max_motion_px`), the width is fixed to the satellite's apparent size and the length follows the actual motion path. Mask area scales linearly with smearing length, so it stays tight even during long transits.
+
+**Poisson blending**: the satellite texture is spliced in by solving the Poisson equation inside the mask.
+
+```
+∇²result = ∇²sat_stack    (inside mask)
+result    = planet         (mask boundary — Dirichlet BC)
+```
+
+`sat_stack` is used directly — no per-filter background estimation or smearing-map subtraction. Only the gradient structure is transferred; DC level is set by the planet boundary, so per-filter DC residuals cannot produce a colour cast.
 
 | Symbol | Description |
 |---|---|
 | `sx, sy` | Canonical satellite position at window `center_time` (in this filter's coordinate system) |
-| `max_motion_px` | Maximum per-frame displacement of satellite from the canonical position across all frames in the window |
-| `apparent_radius_px` | Satellite angular radius converted to pixels via Skyfield BSP ephemeris (LTT-corrected) |
-| `coverage_scale` | `config.satellite.composite_coverage_scale` — α at the farthest streak endpoint = exp(−1 / (2 × coverage_scale²)) |
+| `apparent_radius_px` | Satellite angular radius in pixels via Skyfield BSP ephemeris (LTT-corrected) |
+| `coverage_scale` | `config.satellite.composite_coverage_scale_capsule` — α at streak endpoint = exp(−1 / (2 × coverage_scale²)) |
 
 #### Shadow Detection via Skyfield BSP
 

@@ -1257,8 +1257,9 @@ class MainWindow(QMainWindow):
         satellite = SatelliteConfig(
             enabled                  = _sat_composite_on,
             composite_enabled        = _sat_composite_on,
-            composite_coverage_scale = float(d.get("satellite_coverage_scale", SatelliteConfig.__dataclass_fields__["composite_coverage_scale"].default)),
-            composite_mask_shape     = str(d.get("composite_mask_shape", "capsule")),
+            composite_coverage_scale_capsule  = float(d.get("satellite_coverage_scale_capsule",  SatelliteConfig.__dataclass_fields__["composite_coverage_scale_capsule"].default)),
+            composite_mask_shape     = "capsule",
+            composite_blend_mode     = "poisson",
         )
 
         def _parse_specs(raw: list | None):

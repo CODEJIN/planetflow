@@ -153,17 +153,22 @@ class SatelliteConfig:
     composite_enabled: bool = False
 
     # Sigma scale factor for the motion-based Gaussian blend mask.
-    # sigma = max(max_motion_px, apparent_radius_px) × composite_coverage_scale
-    # α at streak endpoints = exp(−1 / (2 × composite_coverage_scale²))  (exp9 validated).
-    composite_coverage_scale: float = 7.0 # 2.5
+    # sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
+    # α at streak endpoints = exp(−1 / (2 × coverage_scale²))  (exp9 validated).
+    # Shape-specific defaults: capsule uses a larger value because sigma controls
+    # only the perpendicular width (trajectory length already bounds the mask),
+    # whereas circular sigma governs the full radial extent.
+    # sigma_perp = apparent_r_px × coverage_scale_capsule
+    # α at streak endpoints = exp(−1 / (2 × coverage_scale²))
+    composite_coverage_scale_capsule:  float = 1.5
+    composite_coverage_scale_circular: float = 2.5
 
-    # Blend mask shape: "circular" (default) or "capsule".
-    # "circular": isotropic Gaussian centered at ref_pos.
-    #             sigma = max(max_motion_px, apparent_r_px) × coverage_scale
-    # "capsule":  Gaussian along trajectory polyline (min-dist-to-polyline).
-    #             sigma_perp = apparent_r_px × coverage_scale  (width fixed)
-    #             Area grows linearly with smearing, not quadratically.
+    # Fixed: capsule mask + Poisson gradient-domain blend (not user-configurable via GUI).
+    # "capsule": Gaussian along trajectory polyline — tight, linear area growth.
+    # "poisson": ∇²result = ∇²sat_stack inside mask; planet as Dirichlet BC.
+    #            Eliminates DC colour cast at blend boundary. Requires scipy.sparse.
     composite_mask_shape: str = "capsule"
+    composite_blend_mode: str = "poisson"
 
 
 

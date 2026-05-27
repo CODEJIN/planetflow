@@ -6,14 +6,11 @@ from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QRadioButton,
     QWidget,
 )
 
@@ -112,35 +109,6 @@ class DerotatePanel(BasePanel):
         from gui.panels.bsp_status import BspStatusRow
         fl.addRow(lbl_sat, BspStatusRow(self._satellite_composite))
 
-        # Mask shape radio buttons (capsule / circular)
-        self._mask_capsule  = QRadioButton(S("step04.mask_shape.capsule"))
-        self._mask_circular = QRadioButton(S("step04.mask_shape.circular"))
-        self._mask_capsule.setStyleSheet(_RADIO_STYLE)
-        self._mask_circular.setStyleSheet(_RADIO_STYLE)
-        self._mask_capsule.setChecked(True)  # default: capsule
-        self._mask_group = QButtonGroup(self)
-        self._mask_group.addButton(self._mask_capsule,  0)
-        self._mask_group.addButton(self._mask_circular, 1)
-
-        mask_row = QWidget()
-        mask_row.setStyleSheet("background: transparent;")
-        mask_hl = QHBoxLayout(mask_row)
-        mask_hl.setContentsMargins(0, 0, 0, 0)
-        mask_hl.setSpacing(14)
-        mask_hl.addWidget(self._mask_capsule)
-        mask_hl.addWidget(self._mask_circular)
-        mask_hl.addStretch()
-
-        lbl_mask = QLabel(S("step04.mask_shape"))
-        lbl_mask.setStyleSheet("color: #888;")
-        fl.addRow(lbl_mask, mask_row)
-
-        # Enable/disable mask row based on composite checkbox
-        def _on_composite_toggled(checked: bool) -> None:
-            self._mask_capsule.setEnabled(checked)
-            self._mask_circular.setEnabled(checked)
-        self._satellite_composite.toggled.connect(_on_composite_toggled)
-        _on_composite_toggled(False)  # initially disabled
 
 
         idx = self._form_layout.count() - 1
@@ -151,7 +119,6 @@ class DerotatePanel(BasePanel):
             "min_quality_threshold":       self._min_quality.value(),
             "normalize_brightness":        self._normalize.isChecked(),
             "satellite_composite_enabled": self._satellite_composite.isChecked(),
-            "composite_mask_shape":        "capsule" if self._mask_capsule.isChecked() else "circular",
         }
         out_text = self._output_lbl.text().strip()
         if out_text:
@@ -190,9 +157,6 @@ class DerotatePanel(BasePanel):
         self._satellite_composite.setChecked(
             bool(data.get("satellite_composite_enabled", False))
         )
-        shape = data.get("composite_mask_shape", "capsule")
-        self._mask_capsule.setChecked(shape != "circular")
-        self._mask_circular.setChecked(shape == "circular")
 
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:

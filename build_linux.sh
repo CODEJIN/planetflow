@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="AstroPipeline"
-DIST_DIR="dist"
-BUILD_DIR="build"
+DIST_DIR="dist/linux"
+BUILD_DIR="build/linux"
 
 echo "======================================================"
 echo "  AstroPipeline Linux Build"
@@ -44,7 +44,7 @@ echo "[3/4] PyInstaller 빌드 시작..."
 echo "  (첫 빌드 시 PySide6 수집에 수 분 소요될 수 있습니다)"
 echo ""
 
-python3 -m PyInstaller --clean astro_pipeline.spec
+python3 -m PyInstaller --clean --distpath "$DIST_DIR" --workpath "$BUILD_DIR" astro_pipeline.spec
 
 # ── 4. 결과 확인 ──────────────────────────────────────────────
 echo ""

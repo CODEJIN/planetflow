@@ -12,8 +12,8 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 set APP_NAME=AstroPipeline
-set DIST_DIR=dist
-set BUILD_DIR=build
+set DIST_DIR=dist\windows
+set BUILD_DIR=build\windows
 
 echo ======================================================
 echo   AstroPipeline Windows Build
@@ -62,7 +62,7 @@ echo [4/4] Starting PyInstaller build...
 echo   (First build may take several minutes for PySide6 collection)
 echo.
 
-python -m PyInstaller --clean astro_pipeline.spec
+python -m PyInstaller --clean --distpath %DIST_DIR% --workpath %BUILD_DIR% astro_pipeline.spec
 if errorlevel 1 (
     echo.
     echo ERROR: Build failed. See messages above.

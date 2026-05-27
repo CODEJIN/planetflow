@@ -516,6 +516,114 @@ def _blend_one(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _poisson_solve_channel(
+    planet_ch: np.ndarray,
+    sat_ch: np.ndarray,
+    interior: np.ndarray,
+) -> np.ndarray:
+    """Solve ∇²result = ∇²sat_ch inside `interior`, planet_ch as Dirichlet BC."""
+    try:
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.linalg import spsolve
+    except ImportError:
+        return planet_ch.copy()
+
+    H, W = planet_ch.shape
+    sat    = sat_ch.astype(np.float64)
+    planet = planet_ch.astype(np.float64)
+
+    # Keep interior 1 pixel away from image edges so every pixel has 4 valid neighbours.
+    safe = np.zeros((H, W), dtype=bool)
+    safe[1:H-1, 1:W-1] = True
+    interior = interior & safe
+
+    ys, xs = np.where(interior)
+    n = len(ys)
+    if n == 0:
+        return planet_ch.copy()
+
+    idx_map = np.full((H, W), -1, dtype=np.int32)
+    idx_map[interior] = np.arange(n, dtype=np.int32)
+
+    # Guidance RHS: Laplacian of sat_stack at each interior pixel.
+    rhs = (4.0 * sat[ys, xs]
+           - sat[ys - 1, xs] - sat[ys + 1, xs]
+           - sat[ys, xs - 1] - sat[ys, xs + 1])
+
+    # Build COO sparse matrix.  Diagonal entries = 4.
+    all_rows = [np.arange(n)]
+    all_cols = [np.arange(n)]
+    all_vals = [np.full(n, 4.0)]
+
+    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        ny = ys + dy
+        nx = xs + dx
+        neigh_idx = idx_map[ny, nx]   # -1 for exterior neighbours
+        is_int = neigh_idx >= 0
+
+        # Off-diagonal -1 for interior neighbours.
+        if is_int.any():
+            all_rows.append(np.arange(n)[is_int])
+            all_cols.append(neigh_idx[is_int])
+            all_vals.append(np.full(is_int.sum(), -1.0))
+
+        # Dirichlet BC for exterior neighbours: add planet value to RHS.
+        ext = ~is_int
+        if ext.any():
+            rhs[ext] += planet[ny[ext], nx[ext]]
+
+    A = coo_matrix(
+        (np.concatenate(all_vals),
+         (np.concatenate(all_rows), np.concatenate(all_cols))),
+        shape=(n, n),
+    ).tocsr()
+    x_sol = spsolve(A, rhs)
+
+    result = planet.copy()
+    result[interior] = x_sol
+    return result
+
+
+def _blend_poisson(
+    planet: np.ndarray,
+    sat_stack: Optional[np.ndarray],
+    ref_pos,
+    sigma: float,
+    traj_xy: Optional[List[Tuple[float, float]]] = None,
+    mask_shape: str = "circular",
+) -> np.ndarray:
+    """Gradient-domain Poisson blend: splice sat_stack texture into planet.
+
+    Solves ∇²result = ∇²sat_stack inside the alpha mask (threshold 0.1) with
+    planet values as Dirichlet boundary conditions at the mask edge.  This
+    eliminates the DC colour cast that additive blending produces when the
+    background-subtracted sat_signal has a per-filter residual offset.
+
+    Falls back to _blend_one when scipy is unavailable or the mask is empty.
+    """
+    if sat_stack is None or ref_pos is None or not ref_pos.on_disk:
+        return planet
+    if mask_shape == "capsule" and traj_xy:
+        alpha = _capsule_gaussian_mask(planet.shape[:2], traj_xy, sigma)
+    else:
+        alpha = _gaussian_mask(planet.shape[:2], ref_pos.x_px, ref_pos.y_px, sigma)
+
+    interior = alpha > 0.1
+    if not interior.any():
+        return _blend_one(planet, sat_stack, ref_pos, sigma, traj_xy, mask_shape)
+
+    sat = sat_stack.astype(np.float32)
+    if planet.ndim == 3:
+        result = np.stack(
+            [_poisson_solve_channel(planet[:, :, c], sat[:, :, c], interior)
+             for c in range(planet.shape[2])],
+            axis=2,
+        )
+    else:
+        result = _poisson_solve_channel(planet, sat, interior)
+    return np.clip(result, 0.0, 1.0).astype(np.float32)
+
+
 def _apply_satellite_composite(
     window: dict,
     filter_results: dict,
@@ -534,8 +642,13 @@ def _apply_satellite_composite(
     """
     t_center = window["center_time"]
     t_center_naive = t_center.replace(tzinfo=None) if t_center.tzinfo else t_center
-    coverage_scale = config.satellite.composite_coverage_scale
     mask_shape     = config.satellite.composite_mask_shape
+    blend_mode     = config.satellite.composite_blend_mode
+    coverage_scale = (
+        config.satellite.composite_coverage_scale_capsule
+        if mask_shape == "capsule"
+        else config.satellite.composite_coverage_scale_circular
+    )
 
     # ── Reference filter: plate_scale only ────────────────────────────────────
     ref_filt = next(
@@ -639,12 +752,15 @@ def _apply_satellite_composite(
                 traj_xy = None
                 sigma = _compute_sigma_from_motion(moon_name, positions, ref, app_r, coverage_scale)
             stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
-            bg    = _planet_bg_estimate(time_sorted, positions, ref, composite, keep_color=is_color)
-            sat_signal = (stack.astype(np.float32) - bg.astype(np.float32)) if (stack is not None and bg is not None) else stack
-            smearing   = _compute_smearing_map(time_sorted, positions, ref, sat_signal, app_r, warp_params=warp_params)
-            planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
-            composite = _blend_additive(planet_base, sat_signal, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
-            composited.append(f"{moon_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
+            if blend_mode == "poisson":
+                composite = _blend_poisson(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            else:
+                bg    = _planet_bg_estimate(time_sorted, positions, ref, composite, keep_color=is_color)
+                sat_signal = (stack.astype(np.float32) - bg.astype(np.float32)) if (stack is not None and bg is not None) else stack
+                smearing   = _compute_smearing_map(time_sorted, positions, ref, sat_signal, app_r, warp_params=warp_params)
+                planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
+                composite = _blend_additive(planet_base, sat_signal, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            composited.append(f"{moon_name}(σ={sigma:.1f}px,{mask_shape[:3]},{blend_mode[:3]})")
 
         # Shadow composites — any shadow with a transit detected in the full-frame query
         for shad_name, positions in shad_pos.items():
@@ -661,12 +777,15 @@ def _apply_satellite_composite(
                 traj_xy = None
                 sigma = _compute_sigma_from_motion(shad_name, positions, ref, app_r, coverage_scale)
             stack = _satellite_translate_stack(time_sorted, positions, ref, keep_color=is_color)
-            bg    = _planet_bg_estimate(time_sorted, positions, ref, composite, keep_color=is_color)
-            sat_signal = (stack.astype(np.float32) - bg.astype(np.float32)) if (stack is not None and bg is not None) else stack
-            smearing    = _compute_smearing_map(time_sorted, positions, ref, sat_signal, app_r, warp_params=warp_params)
-            planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
-            composite   = _blend_additive(planet_base, sat_signal, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
-            composited.append(f"{shad_name}(σ={sigma:.1f}px,{mask_shape[:3]})")
+            if blend_mode == "poisson":
+                composite = _blend_poisson(composite, stack, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            else:
+                bg    = _planet_bg_estimate(time_sorted, positions, ref, composite, keep_color=is_color)
+                sat_signal = (stack.astype(np.float32) - bg.astype(np.float32)) if (stack is not None and bg is not None) else stack
+                smearing    = _compute_smearing_map(time_sorted, positions, ref, sat_signal, app_r, warp_params=warp_params)
+                planet_base = np.clip(composite.astype(np.float32) - smearing, 0.0, 1.0) if smearing is not None else composite
+                composite   = _blend_additive(planet_base, sat_signal, ref, sigma, traj_xy=traj_xy, mask_shape=mask_shape)
+            composited.append(f"{shad_name}(σ={sigma:.1f}px,{mask_shape[:3]},{blend_mode[:3]})")
 
         if not composited:
             print(f"    [{filt}] no on-disk bodies/shadows — composite skipped")

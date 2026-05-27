@@ -440,7 +440,7 @@ lum_hp = lum - GaussianBlur(lum, sigma=30)
 
 **소스**: `pipeline/steps/derotate_stack.py` → `_apply_satellite_composite()`
 
-**Satellite Composite**를 활성화하면 유로파와 그 그림자를 exp9 다중속도 가우시안 블렌드 방식으로 각 필터 de-rotated TIF에 합성합니다.
+**Satellite Composite**를 활성화하면 유로파와 그 그림자를 캡슐형 마스크 + Poisson 그라디언트 도메인 블렌딩 방식으로 각 필터 de-rotated TIF에 합성합니다.
 
 ```
 각 필터 TIF에 대해:
@@ -457,7 +457,7 @@ lum_hp = lum - GaussianBlur(lum, sigma=30)
     원본 프레임을 정규 기준 위치에 위성이 정렬되도록 이동-스태킹
         │
         ▼
-    위성 스택을 행성 스택에 가우시안 블렌딩
+    캡슐형 마스크 내부에서 Poisson 방정식 풀이 → 위성 스택을 행성에 합성
         │
         ▼
     결과를 필터 TIF에 덮어씀
@@ -471,21 +471,31 @@ De-rotation 후 필터마다 TIF의 디스크 중심이 약간 다른 픽셀 위
 
 각 필터 고유의 디스크 좌표계에서 위성 위치를 계산하면 **디스크 기준 상대 오프셋**이 모든 필터에서 동일해집니다. Step 06의 디스크 정렬 이동이 디스크와 위성을 동일하게 이동시키므로, 최종 합성에서 위성이 모든 채널에서 정확히 같은 위치에 나타납니다.
 
-#### 가우시안 블렌드 공식
+#### 블렌딩 방식 — 캡슐형 마스크 + Poisson
+
+**캡슐형 마스크**: 궤적 폴리라인까지의 최소 거리 기반 가우시안.
 
 ```
-alpha(x,y) = exp(−((x−sx)² + (y−sy)²) / (2σ²))
-result      = (1−alpha) × planet_stack + alpha × satellite_stack
-
-sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
+alpha(x,y) = exp(−min_dist_to_trajectory(x,y)² / (2 × sigma_perp²))
+sigma_perp  = apparent_radius_px × coverage_scale
 ```
+
+원형 마스크(`sigma ∝ max_motion_px`)와 달리 폭은 위성 겉보기 크기에만 비례하고, 길이는 실제 이동 궤적만큼만 늘어납니다. 마스크 면적이 이동 거리에 선형 비례하므로 장시간 통과 시에도 마스크가 과도하게 커지지 않습니다.
+
+**Poisson 블렌딩**: 마스크 내부에서 Poisson 방정식을 풀어 합성.
+
+```
+∇²result = ∇²sat_stack    (마스크 내부)
+result    = planet         (마스크 경계 — Dirichlet BC)
+```
+
+필터별 배경 추정(bg_estimate)이나 스미어링 맵 계산 없이 `sat_stack`을 직접 사용합니다. 그라디언트 구조만 전달되고 DC 레벨은 경계(행성)에서 결정되므로, 필터 간 DC 편차로 인한 색상 캐스트가 발생하지 않습니다.
 
 | 기호 | 설명 |
 |---|---|
 | `sx, sy` | 윈도우 `center_time`에서의 정규 위성 위치 (이 필터의 좌표계) |
-| `max_motion_px` | 윈도우 내 전 프레임에 걸친 위성의 정규 위치 대비 최대 이동량 |
-| `apparent_radius_px` | Skyfield BSP 역행성 보정(LTT) 에페메리스로 계산한 위성 시반경(픽셀) |
-| `coverage_scale` | `config.satellite.composite_coverage_scale` — 가장 먼 스트릭 끝점에서의 α = exp(−1 / (2 × coverage_scale²)) |
+| `apparent_radius_px` | Skyfield BSP LTT 보정 에페메리스로 계산한 위성 시반경(픽셀) |
+| `coverage_scale` | `config.satellite.composite_coverage_scale_capsule` — α at streak endpoint = exp(−1 / (2 × coverage_scale²)) |
 
 #### Skyfield BSP를 이용한 그림자 검출
 
