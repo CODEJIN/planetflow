@@ -485,7 +485,7 @@ sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
 | `sx, sy` | 윈도우 `center_time`에서의 정규 위성 위치 (이 필터의 좌표계) |
 | `max_motion_px` | 윈도우 내 전 프레임에 걸친 위성의 정규 위치 대비 최대 이동량 |
 | `apparent_radius_px` | Skyfield BSP 역행성 보정(LTT) 에페메리스로 계산한 위성 시반경(픽셀) |
-| `coverage_scale` | 2.5 — exp9 검증: 가장 먼 스트릭 끝점에서 α ≈ 0.92 |
+| `coverage_scale` | `config.satellite.composite_coverage_scale` — 가장 먼 스트릭 끝점에서의 α = exp(−1 / (2 × coverage_scale²)) |
 
 #### Skyfield BSP를 이용한 그림자 검출
 
@@ -520,7 +520,32 @@ Step 04 / Step 08 패널의 체크박스 옆 **BSP 상태 표시기**(색상 라
 
 3. **RA/Dec 투영**: 그림자의 ICRF 좌표를 `t_obs` 시점 지구 기준 겉보기 RA/Dec로 변환한 뒤, `plate_scale`, `pole_pa_deg + np_ang_deg`, flip 규약을 적용해 픽셀 좌표로 변환합니다.
 
-**알려진 한계**: `plate_scale`은 `기하학적 각반경(Horizons) / 광도 기반 disk 반경(Otsu 그레디언트 피크, 약 125 px)`으로 산출됩니다. 두 값이 서로 다른 물리적 림브 위치를 가리키므로 `plate_scale`이 약 6% 과대평가되며, 이는 모든 위성·그림자 위치 예측에 비례 변위 오차로 전파됩니다. 오차의 크기는 촬영 조건(IR 필터, 시상)에 따라 달라지며, 동일 시야 내 독립적 천측 기준이 없으면 보정할 수 없습니다.
+**알려진 한계**: `plate_scale`은 `기하학적 각반경(Horizons) / 광도 기반 disk 반경(Otsu 그레디언트 피크, 약 125 px)`으로 산출됩니다. 두 값이 서로 다른 물리적 림브 위치를 가리키므로 `plate_scale`이 약 6~10% 과대평가되며, 이는 모든 위성·그림자 위치 예측에 비례 변위 오차로 전파됩니다. 세션 내 위성 그림자 통과가 관측된 경우, 아래 자동 보정으로 이 오차를 보상할 수 있습니다.
+
+#### plate_scale 자동 보정 (섀도 통과 세션)
+
+**소스**: `pipeline/steps/derotate_stack.py` → `_auto_calibrate_plate_scale()`
+
+`satellite.enabled = True`이고 `session_r_ref` 계산 완료 후, 파이프라인은 세션 전체 프레임을 스캔하여 위성 그림자 통과 여부를 판단합니다. 통과 프레임이 충분하면(기본 N ≥ 3) 2-파라미터 최소제곱법으로 `plate_scale`과 `cx_offset`을 동시에 보정합니다.
+
+**보정 모델**:
+
+```
+actual_x = cx_fit + pred_dx_px × k
+  pred_dx_px = 예측 그림자 x − disk_cx   (= dx_arcsec / ps_nom)
+  k          = ps_nom / ps_fit
+```
+
+lstsq 해: `ps_fit = ps_nom / k`, `cx_offset = cx_fit − session_cx`
+
+보정 후 `SatelliteTracker.set_plate_scale_calibration(ps_fit, cx_offset)`이 호출되어 이후 모든 그림자 위치 예측에 반영됩니다. 보정 결과는 `derotation_log.json → session.plate_scale_calibration`에 기록됩니다.
+
+| 항목 | 동작 |
+|---|---|
+| 섀도 통과 있음 (N ≥ 3, 림브에서 38 px 이상) | 자동 보정 적용 (`Δps`, `cx_offset` 로그 출력) |
+| 섀도 통과 없음 또는 프레임 부족 | 공칭 `plate_scale` 유지, 경고 없이 스킵 |
+
+**주의**: 보정은 세션 고유값이며 장비·시잉이 바뀌면 달라집니다. ps 단독 보정(cx 고정)은 cx 오차가 ps 추정에 혼입되어 신뢰도가 낮으므로 항상 2-파라미터로 처리합니다.
 
 #### 카메라 남북 방향 자동 감지
 

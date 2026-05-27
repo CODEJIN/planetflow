@@ -486,7 +486,7 @@ sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
 | `sx, sy` | Canonical satellite position at window `center_time` (in this filter's coordinate system) |
 | `max_motion_px` | Maximum per-frame displacement of satellite from the canonical position across all frames in the window |
 | `apparent_radius_px` | Satellite angular radius converted to pixels via Skyfield BSP ephemeris (LTT-corrected) |
-| `coverage_scale` | 2.5 — validated in exp9: α ≈ 0.92 at the farthest streak endpoint |
+| `coverage_scale` | `config.satellite.composite_coverage_scale` — α at the farthest streak endpoint = exp(−1 / (2 × coverage_scale²)) |
 
 #### Shadow Detection via Skyfield BSP
 
@@ -521,7 +521,32 @@ For each frame timestamp `t_obs`, the shadow position is computed as follows:
 
 3. **RA/Dec projection**: Convert the shadow's ICRF position to apparent RA/Dec as seen from Earth at `t_obs`, then project to pixel coordinates using `plate_scale`, `pole_pa_deg + np_ang_deg`, and the flip convention.
 
-**Known limitation**: `plate_scale` is derived as `ang_radius_geometric / r_ref_photometric`, where the geometric angular radius (from Horizons) and the photometric disk radius (Otsu gradient peak, typically ~125 px) refer to different physical radii of the limb-darkened disk. This mismatch causes a systematic ~6% overestimation of `plate_scale`, which propagates to a proportional displacement error in all satellite and shadow position predictions. The magnitude depends on imaging conditions (IR filter, seeing) and cannot be corrected without an independent astrometric reference in the same field.
+**Known limitation**: `plate_scale` is derived as `ang_radius_geometric / r_ref_photometric`, where the geometric angular radius (from Horizons) and the photometric disk radius (Otsu gradient peak, typically ~125 px) refer to different physical radii of the limb-darkened disk. This mismatch causes a systematic ~6–10% overestimation of `plate_scale`, which propagates to a proportional displacement error in all satellite and shadow position predictions. When a shadow transit is observed in the session, the auto-calibration below compensates for this error.
+
+#### plate_scale Auto-calibration (Shadow Transit Sessions)
+
+**Source**: `pipeline/steps/derotate_stack.py` → `_auto_calibrate_plate_scale()`
+
+When `satellite.enabled = True`, after `session_r_ref` is established the pipeline scans all frames in the session to detect shadow transit frames. If sufficient transit frames are found (default N ≥ 3, at least 38 px from the limb), a 2-parameter least-squares fit simultaneously calibrates `plate_scale` and `cx_offset`.
+
+**Calibration model**:
+
+```
+actual_x = cx_fit + pred_dx_px × k
+  pred_dx_px = predicted_shadow_x − disk_cx   (= dx_arcsec / ps_nom)
+  k          = ps_nom / ps_fit
+```
+
+lstsq solution: `ps_fit = ps_nom / k`, `cx_offset = cx_fit − session_cx`
+
+After calibration, `SatelliteTracker.set_plate_scale_calibration(ps_fit, cx_offset)` is called and all subsequent shadow position predictions use the corrected values. Results are logged to `derotation_log.json → session.plate_scale_calibration`.
+
+| Condition | Behaviour |
+|---|---|
+| Shadow transit present (N ≥ 3, ≥ 38 px from limb) | Calibration applied — Δps and cx_offset printed to log |
+| No shadow transit or insufficient frames | Nominal `plate_scale` retained, silently skipped |
+
+**Note**: Calibration values are session-specific and will differ across equipment and seeing conditions. Single-parameter ps calibration (cx fixed) is avoided because cx error biases the ps estimate; the 2-parameter fit is used exclusively.
 
 #### Camera N/S Orientation Auto-detection
 

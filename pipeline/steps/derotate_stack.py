@@ -117,7 +117,7 @@ def _compute_sigma_from_motion(
     sigma = max(max_motion_px, apparent_radius_px) × coverage_scale
 
     ref_pos: canonical SatellitePos at window center time (same for all filters).
-    coverage_scale=2.5 → α≈0.92 at the farthest streak endpoint (exp9 validated).
+    α at the farthest streak endpoint = exp(−1/(2×coverage_scale²))  (exp9 validated).
     """
     max_motion = 0.0
     if ref_pos is not None:
@@ -1091,6 +1091,175 @@ def _measure_derot_confidence(
     }
 
 
+def _auto_calibrate_plate_scale(
+    windows: List[dict],
+    tracker: "SatelliteTracker",
+    session_r_ref: float,
+    pole_pa_deg: float,
+    np_ang_deg: float,
+    *,
+    crop: int = 20,
+    safe_dist: float = -38.0,
+    min_depth: float = 0.05,
+    min_frames: int = 3,
+) -> Optional[dict]:
+    """2-param (cx + ps) lstsq calibration using shadow transit frames.
+
+    Scans all IR frames in the session, finds frames where a shadow is on-disk
+    and at least |safe_dist| px from the limb, auto-detects the shadow position
+    via argmin, then fits:
+
+        actual_x = cx_fit + pred_dx_px * k
+
+    where pred_dx_px = predicted_shadow_x − disk_cx and k = ps_nom / ps_fit.
+
+    Returns dict(ps_fit, cx_offset, dps_pct, n, rmse_nom, rmse_fit) or None.
+    """
+    import contextlib, io
+    from pipeline.modules.wavelet import sharpen
+
+    _WAVELET = [200., 200., 200., 0., 0., 0.]
+
+    # ── Collect all IR frame paths & timestamps ───────────────────────────────
+    frame_info: list = []
+    for win in windows:
+        pf = win.get("per_filter", {})
+        filt = next((f for f in _FILT_PREF if f in pf and pf[f].get("included")), None)
+        if filt is None:
+            continue
+        for row in pf[filt]["included"]:
+            meta = image_io.parse_filename(row["path"])
+            if meta is None:
+                continue
+            frame_info.append((row["path"], meta["timestamp"].replace(tzinfo=None)))
+
+    if not frame_info:
+        return None
+
+    # ── Per-frame disk_cx (find_disk_center on each frame) ───────────────────
+    frame_cx: dict = {}
+    for path, _ in frame_info:
+        try:
+            raw = image_io.read_tif(path)
+            lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype("float32")
+            if lum.max() > 1.5:
+                lum /= 65535.0
+            cx, cy, *_ = derotation.find_disk_center(lum)
+            frame_cx[path] = (float(cx), float(cy))
+        except Exception:
+            pass
+
+    if not frame_cx:
+        return None
+
+    session_cx = float(np.median([v[0] for v in frame_cx.values()]))
+    session_cy = float(np.median([v[1] for v in frame_cx.values()]))
+
+    # ── Bulk shadow position query (suppress per-moon print spam) ─────────────
+    valid_frames = [(p, t) for p, t in frame_info if p in frame_cx]
+    all_times = [t for _, t in valid_frames]
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        shad_dict = tracker.get_shadow_positions(
+            all_times, session_cx, session_cy, session_r_ref,
+            pole_pa_deg=pole_pa_deg,
+            np_ang_deg=np_ang_deg,
+        )
+
+    if not shad_dict:
+        return None
+
+    # Per-frame: pick the first on-disk shadow that's safe from limb
+    transit_by_idx: dict = {}
+    for shadow_key, pos_list in shad_dict.items():
+        for i, pos in enumerate(pos_list):
+            if i in transit_by_idx:
+                continue
+            if pos.on_disk and (pos.dist_px - session_r_ref) < safe_dist:
+                transit_by_idx[i] = (pos, shadow_key)
+
+    if not transit_by_idx:
+        return None
+
+    # ── argmin shadow detection + data collection ─────────────────────────────
+    pred_dx_pxs: list = []
+    actual_xs:   list = []
+    disk_cxs:    list = []
+
+    for i, (path, _) in enumerate(valid_frames):
+        if i not in transit_by_idx:
+            continue
+        pos, _ = transit_by_idx[i]
+
+        disk_cx_frame = frame_cx[path][0]
+        # pos.x_px was computed with session_cx; adjust search centre for per-frame cx
+        pred_x = pos.x_px + (disk_cx_frame - session_cx)
+        pred_y = pos.y_px
+
+        try:
+            raw = image_io.read_tif(path)
+            lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype("float32")
+            if lum.max() > 1.5:
+                lum /= 65535.0
+            lum = sharpen(lum, levels=6, amounts=_WAVELET)
+            lum = np.clip(lum, 0., 1.)
+            h, w = lum.shape
+
+            x0 = max(0, int(round(pred_x)) - crop)
+            x1 = min(w, int(round(pred_x)) + crop + 1)
+            y0 = max(0, int(round(pred_y)) - crop)
+            y1 = min(h, int(round(pred_y)) + crop + 1)
+            patch = lum[y0:y1, x0:x1]
+            if patch.size == 0:
+                continue
+            depth = float(patch.max() - patch.min())
+            if depth < min_depth:
+                continue
+
+            idx = np.unravel_index(np.argmin(patch), patch.shape)
+            actual_x = float(x0 + idx[1])
+
+            # pred_dx_px is independent of per-frame cx (= dx_arcsec / ps_nom)
+            pred_dx_pxs.append(float(pos.x_px - session_cx))
+            actual_xs.append(actual_x)
+            disk_cxs.append(disk_cx_frame)
+
+        except Exception:
+            continue
+
+    n = len(pred_dx_pxs)
+    if n < min_frames:
+        return None
+
+    pred_dx = np.array(pred_dx_pxs)
+    actual  = np.array(actual_xs)
+    dcxs    = np.array(disk_cxs)
+
+    # 2-param lstsq: actual_x = alpha + k * pred_dx_px
+    A = np.column_stack([np.ones(n), pred_dx])
+    coef, _, _, _ = np.linalg.lstsq(A, actual, rcond=None)
+    cx_fit = float(coef[0])
+    k      = float(coef[1])          # = ps_nom / ps_fit
+
+    ps_nom  = tracker._plate_scale   # nominal, already cached
+    ps_fit  = ps_nom / k
+    cx_offset = cx_fit - session_cx  # systematic correction to add to disk_cx
+
+    rmse_fit = float(np.sqrt(np.mean((actual - A @ coef) ** 2)))
+    rmse_nom = float(np.sqrt(np.mean((actual - (dcxs + pred_dx)) ** 2)))
+
+    return dict(
+        ps_fit=ps_fit,
+        ps_nom=ps_nom,
+        cx_offset=cx_offset,
+        dps_pct=100.0 * (ps_fit - ps_nom) / ps_nom,
+        n=n,
+        rmse_nom=rmse_nom,
+        rmse_fit=rmse_fit,
+    )
+
+
 def run(
     config: PipelineConfig,
     results_03: dict,
@@ -1200,6 +1369,32 @@ def run(
             print(f"  [satellite] session disk radius: median={session_r_ref:.3f}px "
                   f"(n={len(_r_vals)}, range={min(_r_vals):.1f}–{max(_r_vals):.1f})")
 
+    # ── plate_scale auto-calibration from shadow transit (if present) ──────────
+    calib_result: Optional[dict] = None
+    if tracker is not None and session_r_ref is not None:
+        _t_mid_cal = sorted(windows, key=lambda w: w["center_time"])[len(windows) // 2]["center_time"]
+        _np_ang_cal = query_horizons_np_ang(
+            config.derotation.horizons_id, _t_mid_cal, config.derotation.observer_code,
+        ) or 0.0
+        print("  [satellite] running plate_scale auto-calibration…", flush=True)
+        calib_result = _auto_calibrate_plate_scale(
+            windows, tracker, session_r_ref,
+            pole_pa_deg=session_pole_pa,
+            np_ang_deg=_np_ang_cal,
+        )
+        if calib_result is not None:
+            tracker.set_plate_scale_calibration(
+                calib_result["ps_fit"], calib_result["cx_offset"]
+            )
+            print(
+                f"  [satellite] calibration: N={calib_result['n']}  "
+                f"Δps={calib_result['dps_pct']:+.2f}%  "
+                f"cx_offset={calib_result['cx_offset']:+.2f}px  "
+                f"RMSE {calib_result['rmse_nom']:.3f}→{calib_result['rmse_fit']:.3f}px"
+            )
+        else:
+            print("  [satellite] no shadow transit detected — plate_scale calibration skipped")
+
     # ── Output directory ───────────────────────────────────────────────────────
     out_base: Optional[Path] = None
     if config.save_step04:
@@ -1244,6 +1439,16 @@ def run(
         "ncc_flip_false":          _ncc_f,
         "ncc_flip_true":           _ncc_t,
     }
+    if calib_result is not None:
+        session_log["plate_scale_calibration"] = {
+            "ps_fit":     calib_result["ps_fit"],
+            "ps_nom":     calib_result["ps_nom"],
+            "dps_pct":    calib_result["dps_pct"],
+            "cx_offset":  calib_result["cx_offset"],
+            "n_frames":   calib_result["n"],
+            "rmse_nom":   calib_result["rmse_nom"],
+            "rmse_fit":   calib_result["rmse_fit"],
+        }
 
     n_windows = len(windows)
     for win_idx, window in enumerate(windows, start=1):

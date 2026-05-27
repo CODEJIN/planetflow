@@ -108,6 +108,7 @@ class SatelliteTracker:
         # Cache: command_str → [(datetime, ra_deg, dec_deg)]
         self._ra_dec_cache: Dict[str, List[Tuple[datetime, float, float, float]]] = {}
         self._plate_scale: Optional[float] = None   # arcsec/px (computed once)
+        self._cx_offset:   float           = 0.0    # px added to disk_cx in shadow prediction
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -141,6 +142,25 @@ class SatelliteTracker:
         )
         self._plate_scale = plate_scale
         return plate_scale
+
+    def set_plate_scale_calibration(
+        self,
+        ps_fit: float,
+        cx_offset: float,
+    ) -> None:
+        """Override plate_scale and set cx_offset from shadow-transit auto-calibration.
+
+        ps_fit    : calibrated plate scale (arcsec/px) from 2-param lstsq.
+        cx_offset : systematic px offset added to disk_cx in shadow position prediction.
+        """
+        prev_ps = self._plate_scale or ps_fit
+        self._plate_scale = ps_fit
+        self._cx_offset   = cx_offset
+        dps = 100.0 * (ps_fit - prev_ps) / prev_ps if prev_ps else 0.0
+        print(
+            f"  [SatTracker] plate_scale calibration applied: "
+            f"ps={ps_fit:.5f} (Δ{dps:+.2f}%)  cx_offset={cx_offset:+.2f}px"
+        )
 
     def get_positions(
         self,
@@ -450,10 +470,11 @@ class SatelliteTracker:
             shadow_key = f"{moon_name}_shadow"
             shadow_positions: List[SatellitePos] = []
 
+            disk_cx_eff = disk_cx + self._cx_offset
             for t in t_list_naive:
                 shad_pos, _ = _shadow_pos_skyfield(
                     t, moon_body, eph, jup_moons, ts,
-                    disk_cx, disk_cy, disk_radius_px,
+                    disk_cx_eff, disk_cy, disk_radius_px,
                     plate_scale_arcsec_per_px,
                     self.flip_ew, self.flip_ns,
                     shadow_key,

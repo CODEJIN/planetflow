@@ -14,3 +14,4 @@ experiments/
 Capsule_1543/
 diag*/
 diag*.py
+docs/shadow_prediction_error_report.md
