@@ -7,7 +7,7 @@ AstroPipeline PyInstaller spec — 플랫폼 공통 (Linux / Windows)
   Windows : pyinstaller --clean astro_pipeline.spec
 
 크기 최적화:
-  - scipy    : wavelet.py가 numpy로 대체 → 완전 제거 (OpenBLAS ~200MB 제거)
+  - scipy    : Poisson 블렌딩을 pure-numpy CG로 구현 → scipy 완전 제거 (OpenBLAS ~200MB 절감)
   - skimage / astropy / astroquery / imageio : 코드 미사용 → 제외
   - torch / transformers / triton 등 ML 패키지 : 강제 제외 (환경 오염 차단)
   - PySide6  : WebEngine·3D·Multimedia 등 제외 (정규식 Qt6? 로 바이너리+바인딩 동시 처리)
@@ -122,7 +122,7 @@ a = Analysis(
         "IPython",
         "sphinx",
         # ── 미사용 과학/이미지 라이브러리 ──────────────────────────────────
-        "scipy",
+        "scipy",   # Poisson 블렌딩은 pure-numpy CG로 구현 — scipy 불필요
         "skimage",
         "sklearn",
         "astropy",

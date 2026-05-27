@@ -1464,7 +1464,10 @@ def _compute_warp_maps_tps(
     Returns:
         (map_dx, map_dy, n_good_aps)
     """
-    from scipy.interpolate import RBFInterpolator
+    try:
+        from scipy.interpolate import RBFInterpolator
+    except ImportError as e:
+        raise ImportError("use_tps=True requires scipy (pip install scipy)") from e
 
     H, W = frame_aligned.shape[:2]
     adaptive = bool(ap_positions) and len(ap_positions[0]) == 3

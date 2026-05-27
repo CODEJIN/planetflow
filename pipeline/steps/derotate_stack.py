@@ -521,13 +521,12 @@ def _poisson_solve_channel(
     sat_ch: np.ndarray,
     interior: np.ndarray,
 ) -> np.ndarray:
-    """Solve ∇²result = ∇²sat_ch inside `interior`, planet_ch as Dirichlet BC."""
-    try:
-        from scipy.sparse import coo_matrix
-        from scipy.sparse.linalg import spsolve
-    except ImportError:
-        return planet_ch.copy()
+    """Solve ∇²result = ∇²sat_ch inside `interior`, planet_ch as Dirichlet BC.
 
+    Pure-numpy Conjugate Gradient — no scipy required.
+    CG converges in at most n iterations (n = interior pixel count) and
+    typically O(√n) in practice; for our small satellite blobs this is fast.
+    """
     H, W = planet_ch.shape
     sat    = sat_ch.astype(np.float64)
     planet = planet_ch.astype(np.float64)
@@ -545,42 +544,45 @@ def _poisson_solve_channel(
     idx_map = np.full((H, W), -1, dtype=np.int32)
     idx_map[interior] = np.arange(n, dtype=np.int32)
 
-    # Guidance RHS: Laplacian of sat_stack at each interior pixel.
-    rhs = (4.0 * sat[ys, xs]
-           - sat[ys - 1, xs] - sat[ys + 1, xs]
-           - sat[ys, xs - 1] - sat[ys, xs + 1])
+    # Guidance: ∇²sat at each interior pixel.
+    b = (4.0 * sat[ys, xs]
+         - sat[ys - 1, xs] - sat[ys + 1, xs]
+         - sat[ys, xs - 1] - sat[ys, xs + 1])
 
-    # Build COO sparse matrix.  Diagonal entries = 4.
-    all_rows = [np.arange(n)]
-    all_cols = [np.arange(n)]
-    all_vals = [np.full(n, 4.0)]
-
+    # Add planet Dirichlet BC contribution from exterior neighbours.
     for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
         ny = ys + dy
         nx = xs + dx
-        neigh_idx = idx_map[ny, nx]   # -1 for exterior neighbours
-        is_int = neigh_idx >= 0
-
-        # Off-diagonal -1 for interior neighbours.
-        if is_int.any():
-            all_rows.append(np.arange(n)[is_int])
-            all_cols.append(neigh_idx[is_int])
-            all_vals.append(np.full(is_int.sum(), -1.0))
-
-        # Dirichlet BC for exterior neighbours: add planet value to RHS.
-        ext = ~is_int
+        ext = idx_map[ny, nx] < 0
         if ext.any():
-            rhs[ext] += planet[ny[ext], nx[ext]]
+            b[ext] += planet[ny[ext], nx[ext]]
 
-    A = coo_matrix(
-        (np.concatenate(all_vals),
-         (np.concatenate(all_rows), np.concatenate(all_cols))),
-        shape=(n, n),
-    ).tocsr()
-    x_sol = spsolve(A, rhs)
+    # Operator A: discrete negative Laplacian restricted to interior pixels.
+    def _apply_A(v: np.ndarray) -> np.ndarray:
+        u = np.zeros((H, W), dtype=np.float64)
+        u[interior] = v
+        return (4.0 * u[ys, xs]
+                - u[ys - 1, xs] - u[ys + 1, xs]
+                - u[ys, xs - 1] - u[ys, xs + 1])
+
+    # Conjugate Gradient (pure numpy, no preconditioning).
+    x  = planet[interior].copy()
+    r  = b - _apply_A(x)
+    p  = r.copy()
+    rr = np.dot(r, r)
+    for _ in range(min(n, 500)):
+        if rr < 1e-12:
+            break
+        Ap     = _apply_A(p)
+        alpha  = rr / np.dot(p, Ap)
+        x     += alpha * p
+        r     -= alpha * Ap
+        rr_new = np.dot(r, r)
+        p      = r + (rr_new / rr) * p
+        rr     = rr_new
 
     result = planet.copy()
-    result[interior] = x_sol
+    result[interior] = x
     return result
 
 

@@ -53,7 +53,6 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import scipy.ndimage as ndi
 
 from pipeline.modules import image_io
 from pipeline.modules.wavelet import sharpen as _wavelet_sharpen
@@ -215,6 +214,34 @@ def _to_luminance(image: np.ndarray) -> np.ndarray:
     ).astype(np.float32)
 
 
+# ── Pure-numpy image utilities (replaces scipy.ndimage) ───────────────────────
+
+def _bilinear_interp(image: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    """Bilinear interpolation at arbitrary (ys, xs) coordinates; out-of-bounds → 0."""
+    h, w = image.shape
+    x0 = np.floor(xs).astype(np.int32)
+    y0 = np.floor(ys).astype(np.int32)
+    x1, y1 = x0 + 1, y0 + 1
+    fx = (xs - x0).astype(np.float64)
+    fy = (ys - y0).astype(np.float64)
+
+    def _safe(y, x):
+        valid = (y >= 0) & (y < h) & (x >= 0) & (x < w)
+        return np.where(valid, image[np.clip(y, 0, h-1), np.clip(x, 0, w-1)].astype(np.float64), 0.0)
+
+    return ((1-fy)*(1-fx)*_safe(y0, x0) + (1-fy)*fx*_safe(y0, x1) +
+               fy *(1-fx)*_safe(y1, x0) +    fy *fx*_safe(y1, x1))
+
+
+def _gaussian_filter1d_np(x: np.ndarray, sigma: float) -> np.ndarray:
+    """1D Gaussian smoothing via numpy convolution (replaces scipy.ndimage.gaussian_filter1d)."""
+    radius = max(1, int(3.0 * sigma + 0.5))
+    t = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (t / sigma) ** 2)
+    kernel /= kernel.sum()
+    return np.convolve(x.astype(np.float64), kernel, mode="same")
+
+
 # ── Disk geometry ──────────────────────────────────────────────────────────────
 
 def _gradient_disk_r(
@@ -249,10 +276,8 @@ def _gradient_disk_r(
         if (xs < 0).any() or (xs >= w - 1).any() or \
            (ys < 0).any() or (ys >= h - 1).any():
             continue
-        profile = ndi.map_coordinates(
-            image, [ys, xs], order=1, mode="constant", cval=0.0,
-        ).astype(np.float64)
-        smoothed = ndi.gaussian_filter1d(profile, sigma=smooth_sigma)
+        profile = _bilinear_interp(image, ys, xs)
+        smoothed = _gaussian_filter1d_np(profile, sigma=smooth_sigma)
         grad = np.gradient(smoothed, dr)
         idx = int(np.argmin(grad))
         if idx == 0 or idx == len(grad) - 1:
