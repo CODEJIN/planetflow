@@ -19,13 +19,12 @@ Algorithm (per filter, per time window):
   4. Sub-pixel translate alignment via phase correlation (cv2.phaseCorrelate)
   5. Quality-weighted mean stack using Step 4 norm_scores as weights
 
-warp_scale ≈ 0.80 (empirically determined for Jupiter through systematic testing):
-  Theoretical value is 1.0 (full spherical projection) but effective scale is
-  reduced by seeing blur, plate scale uncertainty, and oblate disk geometry.
-  0.80 was found to minimize inter-filter alignment error; 0.20 caused severe
-  filter-to-filter drift, confirming that near-theoretical scale is needed.
-  For other planets or significantly different setups, NCC sweep re-calibration
-  is recommended.
+warp_scale = 1.00 (empirically confirmed optimal for Jupiter via NCC sweep):
+  Theoretical value is 1.0 (full spherical projection). NCC sweep across
+  multiple datasets shows the peak consistently near 1.0; earlier interim
+  values of 0.80 and 0.20 appearing in older comments/defaults are outdated.
+  The NCC sweep is now used as a diagnostic confidence metric only — warp_scale
+  is fixed at the config value (default 1.00) and not updated by the sweep.
 
 Saturn notes:
   - Use rotation_period_hours=10.56 (System III)
@@ -996,7 +995,7 @@ def derotate_filter(
     included_rows: List[dict],
     t_reference: datetime,
     period_hours: float = 9.9281,
-    warp_scale: float = 0.20,
+    warp_scale: float = 1.00,
     align: bool = True,
     normalize_brightness: bool = False,
     min_quality_threshold: float = 0.0,
@@ -1013,7 +1012,7 @@ def derotate_filter(
                        'timestamp', 'norm_score').
         t_reference:   Window center time (reference orientation).
         period_hours:  System II period.
-        warp_scale:    Spherical warp empirical scale factor (default 0.20).
+        warp_scale:    Spherical warp empirical scale factor (default 1.00).
         align:          If True, apply sub-pixel phase correlation alignment
                         after warp. Disable for speed testing.
         color_mode:     If True, preserve RGB channels throughout; disk detection
@@ -1195,7 +1194,7 @@ def derotate_window(
     window: dict,
     required_filters: List[str],
     period_hours: float = 9.9281,
-    warp_scale: float = 0.20,
+    warp_scale: float = 1.00,
     align: bool = True,
     normalize_brightness: bool = False,
     min_quality_threshold: float = 0.0,

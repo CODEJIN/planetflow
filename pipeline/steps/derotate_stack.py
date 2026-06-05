@@ -634,13 +634,20 @@ def _apply_satellite_composite(
     pole_pa_deg: float,
     np_ang_deg: float,
     r_ref: float | None = None,
-) -> None:
+) -> Dict[str, dict]:
     """Apply multi-rate satellite compositing for all on-disk moons and shadows.
 
     Each filter uses its own disk center for tracker queries so that the
     satellite lands at the same disk-relative pixel in every filter TIF.
     Any Galilean moon body or shadow predicted to be on disk at t_center is
     composited; moons that are off disk are silently skipped.
+
+    Returns:
+        dict mapping filter name → {"cx": ..., "cy": ..., "r": ...} for each
+        filter that was processed.  Used by aperture_contrast to read the
+        exact disk center that was used for compositing (so it doesn't have
+        to recompute from the post-composite image where bright moons can
+        shift the Otsu threshold).
     """
     t_center = window["center_time"]
     t_center_naive = t_center.replace(tzinfo=None) if t_center.tzinfo else t_center
@@ -660,7 +667,8 @@ def _apply_satellite_composite(
         None,
     )
     if ref_filt is None:
-        return
+        return {}
+    disk_centers: Dict[str, dict] = {}
     ref_raw = image_io.read_tif(filter_results[ref_filt][0])
     ref_lum = ref_raw.astype(np.float32) / 65535.0 if ref_raw.dtype == np.uint16 else ref_raw.astype(np.float32)
     if ref_lum.ndim == 3:
@@ -700,6 +708,7 @@ def _apply_satellite_composite(
         is_color = planet.ndim == 3
         planet_lum = planet.mean(axis=2) if is_color else planet
         disk_cx, disk_cy, disk_sr, disk_sr_b, _ = derotation.find_disk_center(planet_lum)
+        disk_centers[filt] = {"cx": float(disk_cx), "cy": float(disk_cy), "r": float(disk_sr)}
         polar_eq_ratio = float(disk_sr_b) / float(disk_sr) if disk_sr > 0 else 1.0
         warp_params = {
             "disk_cx":       disk_cx,
@@ -795,6 +804,8 @@ def _apply_satellite_composite(
 
         image_io.write_tif_16bit(composite, out_path)
         print(f"      → {out_path.name}  ({', '.join(composited)})")
+
+    return disk_centers
 
 
 def _scan_session_pole_pa(
@@ -1213,7 +1224,7 @@ def _measure_derot_confidence(
 
 
 def _auto_calibrate_plate_scale(
-    windows: List[dict],
+    scores: dict,
     tracker: "SatelliteTracker",
     session_r_ref: float,
     pole_pa_deg: float,
@@ -1226,9 +1237,10 @@ def _auto_calibrate_plate_scale(
 ) -> Optional[dict]:
     """2-param (cx + ps) lstsq calibration using shadow transit frames.
 
-    Scans all IR frames in the session, finds frames where a shadow is on-disk
-    and at least |safe_dist| px from the limb, auto-detects the shadow position
-    via argmin, then fits:
+    Scans ALL session frames from the step-3 scores dict (window-selection-
+    independent), finds frames where a shadow is on-disk and at least
+    |safe_dist| px from the limb, auto-detects the shadow position via argmin,
+    then fits:
 
         actual_x = cx_fit + pred_dx_px * k
 
@@ -1241,18 +1253,18 @@ def _auto_calibrate_plate_scale(
 
     _WAVELET = [200., 200., 200., 0., 0., 0.]
 
-    # ── Collect all IR frame paths & timestamps ───────────────────────────────
+    # ── Collect all IR frame paths & timestamps from step-3 scores ───────────
+    # Using scores (all session frames) rather than selected windows so that
+    # shadow frames excluded by the de-overlap step still contribute to calibration.
     frame_info: list = []
-    for win in windows:
-        pf = win.get("per_filter", {})
-        filt = next((f for f in _FILT_PREF if f in pf and pf[f].get("included")), None)
-        if filt is None:
-            continue
-        for row in pf[filt]["included"]:
-            meta = image_io.parse_filename(row["path"])
-            if meta is None:
-                continue
-            frame_info.append((row["path"], meta["timestamp"].replace(tzinfo=None)))
+    filt = next((f for f in _FILT_PREF if scores.get(f)), None)
+    if filt is not None:
+        for row in sorted(scores[filt], key=lambda r: r["timestamp"]):
+            path = row.get("path")
+            ts   = row.get("timestamp")
+            if path and ts:
+                t = ts.replace(tzinfo=None) if getattr(ts, "tzinfo", None) else ts
+                frame_info.append((path, t))
 
     if not frame_info:
         return None
@@ -1499,7 +1511,7 @@ def run(
         ) or 0.0
         print("  [satellite] running plate_scale auto-calibration…", flush=True)
         calib_result = _auto_calibrate_plate_scale(
-            windows, tracker, session_r_ref,
+            results_03.get("scores", {}), tracker, session_r_ref,
             pole_pa_deg=session_pole_pa,
             np_ang_deg=_np_ang_cal,
         )
@@ -1640,7 +1652,7 @@ def run(
         # ── Satellite compositing (exp9 method) ───────────────────────────────
         if sat_cfg.composite_enabled and tracker is not None:
             print(f"  [satellite composite] Window {win_idx}…")
-            _apply_satellite_composite(
+            disk_centers = _apply_satellite_composite(
                 window=window,
                 filter_results=filter_results,
                 config=config,
@@ -1649,6 +1661,8 @@ def run(
                 np_ang_deg=np_ang_val,
                 r_ref=session_r_ref,
             )
+            if disk_centers and sat_log:
+                sat_log["disk_centers"] = disk_centers
 
         # ── Build log and save JSON ────────────────────────────────────────────
         log_dict = derotation.derotation_log_to_json(win_idx, window, filter_results)
