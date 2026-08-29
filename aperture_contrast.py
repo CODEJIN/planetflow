@@ -10,7 +10,7 @@ Aperture contrast is defined as |P - B| / B, where:
   P  = peak signal in the ROI (max for satellite, min for shadow)
   B  = median of the local background annulus
 
-Zones (in units of reference radius r = 10% of apparent disk diameter):
+Zones (in units of reference radius r = apparent disk diameter, i.e. 2x apparent radius):
   ROI        0.0 – 1.0 × r   (signal)
   Gap        1.0 – 1.5 × r   (PSF wing buffer)
   Background 1.5 – 2.5 × r   (local background)
@@ -36,18 +36,19 @@ Usage (single pair, manual coordinates):
     python aperture_contrast.py \
         --baseline  path/to/baseline.tif \
         --composite path/to/composite.tif \
-        --x 312 --y 205 --r 18.4 --type satellite
+        --x 312 --y 205 --r 184 --type satellite
 
 Usage (batch from CSV):
     python aperture_contrast.py --csv measurements.csv
 
 CSV format (one row per measurement):
     baseline,composite,x_px,y_px,r_px,type,label
-    win01/IR_baseline.tif,win01/IR_composite.tif,312,205,18.4,satellite,2026-03-28_IR_Io
+    win01/IR_baseline.tif,win01/IR_composite.tif,312,205,184,satellite,2026-03-28_IR_Io
     ...
     (type: "satellite" or "shadow")
-    r_px = 10% of the satellite/shadow apparent disk diameter (NOT the apparent radius).
-    e.g. apparent disk diameter 184 px → r_px = 18.4
+    r_px = the satellite/shadow apparent disk diameter (i.e. 2x the apparent radius,
+    matching the r_scale=2.0 default used by the auto/semi-auto modes above).
+    e.g. apparent disk diameter 184 px → r_px = 184
     baseline = Step 4 output with satellite_composite_enabled=False (planet-only stack)
     composite = Step 4 output with satellite_composite_enabled=True
 """
@@ -1103,8 +1104,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--y", type=float, metavar="PX",
                    help="Satellite/shadow center Y pixel")
     p.add_argument("--r", type=float, metavar="PX",
-                   help="Reference radius r in pixels: 10%% of the satellite/shadow "
-                        "apparent disk diameter (e.g. diameter=184px → r=18.4)")
+                   help="Reference radius r in pixels: the satellite/shadow apparent "
+                        "disk diameter, i.e. 2x the apparent radius "
+                        "(e.g. diameter=184px → r=184)")
     p.add_argument("--type", choices=["satellite", "shadow"], default="satellite",
                    help="Object type: 'satellite' (uses ROI max) or 'shadow' (uses ROI min)")
     p.add_argument("--label", default="", help="Label for output table")
