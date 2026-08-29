@@ -619,7 +619,10 @@ def run(
 
     # ── SatelliteTracker ───────────────────────────────────────────────────────
     tracker = None
-    if sat_cfg.enabled:
+    if sat_cfg.enabled and tracker_flip_ns is None:
+        print("  [satellite] tracker orientation unresolved — "
+              "satellite/shadow tracking skipped for this session")
+    elif sat_cfg.enabled:
         tracker = SatelliteTracker(
             jupiter_horizons_id=config.derotation.horizons_id,
             observer_code=config.derotation.observer_code,

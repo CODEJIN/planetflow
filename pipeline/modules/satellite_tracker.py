@@ -194,11 +194,14 @@ class SatelliteTracker:
             plate_scale_arcsec_per_px = self.get_plate_scale(disk_radius_px, t_list_naive[0])
 
         # Try Skyfield (jup365.bsp) first — no network, sub-pixel accuracy vs Horizons
-        # Apply cx_offset (find_disk_center bias from shadow-transit calibration) to body
-        # positions as well — the same bias shifts all position predictions equally.
-        disk_cx_eff = disk_cx + self._cx_offset
+        # NOTE: _cx_offset is fitted purely from shadow-transit residuals (see
+        # set_plate_scale_calibration) and must NOT be applied to body positions —
+        # empirically, the uncorrected body prediction already matches the real
+        # position (verified against real transit data); applying the shadow-only
+        # bias here previously introduced a body-position error of the same
+        # magnitude as the offset itself.
         results = self._get_positions_skyfield(
-            t_list_naive, disk_cx_eff, disk_cy, disk_radius_px,
+            t_list_naive, disk_cx, disk_cy, disk_radius_px,
             plate_scale_arcsec_per_px, pole_pa_deg, np_ang_deg,
         )
         if results is not None:
@@ -241,7 +244,7 @@ class SatelliteTracker:
                 dx_px  = east_px * np.cos(pa_rad) + north_px * np.sin(pa_rad)
                 dy_px  = east_px * np.sin(pa_rad) - north_px * np.cos(pa_rad)
 
-                x_px   = disk_cx + self._cx_offset + dx_px
+                x_px   = disk_cx + dx_px
                 y_px   = disk_cy + dy_px
                 dist   = float(np.hypot(dx_px, dy_px))
                 # Transit vs occultation: moon must be closer to Earth than Jupiter.

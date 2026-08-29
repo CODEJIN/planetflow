@@ -1103,31 +1103,46 @@ def resolve_tracker_flip_ns(
     windows: List[dict],
     session_pole_pa: float,
     derot_flip: bool,
-) -> bool:
+) -> Optional[bool]:
     """Resolve the satellite tracker's camera-orientation flip.
 
     Independent of derot_flip: tells the tracker which way is "north" in the
-    image. Priority: explicit sat_cfg override -> belt-asymmetry auto-detect
-    -> derot_flip.
+    image. Priority: explicit sat_cfg override -> belt-asymmetry auto-detect.
+
+    Returns None when neither is available (belt-asymmetry detection
+    inconclusive and no explicit override) — the caller must then skip
+    satellite/shadow tracking for this session rather than guess.
+
+    NOTE: this must NOT fall back to derot_flip. derot_flip answers a
+    different physical question (which way the atmospheric de-rotation warp
+    should run, from an NCC/drift test on Jupiter's belts) than tracker_flip_ns
+    (whether the camera is N/S-mirrored) — _detect_session_flip_ns's own
+    docstring explicitly warns "this does NOT determine satellite-tracker
+    orientation". Confirmed by real-data audit (2026-08-29): sessions that took
+    this fallback produced satellite/shadow position errors up to ~60px,
+    proportional to the target's north/south motion component, while sessions
+    resolved via belt-asymmetry auto-detect matched real transit positions to
+    within a few px.
     """
     sat_cfg = config.satellite
     if sat_cfg.flip_ns is not None:
         tracker_flip_ns = bool(sat_cfg.flip_ns)
         print(f"  [tracker] flip_ns override = {tracker_flip_ns} (from sat_cfg)")
-    else:
-        auto_flip, auto_conf = _detect_tracker_flip_ns(
-            windows, session_pole_pa,
-            horizons_id=config.derotation.horizons_id,
-        )
-        if auto_flip is not None:
-            tracker_flip_ns = auto_flip
-            print(f"  [tracker] flip_ns = {tracker_flip_ns} "
-                  f"(belt-asymmetry auto-detect, confidence={auto_conf:.3f})")
-        else:
-            tracker_flip_ns = derot_flip
-            print(f"  [tracker] flip_ns = {tracker_flip_ns} "
-                  f"(fallback to derot_flip — belt detection inconclusive)")
-    return tracker_flip_ns
+        return tracker_flip_ns
+
+    auto_flip, auto_conf = _detect_tracker_flip_ns(
+        windows, session_pole_pa,
+        horizons_id=config.derotation.horizons_id,
+    )
+    if auto_flip is not None:
+        print(f"  [tracker] flip_ns = {auto_flip} "
+              f"(belt-asymmetry auto-detect, confidence={auto_conf:.3f})")
+        return auto_flip
+
+    print(f"  [tracker] flip_ns unresolved (belt-asymmetry detection inconclusive, "
+          f"confidence={auto_conf:.3f} < threshold) — satellite/shadow tracking "
+          f"skipped for this session. Set satellite.flip_ns explicitly to override.")
+    return None
 
 
 def compute_session_disk_radius(windows: List[dict]) -> Optional[float]:
