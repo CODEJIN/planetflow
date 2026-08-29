@@ -864,17 +864,29 @@ def _detect_tracker_flip_ns(
     session_pole_pa: float,
     horizons_id: str = "599",
 ) -> Tuple[Optional[bool], float]:
-    """Load frames from all windows and call detect_tracker_flip_ns().
+    """Per-window belt-asymmetry detection with a session-level majority vote.
 
-    Aggregates frames across all windows (one preferred filter per window) to
-    maximise signal, then delegates to satellite_tracker.detect_tracker_flip_ns.
+    Each window's own frames (a few minutes wide) are averaged and tested
+    independently, then windows with a confident result vote; the majority
+    decides. This mirrors _detect_session_flip_ns's pair-voting design for
+    derot_flip, for the same reason: naively averaging frames across the
+    ENTIRE session (potentially hours, many windows) before measuring belt
+    asymmetry smears the SEB/NEB structure by however much Jupiter rotated
+    between the earliest and latest frame (~36.26 deg/hr), destroying the very
+    signal being measured. Verified on real data (2026-08-29): a single
+    session-wide average over ~2h/31 windows gave confidence=0.02
+    (inconclusive), while every individual window in that same session
+    independently gave confidence 0.58-0.80 in full agreement — i.e. the
+    orientation was never actually ambiguous, only the whole-session-average
+    method was blind to it.
 
-    Returns (flip_ns, confidence): flip_ns=None if inconclusive or not applicable.
+    Returns (flip_ns, confidence): flip_ns=None if no window's own frames
+    were individually confident enough to vote.
     """
-    print("  [tracker_flip] Auto-detecting tracker N/S orientation…")
+    print("  [tracker_flip] Auto-detecting tracker N/S orientation (per-window vote)…")
 
-    frames: List[np.ndarray] = []
     cx_ref = cy_ref = r_ref = None
+    votes: List[Tuple[bool, float]] = []
 
     for win in windows:
         filt = next(
@@ -884,6 +896,8 @@ def _detect_tracker_flip_ns(
         )
         if filt is None:
             continue
+
+        win_frames: List[np.ndarray] = []
         for row in win["per_filter"][filt]["included"]:
             try:
                 raw = image_io.read_tif(row["path"])
@@ -896,32 +910,48 @@ def _detect_tracker_flip_ns(
                     if r_ref < 5:
                         cx_ref = None
                         continue
-                frames.append(lum)
+                win_frames.append(lum)
             except Exception:
                 continue
 
-    if not frames or cx_ref is None:
-        print("  [tracker_flip] No usable frames — cannot auto-detect")
+        if not win_frames or cx_ref is None:
+            continue
+
+        try:
+            flip, confidence = detect_tracker_flip_ns(
+                frames=win_frames,
+                cx=cx_ref, cy=cy_ref,
+                disk_radius_px=r_ref,
+                pole_pa_deg=session_pole_pa,
+                horizons_id=horizons_id,
+            )
+        except Exception as exc:
+            warnings.warn(f"  [tracker_flip] window {win.get('center_time')} failed: {exc}")
+            continue
+
+        if flip is not None:
+            votes.append((flip, confidence))
+            print(
+                f"  [tracker_flip] window vote [{win.get('center_time')}]: "
+                f"flip={flip}  confidence={confidence:.3f}  (n_frames={len(win_frames)})"
+            )
+
+    if not votes:
+        print("  [tracker_flip] No window gave a confident individual result — INCONCLUSIVE")
         return None, 0.0
 
-    try:
-        flip_ns, confidence = detect_tracker_flip_ns(
-            frames=frames,
-            cx=cx_ref, cy=cy_ref,
-            disk_radius_px=r_ref,
-            pole_pa_deg=session_pole_pa,
-            horizons_id=horizons_id,
-        )
-        status = "INCONCLUSIVE" if flip_ns is None else f"flip_ns={flip_ns}"
-        print(
-            f"  [tracker_flip] → {status}  (confidence={confidence:.3f}, "
-            f"n_frames={len(frames)})"
-        )
-        return flip_ns, confidence
+    n_true  = sum(1 for v, _ in votes if v)
+    n_false = len(votes) - n_true
+    flip_ns = (n_true > n_false) if n_true != n_false else max(votes, key=lambda x: x[1])[0]
+    agreeing_conf = [c for v, c in votes if v == flip_ns]
+    confidence = float(np.mean(agreeing_conf))
 
-    except Exception as exc:
-        warnings.warn(f"  [tracker_flip] Detection failed: {exc}")
-        return None, 0.0
+    print(
+        f"  [tracker_flip] → flip_ns={flip_ns}  "
+        f"[{n_true}×True / {n_false}×False, {len(votes)} window(s)]  "
+        f"confidence={confidence:.3f}"
+    )
+    return flip_ns, confidence
 
 
 def _auto_calibrate_plate_scale(
