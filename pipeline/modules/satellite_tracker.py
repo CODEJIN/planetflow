@@ -107,7 +107,8 @@ class SatelliteTracker:
         self.flip_ns       = flip_ns
         # Cache: command_str → [(datetime, ra_deg, dec_deg)]
         self._ra_dec_cache: Dict[str, List[Tuple[datetime, float, float, float]]] = {}
-        self._plate_scale: Optional[float] = None   # arcsec/px (computed once)
+        self._plate_scale: Optional[float] = None   # arcsec/px (computed once), used for BODY positions
+        self._plate_scale_shadow: Optional[float] = None  # shadow-transit-calibrated override, SHADOW only
         self._cx_offset:   float           = 0.0    # px added to disk_cx in shadow prediction
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -148,19 +149,35 @@ class SatelliteTracker:
         ps_fit: float,
         cx_offset: float,
     ) -> None:
-        """Override plate_scale and set cx_offset from shadow-transit auto-calibration.
+        """Set a shadow-transit-calibrated plate scale and disk-centre offset.
 
         ps_fit    : calibrated plate scale (arcsec/px) from 2-param lstsq.
         cx_offset : systematic px offset added to disk_cx in shadow position prediction.
+
+        NOTE: both parameters are fitted purely from shadow-transit argmin
+        residuals and apply to SHADOW position queries only (get_shadow_positions).
+        Body positions (get_positions) continue to use the nominal, ephemeris-
+        derived plate scale. Verified against real transit data (2026-08-29):
+        applying this shadow-fitted plate scale to body positions too degrades
+        body accuracy from ~2-4px error to 8-14px error, the same failure mode
+        previously found for cx_offset -- a value fitted from and validated for
+        the shadow's specific geometry is not a general camera/optics property
+        that also holds for the body.
         """
-        prev_ps = self._plate_scale or ps_fit
-        self._plate_scale = ps_fit
-        self._cx_offset   = cx_offset
+        prev_ps = self._plate_scale_shadow or ps_fit
+        self._plate_scale_shadow = ps_fit
+        self._cx_offset          = cx_offset
         dps = 100.0 * (ps_fit - prev_ps) / prev_ps if prev_ps else 0.0
         print(
-            f"  [SatTracker] plate_scale calibration applied: "
-            f"ps={ps_fit:.5f} (Δ{dps:+.2f}%)  cx_offset={cx_offset:+.2f}px"
+            f"  [SatTracker] shadow plate_scale calibration applied: "
+            f"ps={ps_fit:.5f} (Δ{dps:+.2f}%)  cx_offset={cx_offset:+.2f}px  (shadow positions only)"
         )
+
+    def _get_shadow_plate_scale(self, disk_radius_px: float, t_sample: datetime) -> float:
+        """Plate scale for shadow queries: shadow-calibrated if available, else nominal."""
+        if self._plate_scale_shadow is not None:
+            return self._plate_scale_shadow
+        return self.get_plate_scale(disk_radius_px, t_sample)
 
     def get_positions(
         self,
@@ -485,7 +502,7 @@ class SatelliteTracker:
                         for t in t_list]
 
         if plate_scale_arcsec_per_px is None:
-            plate_scale_arcsec_per_px = self.get_plate_scale(disk_radius_px, t_list_naive[0])
+            plate_scale_arcsec_per_px = self._get_shadow_plate_scale(disk_radius_px, t_list_naive[0])
 
         sf = _load_skyfield_kernels()
         if sf is None:
