@@ -46,6 +46,27 @@ _JUP_POLE_ICRF = np.array([
     np.sin(np.radians(64.495)),
 ], dtype=np.float64)
 
+_C_KM_PER_S = 299_792.458
+
+
+def _aberrate(u: np.ndarray, earth_velocity_km_per_s: np.ndarray) -> np.ndarray:
+    """Classical (first-order) stellar aberration: shift a light-time-corrected
+    unit direction vector by the observer's own velocity.
+
+    u_apparent = normalize(u + beta - (beta . u) u), beta = v_earth / c.
+
+    First order in v/c (~1e-4 here) is more than sufficient -- the neglected
+    relativistic term is O((v/c)^2) ~ 1e-8, far below any other error source
+    in this pipeline. Previously missing entirely (only light-time was
+    applied); found negligible in isolation for DIFFERENTIAL body/shadow
+    positions (~0.01-0.1px, since it's >99% common-mode over the ~1-3 arcmin
+    Jupiter-moon separation and cancels in the moon-minus-Jupiter subtraction)
+    but applied for correctness regardless.
+    """
+    beta = earth_velocity_km_per_s / _C_KM_PER_S
+    u_ab = u + beta - float(np.dot(beta, u)) * u
+    return u_ab / float(np.linalg.norm(u_ab))
+
 # Skyfield ephemeris kernels for 3D shadow position computation
 # Resolution order: env PLANETFLOW_SKYFIELD_DIR → ~/.planetflow/skyfield → /tmp/skyfield
 import os as _os
@@ -368,6 +389,7 @@ class SatelliteTracker:
             for t in t_list_naive:
                 t_sf = ts.utc(t.year, t.month, t.day, t.hour, t.minute, t.second)
                 earth_km = eph["earth"].at(t_sf).position.km
+                earth_vel_km_s = eph["earth"].at(t_sf).velocity.km_per_s
 
                 # Light travel time from Jupiter to Earth
                 jup_km_obs = eph["jupiter barycenter"].at(t_sf).position.km
@@ -382,6 +404,7 @@ class SatelliteTracker:
                 def _ra_dec(pos_km: np.ndarray):
                     d = pos_km - earth_km
                     d = d / float(np.linalg.norm(d))
+                    d = _aberrate(d, earth_vel_km_s)
                     dec = float(np.degrees(np.arcsin(float(np.clip(d[2], -1.0, 1.0)))))
                     ra  = float(np.degrees(np.arctan2(float(d[1]), float(d[0]))) % 360.0)
                     return ra, dec
@@ -1187,8 +1210,10 @@ def _shadow_pos_skyfield(
     """
     t_sf = ts.utc(t.year, t.month, t.day, t.hour, t.minute, t.second)
 
-    # Earth position at observation time (for final RA/Dec projection)
+    # Earth position/velocity at observation time (position for final RA/Dec
+    # projection, velocity for the stellar-aberration correction below)
     earth_km = eph['earth'].at(t_sf).position.km               # (3,)
+    earth_vel_km_s = eph['earth'].at(t_sf).velocity.km_per_s
 
     # Light travel time from Jupiter to Earth — emit time for shadow geometry
     jup_km_t = eph['jupiter barycenter'].at(t_sf).position.km
@@ -1198,9 +1223,20 @@ def _shadow_pos_skyfield(
 
     # ICRF positions at emission time (shadow geometry — LTT corrected)
     # jup_km must use the same kernel as moon_km so ray geometry is self-consistent.
-    sun_km  = eph['sun'].at(t_emit).position.km                # (3,)
     jup_km  = jup_moons['jupiter barycenter'].at(t_emit).position.km  # jup365, same frame as moon_km
     moon_km = moon_body.at(t_emit).position.km                 # ICRF from SSB (auto-chained)
+
+    # The shadow-casting ray's Sun endpoint must be backdated by its OWN
+    # light travel time to Jupiter (~43 min) from t_emit -- previously this
+    # was evaluated at t_emit itself, off by that ~43 min for the Sun's
+    # position only (negligible in practice: Sun's ~12.7 m/s barycentric
+    # reflex motion over 43 min shifts the shadow by ~0.1px, but it is a
+    # genuine physical inaccuracy so it's corrected here regardless).
+    sun_km_approx = eph['sun'].at(t_emit).position.km
+    d_SJ_km = float(np.linalg.norm(jup_km - sun_km_approx))
+    lt_sun_days = d_SJ_km / (299792.458 * 86400.0)
+    t_sun_emit  = ts.tt_jd(float(t_emit.tt) - lt_sun_days)
+    sun_km  = eph['sun'].at(t_sun_emit).position.km            # (3,)
 
     moon_name_body = shadow_name.replace("_shadow", "")
     _off_shad = SatellitePos(name=shadow_name, x_px=disk_cx, y_px=disk_cy,
@@ -1250,6 +1286,7 @@ def _shadow_pos_skyfield(
     def _ra_dec(pos_km: np.ndarray) -> Tuple[float, float]:
         d = pos_km - earth_km
         d = d / float(np.linalg.norm(d))
+        d = _aberrate(d, earth_vel_km_s)
         dec = float(np.degrees(np.arcsin(float(np.clip(d[2], -1.0, 1.0)))))
         ra  = float(np.degrees(np.arctan2(float(d[1]), float(d[0]))) % 360.0)
         return ra, dec
