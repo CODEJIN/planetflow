@@ -10,17 +10,27 @@ Provides:
   - Motion-based Gaussian/capsule blend masks and the exp9 compositing method
     (_apply_satellite_composite) — overwrites planet TIFs with Europa/shadow
     composited stacks when config.satellite.composite_enabled.
-  - Satellite tracker orientation auto-detection (_detect_tracker_flip_ns) and
-    plate-scale auto-calibration from observed shadow transits
-    (_auto_calibrate_plate_scale).
-  - Three small orchestration helpers (resolve_tracker_flip_ns,
-    compute_session_disk_radius, run_plate_scale_calibration) extracted from
-    logic that used to be inlined directly in derotate_stack.py's run().
+  - Satellite tracker orientation auto-detection (_detect_tracker_flip_ns).
+  - Two small orchestration helpers (resolve_tracker_flip_ns,
+    compute_session_disk_radius) extracted from logic that used to be inlined
+    directly in derotate_stack.py's run().
+
+2026-08-31 project decision: this module previously also provided a
+CV-derived plate-scale/disk-centre auto-calibration (_auto_calibrate_plate_scale,
+run_plate_scale_calibration; paper Sec 2.3.3, "Automated Plate Scale
+Calibration"), fitted from an image-measured "true" shadow/body position.
+It was removed after confirming that image-based ground truth on Jupiter is
+not reliable enough to calibrate against (Jupiter's own smooth shading and
+belt structure repeatedly produced confident-looking false detections during
+verification of an extended version of this same mechanism). Satellite/shadow
+pixel positions are now purely the ephemeris-projection formula's output, with
+no empirical correction of any kind. Any positional error must be tracked
+down and fixed at the projection-formula level instead — see the OPEN
+QUESTION comment on pole_pa_deg convention in
+pipeline/modules/satellite_tracker.py's _get_positions_skyfield/_icrf_to_px.
 """
 from __future__ import annotations
 
-import contextlib
-import io
 import warnings
 from typing import Dict, List, Optional, Tuple
 
@@ -31,7 +41,6 @@ from pipeline.modules import derotation, image_io
 from pipeline.modules.derotation import (
     apply_shift,
     find_disk_center,
-    query_horizons_np_ang,
     quality_weighted_stack,
     _reprojection_point_shift,
 )
@@ -711,7 +720,10 @@ def _apply_satellite_composite(
     if ref_lum.ndim == 3:
         ref_lum = ref_lum.mean(axis=2)
     if r_ref is None:
-        _, _, r_ref, _, _ = derotation.find_disk_center(ref_lum)
+        _rcx, _rcy, r_ref, _rrb, _rang = derotation.find_disk_center(ref_lum)
+        r_ref, _rrb, _ = derotation.refine_disk_radius_for_plate_scale(
+            ref_lum, _rcx, _rcy, r_ref, _rrb, _rang,
+        )
     plate_scale = tracker.get_plate_scale(r_ref, t_center_naive)
 
     # ── Per-filter composite ───────────────────────────────────────────────────
@@ -954,174 +966,6 @@ def _detect_tracker_flip_ns(
     return flip_ns, confidence
 
 
-def _auto_calibrate_plate_scale(
-    scores: dict,
-    tracker: "SatelliteTracker",
-    session_r_ref: float,
-    pole_pa_deg: float,
-    np_ang_deg: float,
-    *,
-    crop: int = 20,
-    safe_dist: float = -38.0,
-    min_depth: float = 0.05,
-    min_frames: int = 3,
-) -> Optional[dict]:
-    """2-param (cx + ps) lstsq calibration using shadow transit frames.
-
-    Scans ALL session frames from the step-3 scores dict (window-selection-
-    independent), finds frames where a shadow is on-disk and at least
-    |safe_dist| px from the limb, auto-detects the shadow position via argmin,
-    then fits:
-
-        actual_x = cx_fit + pred_dx_px * k
-
-    where pred_dx_px = predicted_shadow_x − disk_cx and k = ps_nom / ps_fit.
-
-    Returns dict(ps_fit, cx_offset, dps_pct, n, rmse_nom, rmse_fit) or None.
-    """
-
-    _WAVELET = [200., 200., 200., 0., 0., 0.]
-
-    # ── Collect all IR frame paths & timestamps from step-3 scores ───────────
-    # Using scores (all session frames) rather than selected windows so that
-    # shadow frames excluded by the de-overlap step still contribute to calibration.
-    frame_info: list = []
-    filt = next((f for f in _FILT_PREF if scores.get(f)), None)
-    if filt is not None:
-        for row in sorted(scores[filt], key=lambda r: r["timestamp"]):
-            path = row.get("path")
-            ts   = row.get("timestamp")
-            if path and ts:
-                t = ts.replace(tzinfo=None) if getattr(ts, "tzinfo", None) else ts
-                frame_info.append((path, t))
-
-    if not frame_info:
-        return None
-
-    # ── Per-frame disk_cx (find_disk_center on each frame) ───────────────────
-    frame_cx: dict = {}
-    for path, _ in frame_info:
-        try:
-            raw = image_io.read_tif(path)
-            lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype("float32")
-            if lum.max() > 1.5:
-                lum /= 65535.0
-            cx, cy, *_ = derotation.find_disk_center(lum)
-            frame_cx[path] = (float(cx), float(cy))
-        except Exception:
-            pass
-
-    if not frame_cx:
-        return None
-
-    session_cx = float(np.median([v[0] for v in frame_cx.values()]))
-    session_cy = float(np.median([v[1] for v in frame_cx.values()]))
-
-    # ── Bulk shadow position query (suppress per-moon print spam) ─────────────
-    valid_frames = [(p, t) for p, t in frame_info if p in frame_cx]
-    all_times = [t for _, t in valid_frames]
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        shad_dict = tracker.get_shadow_positions(
-            all_times, session_cx, session_cy, session_r_ref,
-            pole_pa_deg=pole_pa_deg,
-            np_ang_deg=np_ang_deg,
-        )
-
-    if not shad_dict:
-        return None
-
-    # Per-frame: pick the first on-disk shadow that's safe from limb
-    transit_by_idx: dict = {}
-    for shadow_key, pos_list in shad_dict.items():
-        for i, pos in enumerate(pos_list):
-            if i in transit_by_idx:
-                continue
-            if pos.on_disk and (pos.dist_px - session_r_ref) < safe_dist:
-                transit_by_idx[i] = (pos, shadow_key)
-
-    if not transit_by_idx:
-        return None
-
-    # ── argmin shadow detection + data collection ─────────────────────────────
-    pred_dx_pxs: list = []
-    actual_xs:   list = []
-    disk_cxs:    list = []
-
-    for i, (path, _) in enumerate(valid_frames):
-        if i not in transit_by_idx:
-            continue
-        pos, _ = transit_by_idx[i]
-
-        disk_cx_frame = frame_cx[path][0]
-        # pos.x_px was computed with session_cx; adjust search centre for per-frame cx
-        pred_x = pos.x_px + (disk_cx_frame - session_cx)
-        pred_y = pos.y_px
-
-        try:
-            raw = image_io.read_tif(path)
-            lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype("float32")
-            if lum.max() > 1.5:
-                lum /= 65535.0
-            lum = sharpen(lum, levels=6, amounts=_WAVELET)
-            lum = np.clip(lum, 0., 1.)
-            h, w = lum.shape
-
-            x0 = max(0, int(round(pred_x)) - crop)
-            x1 = min(w, int(round(pred_x)) + crop + 1)
-            y0 = max(0, int(round(pred_y)) - crop)
-            y1 = min(h, int(round(pred_y)) + crop + 1)
-            patch = lum[y0:y1, x0:x1]
-            if patch.size == 0:
-                continue
-            depth = float(patch.max() - patch.min())
-            if depth < min_depth:
-                continue
-
-            idx = np.unravel_index(np.argmin(patch), patch.shape)
-            actual_x = float(x0 + idx[1])
-
-            # pred_dx_px is independent of per-frame cx (= dx_arcsec / ps_nom)
-            pred_dx_pxs.append(float(pos.x_px - session_cx))
-            actual_xs.append(actual_x)
-            disk_cxs.append(disk_cx_frame)
-
-        except Exception:
-            continue
-
-    n = len(pred_dx_pxs)
-    if n < min_frames:
-        return None
-
-    pred_dx = np.array(pred_dx_pxs)
-    actual  = np.array(actual_xs)
-    dcxs    = np.array(disk_cxs)
-
-    # 2-param lstsq: actual_x = alpha + k * pred_dx_px
-    A = np.column_stack([np.ones(n), pred_dx])
-    coef, _, _, _ = np.linalg.lstsq(A, actual, rcond=None)
-    cx_fit = float(coef[0])
-    k      = float(coef[1])          # = ps_nom / ps_fit
-
-    ps_nom  = tracker._plate_scale   # nominal, already cached
-    ps_fit  = ps_nom / k
-    cx_offset = cx_fit - session_cx  # systematic correction to add to disk_cx
-
-    rmse_fit = float(np.sqrt(np.mean((actual - A @ coef) ** 2)))
-    rmse_nom = float(np.sqrt(np.mean((actual - (dcxs + pred_dx)) ** 2)))
-
-    return dict(
-        ps_fit=ps_fit,
-        ps_nom=ps_nom,
-        cx_offset=cx_offset,
-        dps_pct=100.0 * (ps_fit - ps_nom) / ps_nom,
-        n=n,
-        rmse_nom=rmse_nom,
-        rmse_fit=rmse_fit,
-    )
-
-
 # ── Orchestration helpers extracted from derotate_stack.py's run() ────────────
 # (previously inlined directly in run() rather than as function calls; moved
 # here verbatim, just wrapped, as part of the derotate_stack.py/
@@ -1176,11 +1020,19 @@ def resolve_tracker_flip_ns(
 
 
 def compute_session_disk_radius(windows: List[dict]) -> Optional[float]:
-    """Session-wide median disk radius (for plate_scale stability).
+    """Session-wide median disk radius, for plate_scale purposes.
 
     Only meaningful when a satellite tracker is active — the caller
     (run()) is expected to only call this when tracker is not None (matches
     the original inline guard), so this function doesn't need tracker itself.
+
+    Each frame's raw find_disk_center() radius is corrected via
+    derotation.refine_disk_radius_for_plate_scale() before taking the
+    session median -- see that function's docstring for why the raw radius
+    systematically undersizes the disk (Otsu threshold crossing the limb-
+    darkening falloff well inside the true edge), and why the fix is a
+    Minnaert-law fit to the disk's own radial profile rather than any
+    calibration against a satellite/shadow position.
     """
     _r_vals: list[float] = []
     for _win in windows:
@@ -1199,7 +1051,10 @@ def compute_session_disk_radius(windows: List[dict]) -> Optional[float]:
                 _lum = _lum.astype(np.float32)
                 if _lum.max() > 1.5:
                     _lum /= 65535.0
-                _, _, _r, *_ = derotation.find_disk_center(_lum)
+                _cx, _cy, _r, _rb, _ang = derotation.find_disk_center(_lum)
+                _r, _rb, _ = derotation.refine_disk_radius_for_plate_scale(
+                    _lum, _cx, _cy, _r, _rb, _ang,
+                )
                 if _r > 5:
                     _r_vals.append(_r)
             except Exception:
@@ -1211,47 +1066,3 @@ def compute_session_disk_radius(windows: List[dict]) -> Optional[float]:
               f"(n={len(_r_vals)}, range={min(_r_vals):.1f}–{max(_r_vals):.1f})")
     return session_r_ref
 
-
-def run_plate_scale_calibration(
-    tracker: "SatelliteTracker",
-    config: PipelineConfig,
-    windows: List[dict],
-    results_03: dict,
-    session_r_ref: float,
-    session_pole_pa: float,
-) -> Optional[dict]:
-    """Plate-scale auto-calibration from an observed shadow transit, if present.
-
-    Mutates tracker in place via tracker.set_plate_scale_calibration(...).
-    Caller is expected to only call this when tracker is not None and
-    session_r_ref is not None (matches the original inline guard in run()) —
-    MUST run before any code that reads tracker.get_plate_scale(), since that
-    caches its result on first use.
-
-    Returns the calib_result dict (or None if no shadow transit was found) —
-    the caller (run()) also needs this for its session-summary JSON, not just
-    for the calibration side effect.
-    """
-    _t_mid_cal = sorted(windows, key=lambda w: w["center_time"])[len(windows) // 2]["center_time"]
-    _np_ang_cal = query_horizons_np_ang(
-        config.derotation.horizons_id, _t_mid_cal, config.derotation.observer_code,
-    ) or 0.0
-    print("  [satellite] running plate_scale auto-calibration…", flush=True)
-    calib_result = _auto_calibrate_plate_scale(
-        results_03.get("scores", {}), tracker, session_r_ref,
-        pole_pa_deg=session_pole_pa,
-        np_ang_deg=_np_ang_cal,
-    )
-    if calib_result is not None:
-        tracker.set_plate_scale_calibration(
-            calib_result["ps_fit"], calib_result["cx_offset"]
-        )
-        print(
-            f"  [satellite] calibration: N={calib_result['n']}  "
-            f"Δps={calib_result['dps_pct']:+.2f}%  "
-            f"cx_offset={calib_result['cx_offset']:+.2f}px  "
-            f"RMSE {calib_result['rmse_nom']:.3f}→{calib_result['rmse_fit']:.3f}px"
-        )
-    else:
-        print("  [satellite] no shadow transit detected — plate_scale calibration skipped")
-    return calib_result

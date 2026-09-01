@@ -423,7 +423,7 @@ def _filter_satellite_windows(windows: list, groups: dict) -> list:
     """
     try:
         from pipeline.modules.satellite_tracker import SatelliteTracker
-        from pipeline.modules.derotation import find_disk_center
+        from pipeline.modules.derotation import find_disk_center, refine_disk_radius_for_plate_scale
         from pipeline.modules.image_io import read_tif
     except ImportError:
         return windows
@@ -440,7 +440,8 @@ def _filter_satellite_windows(windows: list, groups: dict) -> list:
 
     try:
         img  = read_tif(ref_tif)
-        cx, cy, r, *_ = find_disk_center(img)
+        cx, cy, r, rb, ang = find_disk_center(img)
+        r, rb, _ = refine_disk_radius_for_plate_scale(img, cx, cy, r, rb, ang)
     except Exception:
         return windows
 
@@ -492,7 +493,7 @@ def _measure_window_pair(
     """
     try:
         from pipeline.modules.satellite_tracker import SatelliteTracker
-        from pipeline.modules.derotation import find_disk_center
+        from pipeline.modules.derotation import find_disk_center, refine_disk_radius_for_plate_scale
         from pipeline.modules.image_io import read_tif
     except ImportError as exc:
         raise ImportError(f"Pipeline modules required for auto mode: {exc}") from exc
@@ -516,11 +517,6 @@ def _measure_window_pair(
     flip_ew = bool( session_log.get("flip_ew", False))
 
     tracker = SatelliteTracker(flip_ew=flip_ew, flip_ns=flip_ns)
-    ps_calib = session_log.get("plate_scale_calibration")
-    if ps_calib:
-        tracker.set_plate_scale_calibration(
-            float(ps_calib["ps_fit"]), float(ps_calib["cx_offset"])
-        )
 
     # Collect TIFs to process: all in composite dir, optionally filtered
     all_comp_tifs = sorted(comp_win_dir.glob("*_derotated.tif"))
@@ -553,25 +549,31 @@ def _measure_window_pair(
                 cx = float(_stored["cx"])
                 cy = float(_stored["cy"])
                 r  = float(_stored["r"])
+                r_b, ang = r, 0.0   # no ellipse orientation stored -- circular approximation
             else:
-                cx, cy, r, *_ = find_disk_center(img_base)
+                cx, cy, r, r_b, ang = find_disk_center(img_base)
             # Wavelet sharpening applied to both images before contrast measurement
+            # -- uses the raw (unrefined) r, matching the geometric feathering
+            # convention _apply_wavelet_display was built and validated against.
             img_base = _apply_wavelet_display(img_base, cx, cy, r)
             img_comp = _apply_wavelet_display(img_comp, cx, cy, r)
         except Exception:
             continue
 
-        plate_scale = tracker.get_plate_scale(r, center_time)
+        # Plate-scale/position purposes need the corrected radius (see
+        # refine_disk_radius_for_plate_scale); the display/sharpening radius
+        # above is deliberately left untouched.
+        r_ps, _, _ = refine_disk_radius_for_plate_scale(img_base, cx, cy, r, r_b, ang)
+        plate_scale = tracker.get_plate_scale(r_ps, center_time)
         print(f"    [{filt_name}] pole_pa={pole_pa:.1f}°  np_ang={np_ang:.3f}°  "
-              f"flip_ns={flip_ns}  ps={plate_scale:.4f}\"/px"
-              + (f"  cx_offset={ps_calib['cx_offset']:+.2f}px" if ps_calib else ""))
+              f"flip_ns={flip_ns}  ps={plate_scale:.4f}\"/px")
 
         body_pos = tracker.get_positions(
-            [center_time], cx, cy, r, pole_pa_deg=pole_pa, np_ang_deg=np_ang
+            [center_time], cx, cy, r_ps, pole_pa_deg=pole_pa, np_ang_deg=np_ang
         )
         try:
             shad_pos = tracker.get_shadow_positions(
-                [center_time], cx, cy, r, pole_pa_deg=pole_pa, np_ang_deg=np_ang
+                [center_time], cx, cy, r_ps, pole_pa_deg=pole_pa, np_ang_deg=np_ang
             ) or {}
         except Exception:
             shad_pos = {}

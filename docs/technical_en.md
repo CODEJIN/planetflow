@@ -531,32 +531,13 @@ For each frame timestamp `t_obs`, the shadow position is computed as follows:
 
 3. **RA/Dec projection**: Convert the shadow's ICRF position to apparent RA/Dec as seen from Earth at `t_obs`, then project to pixel coordinates using `plate_scale`, `pole_pa_deg + np_ang_deg`, and the flip convention.
 
-**Known limitation**: `plate_scale` is derived as `ang_radius_geometric / r_ref_photometric`, where the geometric angular radius (from Horizons) and the photometric disk radius (Otsu gradient peak, typically ~125 px) refer to different physical radii of the limb-darkened disk. This mismatch causes a systematic ~6–10% overestimation of `plate_scale`, which propagates to a proportional displacement error in all satellite and shadow position predictions. When a shadow transit is observed in the session, the auto-calibration below compensates for this error.
+**Fixed 2026-08-31**: `plate_scale` is derived as `ang_radius_geometric / r_ref_photometric`, but the geometric angular radius (from Horizons) and the photometric disk radius (Otsu gradient peak) referred to different physical radii of the limb-darkened disk — the Otsu threshold crosses the limb-darkening falloff curve well inside the true geometric edge, systematically undersizing `r_ref` by ~6–18% depending on frame/session. Fixed via `refine_disk_radius_for_plate_scale()` in `pipeline/modules/derotation.py`: a Minnaert-law fit (`pipeline/modules/limb_darkening.py`) to the disk's own high-SNR radial brightness profile recovers the true geometric radius, used only for `plate_scale`/position purposes (the original Otsu radius is kept unchanged for geometric/warp/feathering purposes, where it is not wrong — see the function's docstring). Falls back to the original radius on fit failure or an implausible ratio (bounds [1.0, 1.3]).
 
-#### plate_scale Auto-calibration (Shadow Transit Sessions)
+**Known limitation, UNRESOLVED (as of 2026-08-31)**: after the `plate_scale` fix above, a separate ~5–14° (avg ~+7–8°) systematic *rotational* offset remains between predicted and actual shadow position. Most candidate causes (ephemeris, the ray-intersection math, `np_ang_deg`, disk-centre reference, pure algorithm bias, limb-darkening contamination, alt-az field rotation, cumulative polar-misalignment drift) were tested via pure physics/independent-ephemeris cross-checks and ruled out; one real, partial (~1–3° of the ~7–8° average) cause was found and fixed — `pole_pa_deg` was measured on the RAW pre-derotation frame but applied on the DEROTATED/stacked output (see `pole_pa_for_tracker` in `pipeline/steps/derotate_stack.py`) — but the majority remains unexplained, and the investigation is paused pending further data or tooling. This is a real accuracy issue for satellite/shadow compositing, not just diagnostic-image cosmetics: the residual pixel offset at typical transit radii (~9px) is comparable to the object's own radius (~6–11px). See [`docs/investigation_shadow_rotational_bias.md`](investigation_shadow_rotational_bias.md) for the full investigation log (methods, results, what was ruled out and why).
 
-**Source**: `pipeline/steps/derotate_stack.py` → `_auto_calibrate_plate_scale()`
+#### plate_scale Auto-calibration — REMOVED 2026-08-31
 
-When `satellite.enabled = True`, after `session_r_ref` is established the pipeline scans all frames in the session to detect shadow transit frames. If sufficient transit frames are found (default N ≥ 3, at least 38 px from the limb), a 2-parameter least-squares fit simultaneously calibrates `plate_scale` and `cx_offset`.
-
-**Calibration model**:
-
-```
-actual_x = cx_fit + pred_dx_px × k
-  pred_dx_px = predicted_shadow_x − disk_cx   (= dx_arcsec / ps_nom)
-  k          = ps_nom / ps_fit
-```
-
-lstsq solution: `ps_fit = ps_nom / k`, `cx_offset = cx_fit − session_cx`
-
-After calibration, `SatelliteTracker.set_plate_scale_calibration(ps_fit, cx_offset)` is called and all subsequent shadow position predictions use the corrected values. Results are logged to `derotation_log.json → session.plate_scale_calibration`.
-
-| Condition | Behaviour |
-|---|---|
-| Shadow transit present (N ≥ 3, ≥ 38 px from limb) | Calibration applied — Δps and cx_offset printed to log |
-| No shadow transit or insufficient frames | Nominal `plate_scale` retained, silently skipped |
-
-**Note**: Calibration values are session-specific and will differ across equipment and seeing conditions. Single-parameter ps calibration (cx fixed) is avoided because cx error biases the ps estimate; the 2-parameter fit is used exclusively.
+A CV-derived auto-calibration (`_auto_calibrate_plate_scale()` in `pipeline/steps/satellite_composite.py`) previously fit `plate_scale` and a disk-centre offset from an image-measured "true" shadow position (originally a single-frame argmin; later extended to a background-subtracted sub-pixel centroid, a Y-axis offset, a time-dependent drift term, and an independent body-position variant). It was removed after directly confirming that image-based ground truth on Jupiter is not reliable enough to calibrate against — a more careful version of the same measurement method was still independently fooled by Jupiter's own smooth shading/belt structure into confident-looking false detections during verification. `set_plate_scale_calibration()`/`set_body_position_calibration()` no longer exist on `SatelliteTracker`; satellite/shadow pixel positions are purely the ephemeris-projection formula's output, uncorrected. `derotation_log.json` no longer contains a `session.plate_scale_calibration` or `session.body_position_calibration` key. Any positional error must be fixed at the projection-formula/measurement level instead (the `plate_scale` radius mismatch above has since been fixed; the residual rotational bias above remains open).
 
 #### Camera N/S Orientation Auto-detection
 

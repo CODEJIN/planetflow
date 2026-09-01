@@ -107,9 +107,34 @@ class SatelliteTracker:
         self.flip_ns       = flip_ns
         # Cache: command_str → [(datetime, ra_deg, dec_deg)]
         self._ra_dec_cache: Dict[str, List[Tuple[datetime, float, float, float]]] = {}
-        self._plate_scale: Optional[float] = None   # arcsec/px (computed once), used for BODY positions
-        self._plate_scale_shadow: Optional[float] = None  # shadow-transit-calibrated override, SHADOW only
-        self._cx_offset:   float           = 0.0    # px added to disk_cx in shadow prediction
+        # arcsec/px (computed once from disk radius + Jupiter's angular
+        # radius). Deliberately the ONLY plate-scale source for both body and
+        # shadow positions -- see 2026-08-31 project decision below.
+        self._plate_scale: Optional[float] = None
+
+        # 2026-08-31 project decision: no CV-derived correction of any kind
+        # (plate-scale/disk-centre calibration fitted from an image-measured
+        # "true" position, however that position is measured) is applied to
+        # ephemeris-predicted satellite/shadow pixel coordinates. A
+        # session-wide plate-scale + disk-centre-offset auto-calibration
+        # fitted from shadow-transit argmin residuals existed here previously
+        # (paper Sec 2.3.3, "Automated Plate Scale Calibration") and was
+        # extended the same day to also fit a Y-axis offset, a quadratic-
+        # in-time drift term, and an independent body-position variant, using
+        # a more careful background-subtracted sub-pixel centroid in place of
+        # the original argmin. All of that -- both the original mechanism and
+        # the same-day extensions -- was removed after directly confirming
+        # (via the extensions' own verification passes) that image-based
+        # ground truth on Jupiter is not reliable enough to calibrate against:
+        # a naive version of that same verification method was independently
+        # fooled twice by Jupiter's own smooth shading/belt structure into
+        # reporting confident-looking "detections" of a satellite/shadow that
+        # were not there. Any positional error must therefore be tracked down
+        # and fixed at the ephemeris-projection-formula level (see the
+        # OPEN QUESTION comment on pole_pa_deg convention in
+        # _get_positions_skyfield/_icrf_to_px), not compensated for with an
+        # empirically-fitted correction, however that correction's own
+        # "ground truth" was obtained.
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -144,41 +169,6 @@ class SatelliteTracker:
         self._plate_scale = plate_scale
         return plate_scale
 
-    def set_plate_scale_calibration(
-        self,
-        ps_fit: float,
-        cx_offset: float,
-    ) -> None:
-        """Set a shadow-transit-calibrated plate scale and disk-centre offset.
-
-        ps_fit    : calibrated plate scale (arcsec/px) from 2-param lstsq.
-        cx_offset : systematic px offset added to disk_cx in shadow position prediction.
-
-        NOTE: both parameters are fitted purely from shadow-transit argmin
-        residuals and apply to SHADOW position queries only (get_shadow_positions).
-        Body positions (get_positions) continue to use the nominal, ephemeris-
-        derived plate scale. Verified against real transit data (2026-08-29):
-        applying this shadow-fitted plate scale to body positions too degrades
-        body accuracy from ~2-4px error to 8-14px error, the same failure mode
-        previously found for cx_offset -- a value fitted from and validated for
-        the shadow's specific geometry is not a general camera/optics property
-        that also holds for the body.
-        """
-        prev_ps = self._plate_scale_shadow or ps_fit
-        self._plate_scale_shadow = ps_fit
-        self._cx_offset          = cx_offset
-        dps = 100.0 * (ps_fit - prev_ps) / prev_ps if prev_ps else 0.0
-        print(
-            f"  [SatTracker] shadow plate_scale calibration applied: "
-            f"ps={ps_fit:.5f} (Δ{dps:+.2f}%)  cx_offset={cx_offset:+.2f}px  (shadow positions only)"
-        )
-
-    def _get_shadow_plate_scale(self, disk_radius_px: float, t_sample: datetime) -> float:
-        """Plate scale for shadow queries: shadow-calibrated if available, else nominal."""
-        if self._plate_scale_shadow is not None:
-            return self._plate_scale_shadow
-        return self.get_plate_scale(disk_radius_px, t_sample)
-
     def get_positions(
         self,
         t_list: List[datetime],
@@ -211,12 +201,6 @@ class SatelliteTracker:
             plate_scale_arcsec_per_px = self.get_plate_scale(disk_radius_px, t_list_naive[0])
 
         # Try Skyfield (jup365.bsp) first — no network, sub-pixel accuracy vs Horizons
-        # NOTE: _cx_offset is fitted purely from shadow-transit residuals (see
-        # set_plate_scale_calibration) and must NOT be applied to body positions —
-        # empirically, the uncorrected body prediction already matches the real
-        # position (verified against real transit data); applying the shadow-only
-        # bias here previously introduced a body-position error of the same
-        # magnitude as the offset itself.
         results = self._get_positions_skyfield(
             t_list_naive, disk_cx, disk_cy, disk_radius_px,
             plate_scale_arcsec_per_px, pole_pa_deg, np_ang_deg,
@@ -418,13 +402,11 @@ class SatelliteTracker:
 
                 # OPEN QUESTION, documented not silently assumed (external
                 # review, 2026-08-10): pole_pa_deg here is the SAME
-                # equator/drift-axis value derotation.py uses (confirmed:
-                # this is what derotate_stack.py actually passes in as
-                # pole_pa_for_warp = session_pole_pa). Whether "equator-axis
-                # angle + NP.ang" is the physically correct camera-to-sky
-                # rotation for THIS east/north-to-pixel transform, vs.
-                # needing the POLE-axis angle instead (a genuine, different
-                # 90-degree-shifted quantity — see
+                # equator/drift-axis value derotation.py uses. Whether
+                # "equator-axis angle + NP.ang" is the physically correct
+                # camera-to-sky rotation for THIS east/north-to-pixel
+                # transform, vs. needing the POLE-axis angle instead (a
+                # genuine, different 90-degree-shifted quantity — see
                 # save_diagnostic_overlay's own, inconsistent convention a
                 # few hundred lines down, itself dead code with zero
                 # callers), was not directly re-derived or re-tested with
@@ -436,11 +418,42 @@ class SatelliteTracker:
                 # a 90-degree pole/equator-axis mismatch would instead
                 # produce shadows offset perpendicular to their true
                 # position, a qualitatively different and more dramatic
-                # symptom that was never reported. Not proven either way by
-                # direct test — if satellite/shadow compositing is
-                # reactivated for a session with an actual visible
-                # transit, verify predicted vs. observed position directly
-                # before trusting this at large pole_pa_deg.
+                # symptom that was never reported.
+                #
+                # 2026-08-31 follow-up (this IS the "verify against a real
+                # visible transit" check asked for above): the formula
+                # structure itself checks out -- Jupiter/Ganymede ephemeris
+                # matches JPL Horizons exactly, np_ang_deg matches a live
+                # Horizons quantity-17 query exactly, and the SHADOW ray-
+                # trace math (_shadow_pos_skyfield below) was independently
+                # verified via brute-force numeric search + a synthetic
+                # on-axis case. But real shadow-transit data (8 windows,
+                # 2 sessions) showed a genuine ~5-14 deg (avg ~+7-8 deg)
+                # ROTATIONAL offset between predicted and actual position
+                # that is NOT explained by any of: limb-darkening
+                # contamination of pole_pa_deg's measurement (tested via
+                # synthetic belt images, both idealized and a realistic
+                # oblate+irregular-belt+noise+disk-fit-error version),
+                # alt-az field rotation (mount confirmed equatorial, and the
+                # per-window drift is non-monotonic in time anyway), or a
+                # disk-centre reference mismatch. One real, partial (~1-3 deg
+                # of the ~7-8 deg average) cause WAS found and fixed: this
+                # pole_pa_deg used to come from session_pole_pa, measured on
+                # the RAW pre-derotation frame, while the tracker draws on
+                # the DEROTATED/stacked output -- a different image that can
+                # sit at a slightly different effective orientation.
+                # derotate_stack.py now re-measures pole_pa directly on each
+                # window's own derotated output for tracker purposes
+                # (pole_pa_for_tracker) instead of reusing the pre-warp
+                # session value. The MAJORITY of the ~7-8 deg average bias
+                # remains unexplained -- do not assume it is fixed. See
+                # docs/technical_en.md's "Shadow Position Algorithm" section
+                # and project memory (project_shadow_rotational_bias_found)
+                # for the full investigation. Not fixable with a CV-fitted
+                # correction against this data (see feedback_no_cv_offset
+                # memory) -- if resumed, needs either new formula insight or
+                # an independent (non-CV) cross-check (e.g. WinJUPOS,
+                # unavailable in this Linux environment as of this writing).
                 pa_rad = np.radians(pole_pa_deg + np_ang_deg)
                 dx_px  = east_px * np.cos(pa_rad) + north_px * np.sin(pa_rad)
                 dy_px  = east_px * np.sin(pa_rad) - north_px * np.cos(pa_rad)
@@ -502,7 +515,7 @@ class SatelliteTracker:
                         for t in t_list]
 
         if plate_scale_arcsec_per_px is None:
-            plate_scale_arcsec_per_px = self._get_shadow_plate_scale(disk_radius_px, t_list_naive[0])
+            plate_scale_arcsec_per_px = self.get_plate_scale(disk_radius_px, t_list_naive[0])
 
         sf = _load_skyfield_kernels()
         if sf is None:
@@ -522,11 +535,10 @@ class SatelliteTracker:
             shadow_key = f"{moon_name}_shadow"
             shadow_positions: List[SatellitePos] = []
 
-            disk_cx_eff = disk_cx + self._cx_offset
             for t in t_list_naive:
                 shad_pos, _ = _shadow_pos_skyfield(
                     t, moon_body, eph, jup_moons, ts,
-                    disk_cx_eff, disk_cy, disk_radius_px,
+                    disk_cx, disk_cy, disk_radius_px,
                     plate_scale_arcsec_per_px,
                     self.flip_ew, self.flip_ns,
                     shadow_key,

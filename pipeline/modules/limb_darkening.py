@@ -204,6 +204,95 @@ def evaluate_limb_darkening_curve(r_norm: np.ndarray, fit: LimbDarkeningFit) -> 
     return _minnaert_model(np.asarray(r_norm, dtype=np.float64), fit.i0, fit.exponent)
 
 
+@dataclass
+class DiskRadiusFit:
+    """True geometric disk radius, in units of the ellipse-fit radius the
+    input RadialProfile was normalized to (i.e. the corrected pixel radius
+    is rx * r_norm_true, ry * r_norm_true for the same rx/ry passed to
+    measure_radial_brightness_profile)."""
+    r_norm_true: float
+    i0: float
+    background: float
+    exponent: float
+    residual_rms: float
+    n_points: int
+
+
+def _radius_fit_model(
+    r_norm: np.ndarray, i0: float, background: float, r_norm_true: float, exponent: float,
+) -> np.ndarray:
+    x = np.clip(1.0 - (r_norm / r_norm_true) ** 2, 1e-6, None)
+    inside = background + i0 * np.power(x, exponent)
+    return np.where(r_norm < r_norm_true, inside, background)
+
+
+def fit_disk_radius_correction(
+    profile: RadialProfile,
+    r_norm_initial_guess: float = 1.08,
+    initial_exponent: float = 0.5,
+    r_norm_true_bounds: Tuple[float, float] = (0.85, 1.6),
+) -> Optional[DiskRadiusFit]:
+    """Fit the TRUE geometric disk edge from a radial brightness profile,
+    correcting the systematic radius underestimation an Otsu-threshold-based
+    ellipse fit (find_disk_center) makes.
+
+    Motivation (2026-08-31 project decision, see satellite_composite.py's
+    module docstring): plate_scale = ang_radius(ephemeris) / disk_radius_px
+    requires disk_radius_px to be the same physical radius ang_radius refers
+    to. find_disk_center's Otsu-threshold-based ellipse fit instead finds
+    where brightness crosses a data-dependent threshold well inside the true
+    edge (limb darkening means brightness is already fading well before the
+    geometric limb), which independently reproduced the ~6-10% plate_scale
+    overestimation this project's docs had long flagged as a "known,
+    uncorrected limitation" -- confirmed directly from six sessions' own
+    radial brightness profiles, not by calibrating against any satellite or
+    shadow position (see project memory / experiments/*.py from that date).
+
+    Unlike fit_limb_darkening_curve() (which assumes the profile's r_norm=1
+    IS the true limb and only fits I0/exponent), this fits an ADDITIONAL
+    free parameter r_norm_true -- the r_norm value at which the model's
+    brightness reaches the fitted background level -- using the model:
+
+        I(r_norm) = background + i0 * (1 - (r_norm/r_norm_true)^2)^exponent   for r_norm < r_norm_true
+        I(r_norm) = background                                                 otherwise
+
+    profile MUST have been measured with a generous r_max_factor (>= 1.3)
+    so enough of the true tail beyond the initial (biased) r_norm=1 boundary
+    is available to constrain r_norm_true -- the default r_max_factor=1.05
+    on measure_radial_brightness_profile is NOT enough for this fit.
+
+    Returns None (rather than raising) when there are too few profile points
+    to fit (< 12) or the fit does not converge -- callers should fall back
+    to the uncorrected radius in that case rather than propagate an
+    unreliable correction.
+    """
+    r = profile.r_norm
+    b = profile.brightness
+    if r.size < 12:
+        return None
+
+    i0_guess = float(b[np.argmin(r)]) - float(np.median(b[-max(3, len(b) // 10):]))
+    bg_guess = float(np.median(b[-max(3, len(b) // 10):]))
+    p0 = [max(i0_guess, 1e-3), bg_guess, r_norm_initial_guess, initial_exponent]
+    try:
+        popt, _ = curve_fit(
+            _radius_fit_model, r, b, p0=p0, maxfev=20000,
+            bounds=(
+                [0.0, 0.0, r_norm_true_bounds[0], 0.02],
+                [np.inf, 1.0, r_norm_true_bounds[1], 5.0],
+            ),
+        )
+    except Exception:
+        return None
+
+    i0_fit, bg_fit, r_true_fit, exp_fit = (float(v) for v in popt)
+    residual = b - _radius_fit_model(r, *popt)
+    return DiskRadiusFit(
+        r_norm_true=r_true_fit, i0=i0_fit, background=bg_fit, exponent=exp_fit,
+        residual_rms=float(np.sqrt(np.mean(residual ** 2))), n_points=int(r.size),
+    )
+
+
 def build_confidence_map(
     shape: Tuple[int, int],
     cx: float,

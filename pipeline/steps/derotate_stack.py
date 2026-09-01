@@ -49,7 +49,6 @@ from pipeline.steps.satellite_composite import (
     _apply_satellite_composite,
     compute_session_disk_radius,
     resolve_tracker_flip_ns,
-    run_plate_scale_calibration,
 )
 
 # Mono filters in priority order; "color" is appended for color-camera sessions.
@@ -62,11 +61,34 @@ def _scan_session_pole_pa(
     scores: dict,
     config: PipelineConfig,
 ) -> Optional[float]:
-    """Return the session-median image-space pole PA from all input frames.
+    """Return the session image-space pole PA from all input frames.
 
     Iterates every frame in the preferred filter (from step03 scores dict,
-    which covers all input TIFs regardless of window selection), computes
-    per-frame belt-gradient PA, and returns the median.
+    which covers all input TIFs regardless of window selection) to print
+    per-frame belt-gradient diagnostics, then derives the session pole PA
+    from a SINGLE gradient-angle histogram accumulated across every usable
+    frame together, via auto_detect_equator_pa()'s own multi-frame
+    accumulation support (its `frames` argument already sums the gradient
+    histogram over an arbitrary number of frames per wavelet scale before
+    taking the argmax -- this was previously unused here, which instead
+    took the argmax of one frame's histogram at a time and then a median
+    of those independently-noisy per-frame point estimates).
+
+    This matters because the two wavelet scales averaged internally by
+    auto_detect_equator_pa (fine belt-edge detail vs. broader belt-width
+    structure) can disagree by up to ~10-15 degrees on individual frames --
+    the broader scale is more exposed to the radial limb-darkening gradient
+    the function's own docstring warns about, especially when the belts run
+    close to horizontal (pole_pa near 0 deg, where the belt-perpendicular
+    and polar limb-darkening gradient directions are least angularly
+    separated). Accumulating first lets that per-frame noise average out
+    before any argmax is taken, instead of taking argmax-then-median.
+
+    Frames that fail the belt-gradient path fall back individually to
+    equator_pa_from_disk_ellipse() and are logged, but (having no usable
+    luminance-vs-histogram contribution to the accumulation) are folded in
+    via the final median-of-fallbacks only if the accumulated estimate
+    itself is unavailable.
     """
     # Pick the first preferred filter that has any scored frames.
     filt = next((f for f in _FILT_PREF_EXT if scores.get(f)), None)
@@ -89,6 +111,7 @@ def _scan_session_pole_pa(
         return None
 
     raw_pas: List[float] = []
+    belt_gradient_lums: List[np.ndarray] = []
     for i, row in enumerate(all_rows):
         try:
             raw = image_io.read_tif(row["path"])
@@ -96,6 +119,7 @@ def _scan_session_pole_pa(
             pa = auto_detect_equator_pa(frames=[lum], cx=cx, cy=cy, disk_radius_px=semi_a)
             print(f"    frame {i+1}/{len(all_rows)}: raw pole_pa = {pa:.1f}° via {filt} [belt_gradient]")
             raw_pas.append(pa)
+            belt_gradient_lums.append(lum)
         except Exception as exc:
             try:
                 raw = image_io.read_tif(row["path"])
@@ -110,7 +134,17 @@ def _scan_session_pole_pa(
     if not raw_pas:
         return None
 
-    session_pa = float(np.median(raw_pas))
+    session_pa: Optional[float] = None
+    if belt_gradient_lums:
+        try:
+            session_pa = float(auto_detect_equator_pa(
+                frames=belt_gradient_lums, cx=cx, cy=cy, disk_radius_px=semi_a
+            ))
+        except Exception as exc:
+            warnings.warn(f"  [pole_pa] accumulated multi-frame estimate failed: {exc}")
+    if session_pa is None:
+        session_pa = float(np.median(raw_pas))
+
     raw_str = [f"{p:.1f}" for p in raw_pas]
     print(
         f"  [pole_pa] session pole_pa = {session_pa:.1f}° "
@@ -637,13 +671,6 @@ def run(
         compute_session_disk_radius(windows) if tracker is not None else None
     )
 
-    # ── plate_scale auto-calibration from shadow transit (if present) ──────────
-    calib_result: Optional[dict] = None
-    if tracker is not None and session_r_ref is not None:
-        calib_result = run_plate_scale_calibration(
-            tracker, config, windows, results_03, session_r_ref, session_pole_pa
-        )
-
     # ── Output directory ───────────────────────────────────────────────────────
     out_base: Optional[Path] = None
     if config.save_step04:
@@ -688,16 +715,6 @@ def run(
         "ncc_flip_false":          _ncc_f,
         "ncc_flip_true":           _ncc_t,
     }
-    if calib_result is not None:
-        session_log["plate_scale_calibration"] = {
-            "ps_fit":     calib_result["ps_fit"],
-            "ps_nom":     calib_result["ps_nom"],
-            "dps_pct":    calib_result["dps_pct"],
-            "cx_offset":  calib_result["cx_offset"],
-            "n_frames":   calib_result["n"],
-            "rmse_nom":   calib_result["rmse_nom"],
-            "rmse_fit":   calib_result["rmse_fit"],
-        }
 
     n_windows = len(windows)
     for win_idx, window in enumerate(windows, start=1):
@@ -786,16 +803,6 @@ def run(
             win_out_dir = out_base / f"window_{win_idx:02d}"
             win_out_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── Satellite position prediction ──────────────────────────────────────
-        sat_log: Dict = {}
-        if tracker is not None:
-            sat_log = {
-                "np_ang_deg":       np_ang_val,
-                "pole_pa_deg":      pole_pa_for_warp,
-                "derot_flip":       derot_flip,
-                "tracker_flip_ns":  tracker_flip_ns,
-            }
-
         # ── De-rotate all filters ──────────────────────────────────────────────
         filter_results = derotation.derotate_window(
             window=window,
@@ -826,6 +833,49 @@ def run(
             compute_ring_only_stack=config.derotation.compute_ring_only_stack and has_rings,
         )
 
+        # ── Re-measure pole_pa on the ACTUAL derotated output, for the tracker ──
+        # pole_pa_for_warp (measured pre-derotation, above) is what the warp
+        # itself needs -- it doesn't exist yet when that measurement happens.
+        # But the satellite/shadow tracker places markers on the POST-derotation
+        # output produced just above, a different image that can sit at a
+        # slightly different effective orientation than the pre-warp input
+        # (2026-08-31 finding: re-measuring pole_pa with the same
+        # auto_detect_equator_pa() directly on real derotated outputs showed a
+        # real, mostly-positive ~0-3.5deg discrepancy vs. the pre-warp value,
+        # most likely a small side-effect of per-frame alignment/warping, not
+        # something the warp is meant to introduce). Re-measuring directly on
+        # the image the tracker actually draws on is more correct; falls back
+        # to pole_pa_for_warp on any failure (missing output, disk too small).
+        pole_pa_for_tracker = pole_pa_for_warp
+        _pref_filt = next((f for f in _FILT_PREF_EXT if f in filter_results), None)
+        if _pref_filt is not None:
+            _out_path, _ = filter_results[_pref_filt]
+            if _out_path is not None:
+                try:
+                    _out_img = image_io.read_tif(_out_path)
+                    _out_lum = _out_img if _out_img.ndim == 2 else _out_img.mean(axis=2).astype(np.float32)
+                    _cx_o, _cy_o, _r_o, *_ = find_disk_center(_out_lum)
+                    if _r_o > 5:
+                        pole_pa_for_tracker = float(auto_detect_equator_pa(
+                            frames=[_out_lum], cx=_cx_o, cy=_cy_o, disk_radius_px=_r_o
+                        ))
+                        print(
+                            f"  [pole_pa = {pole_pa_for_tracker:.1f}° (re-measured on derotated "
+                            f"output, for tracker; warp used {pole_pa_for_warp:.1f}°)]"
+                        )
+                except Exception as exc:
+                    warnings.warn(f"  [pole_pa] post-derotation re-measurement failed: {exc}")
+
+        # ── Satellite position prediction ──────────────────────────────────────
+        sat_log: Dict = {}
+        if tracker is not None:
+            sat_log = {
+                "np_ang_deg":       np_ang_val,
+                "pole_pa_deg":      pole_pa_for_tracker,
+                "derot_flip":       derot_flip,
+                "tracker_flip_ns":  tracker_flip_ns,
+            }
+
         # ── Satellite compositing (exp9 method) ───────────────────────────────
         if sat_cfg.composite_enabled and tracker is not None:
             print(f"  [satellite composite] Window {win_idx}…")
@@ -834,7 +884,7 @@ def run(
                 filter_results=filter_results,
                 config=config,
                 tracker=tracker,
-                pole_pa_deg=pole_pa_for_warp,
+                pole_pa_deg=pole_pa_for_tracker,
                 np_ang_deg=np_ang_val,
                 r_ref=session_r_ref,
                 use_true_reprojection=use_true_reprojection,

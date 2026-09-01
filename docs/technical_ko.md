@@ -530,32 +530,13 @@ Step 04 / Step 08 패널의 체크박스 옆 **BSP 상태 표시기**(색상 라
 
 3. **RA/Dec 투영**: 그림자의 ICRF 좌표를 `t_obs` 시점 지구 기준 겉보기 RA/Dec로 변환한 뒤, `plate_scale`, `pole_pa_deg + np_ang_deg`, flip 규약을 적용해 픽셀 좌표로 변환합니다.
 
-**알려진 한계**: `plate_scale`은 `기하학적 각반경(Horizons) / 광도 기반 disk 반경(Otsu 그레디언트 피크, 약 125 px)`으로 산출됩니다. 두 값이 서로 다른 물리적 림브 위치를 가리키므로 `plate_scale`이 약 6~10% 과대평가되며, 이는 모든 위성·그림자 위치 예측에 비례 변위 오차로 전파됩니다. 세션 내 위성 그림자 통과가 관측된 경우, 아래 자동 보정으로 이 오차를 보상할 수 있습니다.
+**2026-08-31 수정 완료**: `plate_scale`은 `기하학적 각반경(Horizons) / 광도 기반 disk 반경(Otsu 그레디언트 피크)`으로 산출되는데, 두 값이 서로 다른 물리적 림브 위치를 가리키는 게 문제였습니다 — Otsu 임계값이 limb-darkening 감쇠 곡선 중간을 가로질러서 실제 기하학적 경계보다 한참 안쪽에서 잡히고, 그 결과 프레임/세션에 따라 `r_ref`가 약 6~18% 과소평가됐습니다. `pipeline/modules/derotation.py`의 `refine_disk_radius_for_plate_scale()`로 수정: 디스크 자체의 고신뢰 방사형 밝기 프로파일에 Minnaert 법칙을 피팅(`pipeline/modules/limb_darkening.py`)해서 실제 기하학적 반경을 복원하고, 이 값은 `plate_scale`/위치 계산 용도로만 쓰며(원래 Otsu 반경은 기하/warp/feathering 용도로는 틀린 게 아니므로 그대로 유지 — 함수 docstring 참고), 피팅 실패나 비현실적 비율(범위 [1.0, 1.3] 밖)일 땐 원래 반경으로 폴백합니다.
 
-#### plate_scale 자동 보정 (섀도 통과 세션)
+**알려진 한계, 미해결 (2026-08-31 기준)**: 위 `plate_scale` 수정 이후에도, 예측 그림자 위치와 실제 위치 사이에 별개의 ~5~14°(평균 ~+7~8°) **회전** 편향이 남아 있습니다. 원인 후보 대부분(천체력, 광선추적 수식, np_ang_deg, disk 중심 기준점, 알고리즘 자체 편향, limb-darkening 오염, 경위대 field rotation, 극축오차 drift)을 검증해서 배제했고, 실제 원인 하나(de-rotation 전/후 `pole_pa_deg` 측정 프레임 불일치)를 찾아 `pipeline/steps/derotate_stack.py`의 `pole_pa_for_tracker`로 수정했으나 전체 편향의 ~10%만 개선됐습니다. 나머지 대부분은 원인 불명 상태로 조사를 일시 중단했습니다. 상세한 조사 과정·검증 방법·결과는 별도 문서 [`docs/investigation_shadow_rotational_bias.md`](investigation_shadow_rotational_bias.md) 참고.
 
-**소스**: `pipeline/steps/derotate_stack.py` → `_auto_calibrate_plate_scale()`
+#### plate_scale 자동 보정 — 2026-08-31 제거됨
 
-`satellite.enabled = True`이고 `session_r_ref` 계산 완료 후, 파이프라인은 세션 전체 프레임을 스캔하여 위성 그림자 통과 여부를 판단합니다. 통과 프레임이 충분하면(기본 N ≥ 3) 2-파라미터 최소제곱법으로 `plate_scale`과 `cx_offset`을 동시에 보정합니다.
-
-**보정 모델**:
-
-```
-actual_x = cx_fit + pred_dx_px × k
-  pred_dx_px = 예측 그림자 x − disk_cx   (= dx_arcsec / ps_nom)
-  k          = ps_nom / ps_fit
-```
-
-lstsq 해: `ps_fit = ps_nom / k`, `cx_offset = cx_fit − session_cx`
-
-보정 후 `SatelliteTracker.set_plate_scale_calibration(ps_fit, cx_offset)`이 호출되어 이후 모든 그림자 위치 예측에 반영됩니다. 보정 결과는 `derotation_log.json → session.plate_scale_calibration`에 기록됩니다.
-
-| 항목 | 동작 |
-|---|---|
-| 섀도 통과 있음 (N ≥ 3, 림브에서 38 px 이상) | 자동 보정 적용 (`Δps`, `cx_offset` 로그 출력) |
-| 섀도 통과 없음 또는 프레임 부족 | 공칭 `plate_scale` 유지, 경고 없이 스킵 |
-
-**주의**: 보정은 세션 고유값이며 장비·시잉이 바뀌면 달라집니다. ps 단독 보정(cx 고정)은 cx 오차가 ps 추정에 혼입되어 신뢰도가 낮으므로 항상 2-파라미터로 처리합니다.
+`pipeline/steps/satellite_composite.py`의 `_auto_calibrate_plate_scale()`이 이미지에서 CV로 측정한 "실제" 그림자 위치(처음엔 단일 프레임 argmin, 이후 배경차감 기반 sub-pixel centroid, Y축 오프셋, 시간의존 drift 항, 위성 몸체용 독립 버전까지 확장됨)를 기준으로 `plate_scale`과 disk-center 오프셋을 fitting하던 기능이었습니다. 목성 표면에서는 이미지 기반 ground truth 자체가 보정 기준으로 쓸 만큼 신뢰할 수 없다는 게 직접 확인되어 제거했습니다 — 더 정교하게 만든 버전조차 목성 자체의 매끄러운 명암/belt 구조에 속아 확신에 찬 오탐지를 냈습니다. `SatelliteTracker`에 `set_plate_scale_calibration()`/`set_body_position_calibration()`은 더 이상 존재하지 않고, 위성/그림자 픽셀 위치는 순수하게 에페메리스 투영 수식의 결과값 그대로입니다(보정 없음). `derotation_log.json`에도 `session.plate_scale_calibration`/`session.body_position_calibration` 키가 더 이상 없습니다. 위치 오차는 투영 수식/측정 레벨에서 고쳐야 합니다(위의 `plate_scale` 반경 불일치는 이후 수정됐고, 남은 회전 편향 문제는 여전히 미해결입니다).
 
 #### 카메라 남북 방향 자동 감지
 

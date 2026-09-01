@@ -764,6 +764,78 @@ def find_disk_center(
     return cx, cy, semi_a, semi_b, angle_major
 
 
+def refine_disk_radius_for_plate_scale(
+    image: np.ndarray,
+    cx: float,
+    cy: float,
+    semi_a: float,
+    semi_b: float,
+    angle_deg: float,
+    r_max_factor: float = 1.45,
+) -> Tuple[float, float, dict]:
+    """Correct find_disk_center's systematic radius underestimate for
+    plate_scale purposes ONLY, by fitting the disk's own radial brightness
+    profile to a model with a free true-edge parameter (limb_darkening.
+    fit_disk_radius_correction) -- NOT by calibrating against any satellite
+    or shadow position (see the 2026-08-31 project decision in
+    satellite_composite.py's module docstring: image-based ground truth for
+    small moving objects on Jupiter was found unreliable, but the disk's own
+    limb is a large, high-SNR, well-modelled photometric target, not subject
+    to that same failure mode).
+
+    find_disk_center()'s Otsu-threshold ellipse fit crosses the limb-
+    darkening brightness falloff well inside the true geometric edge --
+    confirmed directly from six sessions' own radial profiles to be a
+    consistent ~7-10% underestimate (Minnaert-law fit, see
+    pipeline/modules/limb_darkening.py's fit_disk_radius_correction), closely
+    matching this project's long-standing but previously uncorrected "known
+    limitation" note on plate_scale. This function is the fix: it returns a
+    radius suitable for `plate_scale = ang_radius / radius`, WITHOUT touching
+    cx/cy or the aspect ratio (semi_b/semi_a) -- both assumed unbiased by
+    the same effect, since it's expected to affect the limb symmetrically.
+
+    Do NOT use this refined radius for anything geometry/warp-related
+    (disk-shape masks, the spherical de-rotation model, etc.) -- those
+    consumers were built and validated against find_disk_center's own
+    (biased-but-consistent) radius convention, and changing it under them
+    is a separate, unvalidated change outside this function's scope.
+
+    Returns (semi_a_refined, semi_b_refined, info). On any failure (too few
+    profile points, fit does not converge, or the fitted correction falls
+    outside a plausible [1.0, 1.3] range), falls back to the original
+    (semi_a, semi_b) unchanged and info["applied"] is False.
+    """
+    from pipeline.modules.limb_darkening import (
+        measure_radial_brightness_profile,
+        fit_disk_radius_correction,
+    )
+
+    info: dict = {"applied": False, "ratio": 1.0, "semi_a_in": semi_a, "semi_b_in": semi_b}
+    if semi_a <= 0 or semi_b <= 0:
+        return semi_a, semi_b, info
+
+    try:
+        profile = measure_radial_brightness_profile(
+            image, cx, cy, semi_a, semi_b, angle_deg, r_max_factor=r_max_factor,
+        )
+        fit = fit_disk_radius_correction(profile)
+    except Exception as exc:
+        info["error"] = str(exc)
+        return semi_a, semi_b, info
+
+    if fit is None:
+        return semi_a, semi_b, info
+
+    ratio = fit.r_norm_true
+    info.update(ratio=ratio, exponent=fit.exponent, residual_rms=fit.residual_rms,
+                n_points=fit.n_points)
+    if not (1.0 <= ratio <= 1.3):
+        return semi_a, semi_b, info
+
+    info["applied"] = True
+    return semi_a * ratio, semi_b * ratio, info
+
+
 def _find_disk_center_impl(
     image: np.ndarray,
     margin_factor: float = 0.10,
@@ -3565,6 +3637,16 @@ def auto_detect_equator_pa(
     #   belt  [0,0,200,200,200,0] → 8-32 px belt-width band (robust, anti-noise)
     # Including coarser scales (level 4+) amplifies the radial limb gradient and
     # biases the histogram by ~10° toward steeper angles — omit them here.
+    #
+    # 2026-08-31: tried subtracting a fitted Minnaert radial-brightness model
+    # from each frame before this step, specifically to remove that same
+    # limb-gradient contaminant at the source instead of just picking
+    # scales that are less sensitive to it. Measured result on a real
+    # session: median fine/belt-scale disagreement got WORSE (3.0 -> 6.0 deg
+    # median; a new, near-uniform +2..+9 deg bias appeared in the belt-scale
+    # estimate specifically), most likely a fit-instability or disk-edge
+    # artifact in the subtraction itself. Reverted -- do not reintroduce
+    # without first fixing whatever produced that bias and re-measuring.
     _HIST_AMOUNTS = [
         [200.0, 200.0, 200.0, 0.0, 0.0, 0.0],  # fine-scale: belt edge detail
         [0.0, 0.0, 200.0, 200.0, 200.0, 0.0],  # belt-scale: mid-width structure
