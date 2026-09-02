@@ -739,3 +739,34 @@ window_01, 07, 2026-03-21 둘 다: CH4 앵커링 신뢰도 자체가 무너짐
 - 관련 코드 주석: `pipeline/modules/satellite_tracker.py`의 `_get_positions_skyfield()` 내부 "OPEN QUESTION" 주석(2026-08-10 최초 작성, 2026-08-31 이번 조사 결과로 갱신).
 - 관련 문서: `docs/technical_en.md` / `docs/technical_ko.md`의 "Shadow Position Algorithm" 섹션.
 - 외부 검토를 받을 때는 **반드시 현재 HEAD의 실제 코드를 새로 첨부**할 것 — 이번 라운드에서 지적된 4건 중 3건(CV 자동보정, `pole_pa_for_tracker` 수정 여부, `tracker_flip_ns` fallback)이 이미 고쳐진 구버전 코드 기준이라 무의미했다.
+
+## 14. 반지름 정의 불일치 버그 발견·수정 (2026-09-02, CV 기반 위치보정 기능 검증 중 발견)
+
+**배경**: CH4 기반 위성/그림자 CV 좌표보정 기능([[project_cv_position_refinement_feature]])을 실데이터로 검증하던 중, Table 2 재계산을 요청받아 6개 세션을 전부 새로 재처리했다. 이 과정에서 2026-04-24 Ganymede(위성) 행이 **통째로 사라지는** 것을 발견했다 — 예전엔 합성됐던 창이 현재 HEAD 코드로는 disk 밖으로 판정되어 위성 합성 자체가 스킵됐다.
+
+### 14-1. 원인: plate_scale용 반지름과 on-disk 판정용 반지름이 서로 다름
+
+`compute_session_disk_radius()`(세션 전체의 plate_scale 계산용)는 `refine_disk_radius_for_plate_scale()`(Minnaert-law 광도프로파일 피팅, 0dd67d1 커밋에서 도입 — `find_disk_center()`의 raw 반지름이 한계-어두워짐 때문에 실제 디스크보다 7~16% 작게 나온다는 게 이미 알려진 문제였음)로 **보정된, 더 큰** 반지름을 쓴다. 반면 `_apply_satellite_composite()`가 "이 위성이 디스크 안에 있는가"를 판정하는 경계값은 그 필터 자신의 `find_disk_center()` **raw(미보정)** 반지름을 그대로 썼다.
+
+plate_scale(arcsec/px)은 반지름에 반비례하므로, plate_scale이 더 큰(보정된) 반지름 기준으로 계산되면 같은 실제 각거리라도 픽셀 거리(dist_px)가 반지름 비율만큼 **부풀려져서** 나온다 — 그런데 그 부풀려진 dist_px를 raw(더 작은) 경계값과 비교하니, 실제로는 디스크 안에 있는 근접-limb 천체가 계통적으로 off-disk로 오판정된다.
+
+**직접 재현·검증** (2026-04-24 window_01, Ganymede):
+- raw 반지름(98.8px) 기준 plate_scale → dist=92.5px → **on-disk** (여유 6.3px, 과거 문서의 "92px vs disk_r 98.8px, 여유 6.8px"와 일치)
+- 세션이 실제로 쓰는 보정된 반지름(110.9px, raw 대비 +12~16%) 기준 plate_scale → 동일한 물리적 위치인데 dist=103.8px → **off-disk** (raw 경계 98.8px 초과)
+
+이 세션의 반지름 보정폭(raw 98.8px → 보정 110.9px, +12.3%)이 docstring이 명시한 "~7-10% underestimate"보다 다소 컸던 것도 확인됨(범위이지 상한이 아니라 자연스러운 세션간 편차로 판단).
+
+### 14-2. 수정
+
+`_apply_satellite_composite()`의 on-disk 판정/오프셋 재계산에 쓰는 반지름만 `refine_disk_radius_for_plate_scale()`로 별도 보정(`disk_sr_pos`/`ch4_sr_pos`, `pipeline/steps/satellite_composite.py`). warp 지오메트리(`warp_params["disk_r"]`), `polar_eq_ratio`, `disk_centers` 로그 등 **다른 용도의 raw 반지름은 그대로 유지** — 이 버그가 영향을 준 건 순수하게 "plate_scale 계산에 쓴 반지름"과 "경계 판정에 쓴 반지름"의 불일치뿐이므로, 수정 범위를 거기에만 국한했다(워프 지오메트리를 잘못 건드리면 이미 검증된 다른 동작을 깨뜨릴 위험이 있음).
+
+### 14-3. 재검증 (6개 세션 전체 재처리)
+
+수정 후 2026-04-24 Ganymede가 모든 필터(IR/R/G/B/CH4)에서 다시 정상 합성됨을 확인. 6개 세션 전체 Table 2 수치를 재계산해 논문에 반영함(위성 N=14 유지, 그림자 N=25→28로 증가 — 이전에 근접-limb이라 잘못 제외됐던 그림자 창들이 이번 수정으로 정상 포함된 것으로 추정).
+
+### 14-4. 이 발견이 회전편향(δ, 각도) 미스터리와 어떤 관계인가
+
+**주의**: 이 버그는 디스크 중심으로부터의 **반지름 방향(거리)** 오차이지, 이번 조사 내내 다뤄온 **각도(rotational, δ)** 편향과는 다른 성분이다. 이 버그 하나로 §1~13의 회전편향 미스터리가 해결됐다고 볼 근거는 없다 — pole_pa 자체의 각도 계산에는 관여하지 않기 때문. 다만:
+- 반지름 방향 오차와 각도 방향 오차가 함께 있으면 "총 오차(px)" 지표(§10-5 표 등에서 쓴)가 실제보다 커 보였을 가능성은 있다 — 인과관계를 다시 따로 검증하지 않았으므로 단정하지 않는다.
+- 이 버그는 근접-limb(디스크 경계 근처) 천체에서만 유의미하게 나타난다(경계에서 먼 천체는 반지름이 조금 달라져도 on/off-disk 판정 자체는 안 바뀜) — §1~13에서 다룬 확인된 편향 창들(2026-04-17, 2026-03-21)이 근접-limb이었는지는 별도 확인이 필요.
+- **결론**: 이건 진짜 발견된, 수정된, 검증된 버그이지만 "회전편향의 원인을 찾았다"는 뜻은 아니다. §12의 "90%는 원인 불명" 결론은 그대로 유효하다.

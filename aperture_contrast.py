@@ -695,6 +695,7 @@ def run_from_tif_dir(
     window_frames: int = 3,
     min_baseline: float = 0.05,
     r_scale: float = 2.0,
+    cv_position_refinement_enabled: bool = False,
 ) -> List[ApertureContrastResult]:
     """Run step3 + step4×2 and compute aperture contrast.
 
@@ -703,6 +704,12 @@ def run_from_tif_dir(
     output_dir:    Where to save everything (step4 outputs, logs, comparison PNGs).
                    If None, a temporary directory is used and cleaned up afterward.
     window_frames: Number of filter cycles per de-rotation window (default 3 → ~11.25 min).
+    cv_position_refinement_enabled: forwarded to SatelliteConfig -- when True,
+        the COMPOSITE pass (not baseline, which never runs the satellite-
+        composite code path) bakes CH4-anchored satellite / per-filter shadow
+        CV corrections into the compositing itself, rather than only using
+        ephemeris-predicted positions. Default False reproduces the existing
+        behavior this function always had.
 
     Only non-overlapping windows with on-disk satellites/shadows are processed.
     """
@@ -743,6 +750,7 @@ def run_from_tif_dir(
         cfg.quality.window_frames       = window_frames
         cfg.satellite.enabled           = True
         cfg.satellite.composite_enabled = composite_enabled
+        cfg.satellite.cv_position_refinement_enabled = cv_position_refinement_enabled
         return cfg
 
     # Step 3

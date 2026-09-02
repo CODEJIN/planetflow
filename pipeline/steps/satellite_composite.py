@@ -758,9 +758,16 @@ def _apply_satellite_composite(
                        else ch4_raw.astype(np.float32))
             if ch4_lum.ndim == 3:
                 ch4_lum = ch4_lum.mean(axis=2)
-            ch4_cx, ch4_cy, ch4_sr, _ch4_sr_b, _ch4_ang = find_disk_center(ch4_lum)
+            ch4_cx, ch4_cy, ch4_sr, ch4_sr_b, ch4_ang = find_disk_center(ch4_lum)
+            # Same radius-consistency fix as the main per-filter loop below:
+            # the on-disk boundary must match the radius plate_scale was
+            # calibrated from, not find_disk_center()'s raw (undersized)
+            # output -- see the main loop's comment for the full rationale.
+            ch4_sr_pos, _ch4_sr_b_pos, _ = derotation.refine_disk_radius_for_plate_scale(
+                ch4_lum, ch4_cx, ch4_cy, ch4_sr, ch4_sr_b, ch4_ang,
+            )
             ch4_body_ref = tracker.get_positions(
-                [t_center_naive], ch4_cx, ch4_cy, ch4_sr,
+                [t_center_naive], ch4_cx, ch4_cy, ch4_sr_pos,
                 pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
             )
             for moon_name, plist in ch4_body_ref.items():
@@ -826,8 +833,28 @@ def _apply_satellite_composite(
                   else planet_raw.astype(np.float32))
         is_color = planet.ndim == 3
         planet_lum = planet.mean(axis=2) if is_color else planet
-        disk_cx, disk_cy, disk_sr, disk_sr_b, _ = derotation.find_disk_center(planet_lum)
+        disk_cx, disk_cy, disk_sr, disk_sr_b, disk_ang = derotation.find_disk_center(planet_lum)
         disk_centers[filt] = {"cx": float(disk_cx), "cy": float(disk_cy), "r": float(disk_sr)}
+        # Position/on-disk queries below must use a radius consistent with
+        # plate_scale (which is calibrated from the session-wide Minnaert-
+        # corrected radius, session_r_ref -- see compute_session_disk_radius
+        # and refine_disk_radius_for_plate_scale's docstring: raw
+        # find_disk_center() systematically UNDERSIZES the disk by ~7-16%).
+        # Using the raw (undersized) disk_sr as the on-disk boundary while
+        # plate_scale assumes the larger, corrected true radius makes
+        # predicted pixel distances (which scale with plate_scale) appear
+        # inflated relative to that boundary -- discovered via a real
+        # regression this session (2026-04-24 Ganymede: predicted dist
+        # 92.5px against the corrected-radius plate_scale, but the raw
+        # disk_sr boundary was only 98.8px vs the true ~110.9px, needlessly
+        # failing the on-disk test at a 6px margin). disk_sr itself (raw)
+        # is intentionally left untouched everywhere else in this function
+        # (warp_params, polar_eq_ratio, disk_centers log) -- those describe
+        # the disk's actual appearance in this image, not a plate-scale
+        # calibration target, and have their own validated behavior.
+        disk_sr_pos, disk_sr_b_pos, _ = derotation.refine_disk_radius_for_plate_scale(
+            planet_lum, disk_cx, disk_cy, disk_sr, disk_sr_b, disk_ang,
+        )
         # The atmosphere's actual warp uses the TRUE physical ratio when
         # use_true_reprojection is on (see DerotationConfig docstring — the
         # apparent ellipse-fit ratio is contaminated by B-foreshortening
@@ -857,11 +884,11 @@ def _apply_satellite_composite(
         time_sorted = sorted(rows, key=lambda r: r["timestamp"])
         t_list = [r["timestamp"] for r in time_sorted]
         body_pos = tracker.get_positions(
-            t_list, disk_cx, disk_cy, disk_sr,
+            t_list, disk_cx, disk_cy, disk_sr_pos,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
         )
         shad_pos = tracker.get_shadow_positions(
-            t_list, disk_cx, disk_cy, disk_sr,
+            t_list, disk_cx, disk_cy, disk_sr_pos,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
         )
 
@@ -871,21 +898,21 @@ def _apply_satellite_composite(
         # from the old approach (closest frame timestamp, off by up to half a
         # frame interval).
         body_ref = tracker.get_positions(
-            [t_center_naive], disk_cx, disk_cy, disk_sr,
+            [t_center_naive], disk_cx, disk_cy, disk_sr_pos,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
         )
         shad_ref = tracker.get_shadow_positions(
-            [t_center_naive], disk_cx, disk_cy, disk_sr,
+            [t_center_naive], disk_cx, disk_cy, disk_sr_pos,
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
         )
 
         # CH4-anchored refinement offset (if confidently measured above) —
         # satellite BODY positions only, never shadow. Recomputes on_disk
-        # relative to THIS filter's own disk_cx/cy/disk_sr.
+        # relative to THIS filter's own disk_cx/cy/disk_sr_pos.
         if ch4_offset_px is not None:
             dx, dy = ch4_offset_px
-            body_pos = {k: apply_offset(v, dx, dy, disk_cx, disk_cy, disk_sr) for k, v in body_pos.items()}
-            body_ref = {k: apply_offset(v, dx, dy, disk_cx, disk_cy, disk_sr) for k, v in body_ref.items()}
+            body_pos = {k: apply_offset(v, dx, dy, disk_cx, disk_cy, disk_sr_pos) for k, v in body_pos.items()}
+            body_ref = {k: apply_offset(v, dx, dy, disk_cx, disk_cy, disk_sr_pos) for k, v in body_ref.items()}
 
         # ── CV-based SHADOW position refinement (opt-in, per-filter) ───────────
         # Unlike the satellite/CH4 case above, shadows have real signal (a
@@ -908,8 +935,8 @@ def _apply_satellite_composite(
                          "confidence": None, "peak_sig": None}
                 if result is not None:
                     dx, dy = result.dx_px, result.dy_px
-                    shad_pos[shad_name] = apply_offset(shad_pos[shad_name], dx, dy, disk_cx, disk_cy, disk_sr)
-                    shad_ref[shad_name] = apply_offset(shad_ref[shad_name], dx, dy, disk_cx, disk_cy, disk_sr)
+                    shad_pos[shad_name] = apply_offset(shad_pos[shad_name], dx, dy, disk_cx, disk_cy, disk_sr_pos)
+                    shad_ref[shad_name] = apply_offset(shad_ref[shad_name], dx, dy, disk_cx, disk_cy, disk_sr_pos)
                     entry.update(applied=True, offset_px=[dx, dy],
                                  confidence=result.confidence, peak_sig=result.peak_sig)
                     print(
