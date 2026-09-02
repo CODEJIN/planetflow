@@ -846,6 +846,22 @@ def run(
         # something the warp is meant to introduce). Re-measuring directly on
         # the image the tracker actually draws on is more correct; falls back
         # to pole_pa_for_warp on any failure (missing output, disk too small).
+        #
+        # 2026-09-01: tried switching this to equator_pa_from_disk_ellipse()
+        # after an isolated diagnostic script suggested it was closer to
+        # CV-verified ground truth in 8/9 confirmed-bias windows. Reverted --
+        # a full pipeline re-run with the change actually integrated made
+        # every one of those windows WORSE (e.g. window_02 offset 4.93px ->
+        # 9.61px), the opposite of the isolated test's result. The isolated
+        # script did not faithfully reproduce this exact code path (pole_pa is
+        # measured once on the preferred filter's own disk detection here,
+        # then applied across every filter's own separately-detected disk
+        # center in _apply_satellite_composite -- some interaction the
+        # standalone version missed). Lesson: an isolated re-implementation of
+        # a measurement, however carefully cross-checked in principle, is not
+        # a substitute for testing the actual integrated code path before
+        # trusting its conclusion. See docs/investigation_shadow_rotational_bias.md
+        # §12-12/12-13 for the full account.
         pole_pa_for_tracker = pole_pa_for_warp
         _pref_filt = next((f for f in _FILT_PREF_EXT if f in filter_results), None)
         if _pref_filt is not None:
