@@ -50,6 +50,7 @@ from pipeline.modules.satellite_tracker import (
     _MOON_SF_ID,
     detect_tracker_flip_ns,
 )
+from pipeline.modules.position_refinement import apply_offset, refine_position_via_cv
 from pipeline.modules.wavelet import sharpen
 
 # Duplicated from derotate_stack.py rather than imported: this module is
@@ -726,6 +727,75 @@ def _apply_satellite_composite(
         )
     plate_scale = tracker.get_plate_scale(r_ref, t_center_naive)
 
+    # ── CV-based satellite BODY position refinement (opt-in) ──────────────────
+    # See pipeline/modules/position_refinement.py and SatelliteConfig's
+    # cv_position_refinement_enabled docstring for why this is scoped to
+    # avoid the failure mode that sank the earlier ellipse-fit pole_pa attempt
+    # (a value measured on one filter's own disk detection, reused for other
+    # filters' independently-detected disks) -- this is local to one window,
+    # confidence-gated, and never cached across windows/sessions.
+    #
+    # Satellite bodies specifically need CH4 (see module docstring: no other
+    # filter has reliable native contrast), so this is always measured on
+    # CH4 and broadcast to other filters below. Shadow refinement is a
+    # separate, per-filter block further down (any filter has real shadow
+    # signal, so no cross-filter anchor/broadcast is needed there).
+    #
+    # filter_results is a dict, so CH4's position in iteration order isn't
+    # guaranteed; this pre-pass reads/detects it independently of the main
+    # per-filter loop below (which will also process "CH4" if present,
+    # redundantly re-running find_disk_center on the same image -- cheap and
+    # deterministic, not a bug).
+    ch4_offset_px: Optional[Tuple[float, float]] = None
+    satellite_refinement_log: Optional[dict] = None
+    if config.satellite.cv_position_refinement_enabled:
+        ch4_entry = filter_results.get("CH4")
+        if ch4_entry and ch4_entry[0] is not None and ch4_entry[0].exists():
+            satellite_refinement_log = {"attempted": True, "applied": False, "offset_px": None,
+                                         "confidence": None, "peak_sig": None}
+            ch4_raw = image_io.read_tif(ch4_entry[0])
+            ch4_lum = (ch4_raw.astype(np.float32) / 65535.0 if ch4_raw.dtype == np.uint16
+                       else ch4_raw.astype(np.float32))
+            if ch4_lum.ndim == 3:
+                ch4_lum = ch4_lum.mean(axis=2)
+            ch4_cx, ch4_cy, ch4_sr, _ch4_sr_b, _ch4_ang = find_disk_center(ch4_lum)
+            ch4_body_ref = tracker.get_positions(
+                [t_center_naive], ch4_cx, ch4_cy, ch4_sr,
+                pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
+            )
+            for moon_name, plist in ch4_body_ref.items():
+                ref = plist[0]
+                if ref is None or not ref.on_disk:
+                    continue
+                app_r = _apparent_radius_px(moon_name, t_center_naive, plate_scale)
+                # r_scale=2.0: matches the apparent-DIAMETER search-radius
+                # convention used by every CV re-detection in this
+                # investigation (aperture_contrast.py's r_scale default,
+                # inherited by experiments/robust_redetect_satellite.py and
+                # experiments/full_cv_verified_contrast.py) -- passing the
+                # bare apparent radius here made the 1.5x-r_px detection
+                # window too small to ever see the confirmed CH4 signals
+                # from docs/investigation_shadow_rotational_bias.md's
+                # section 12-14 validation, which is what this convention
+                # was cross-checked against.
+                result = refine_position_via_cv(ch4_lum, ref.x_px, ref.y_px, app_r * 2.0, obj_type="satellite")
+                if result is not None:
+                    ch4_offset_px = (result.dx_px, result.dy_px)
+                    satellite_refinement_log.update(
+                        applied=True, offset_px=list(ch4_offset_px),
+                        confidence=result.confidence, peak_sig=result.peak_sig,
+                    )
+                    print(
+                        f"    [cv_refinement] {moon_name}: offset=({result.dx_px:+.2f},"
+                        f"{result.dy_px:+.2f})px  confidence={result.confidence}"
+                        f"  peak_sig={result.peak_sig:.2f}"
+                    )
+                break  # first on-disk moon only (multi-moon windows are an
+                       # existing, separately-documented limitation)
+        else:
+            satellite_refinement_log = {"attempted": False, "applied": False, "offset_px": None,
+                                         "confidence": None, "peak_sig": None}
+
     # ── Per-filter composite ───────────────────────────────────────────────────
     for filt, (out_path, flog) in filter_results.items():
         if out_path is None or not out_path.exists():
@@ -809,6 +879,47 @@ def _apply_satellite_composite(
             pole_pa_deg=pole_pa_deg, np_ang_deg=np_ang_deg,
         )
 
+        # CH4-anchored refinement offset (if confidently measured above) —
+        # satellite BODY positions only, never shadow. Recomputes on_disk
+        # relative to THIS filter's own disk_cx/cy/disk_sr.
+        if ch4_offset_px is not None:
+            dx, dy = ch4_offset_px
+            body_pos = {k: apply_offset(v, dx, dy, disk_cx, disk_cy, disk_sr) for k, v in body_pos.items()}
+            body_ref = {k: apply_offset(v, dx, dy, disk_cx, disk_cy, disk_sr) for k, v in body_ref.items()}
+
+        # ── CV-based SHADOW position refinement (opt-in, per-filter) ───────────
+        # Unlike the satellite/CH4 case above, shadows have real signal (a
+        # dark spot) in every filter, so each filter refines its own shadow
+        # prediction against its own image here -- no cross-filter anchor or
+        # broadcast, which avoids the "value measured on one filter's disk,
+        # applied to another filter's independently-detected disk" risk the
+        # satellite path has to accept. Runs on planet_lum (this filter's own
+        # derotated planet image), before any compositing has touched it.
+        shadow_refinement_this_filter: dict = {}
+        if config.satellite.cv_position_refinement_enabled:
+            for shad_name, plist in list(shad_ref.items()):
+                ref = plist[0]
+                if ref is None or not ref.on_disk:
+                    continue
+                shad_moon_name = shad_name.replace("_shadow", "")
+                app_r = _apparent_radius_px(shad_moon_name, t_center_naive, plate_scale)
+                result = refine_position_via_cv(planet_lum, ref.x_px, ref.y_px, app_r * 2.0, obj_type="shadow")
+                entry = {"attempted": True, "applied": False, "offset_px": None,
+                         "confidence": None, "peak_sig": None}
+                if result is not None:
+                    dx, dy = result.dx_px, result.dy_px
+                    shad_pos[shad_name] = apply_offset(shad_pos[shad_name], dx, dy, disk_cx, disk_cy, disk_sr)
+                    shad_ref[shad_name] = apply_offset(shad_ref[shad_name], dx, dy, disk_cx, disk_cy, disk_sr)
+                    entry.update(applied=True, offset_px=[dx, dy],
+                                 confidence=result.confidence, peak_sig=result.peak_sig)
+                    print(
+                        f"    [{filt}] [cv_refinement] {shad_name}: offset=({dx:+.2f},{dy:+.2f})px"
+                        f"  confidence={result.confidence}  peak_sig={result.peak_sig:.2f}"
+                    )
+                shadow_refinement_this_filter[shad_name] = entry
+            if shadow_refinement_this_filter:
+                disk_centers[filt]["shadow_refinement"] = shadow_refinement_this_filter
+
         composite = planet if is_color else planet_lum
         composited: List[str] = []
 
@@ -868,6 +979,8 @@ def _apply_satellite_composite(
         image_io.write_tif_16bit(composite, out_path)
         print(f"      → {out_path.name}  ({', '.join(composited)})")
 
+    if satellite_refinement_log is not None:
+        disk_centers["_satellite_refinement"] = satellite_refinement_log
     return disk_centers
 
 

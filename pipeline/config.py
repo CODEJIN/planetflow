@@ -536,7 +536,39 @@ class SatelliteConfig:
     enabled: bool = False
     flip_ew: bool = False
     flip_ns: Optional[bool] = None      # None = auto-detect from pole_pa sign
-    cv_search_radius_px: float = 24.0   # CV refinement search window
+    cv_search_radius_px: float = 24.0   # unused (no consumers) -- superseded by
+                                         # cv_position_refinement_enabled below
+
+    # CV-based position refinement (opt-in, per-window, confidence-gated).
+    # Requires composite_enabled=True (the refinement code lives inside the
+    # satellite-composite pass and is a no-op otherwise -- the GUI enforces
+    # this by only letting this checkbox be turned on when the composite
+    # checkbox is on).
+    #
+    #   - Satellite BODY: only CH4 has enough native contrast against
+    #     Jupiter's disk (methane absorption darkens the disk, not the
+    #     moons -- IR/R/G/B show ~0% reliable detectability). The offset is
+    #     measured once per window on CH4 and broadcast (as a raw pixel
+    #     offset) to every filter's own ephemeris-predicted body position,
+    #     since the underlying ephemeris/pole_pa/plate_scale term is shared
+    #     across filters within a window (only each filter's own disk
+    #     center differs). Silently skipped when CH4 is absent for a
+    #     session -- this does NOT gate the checkbox itself, since shadow
+    #     refinement below works without CH4.
+    #   - SHADOW: real signal (dark spot) in every filter, so each filter
+    #     refines its own shadow prediction against its own image
+    #     independently -- no cross-filter anchor/broadcast, avoiding the
+    #     cross-filter-disk-detection conflation risk the satellite path
+    #     has to accept.
+    #
+    # Either object type only applies its offset when re-detection clears a
+    # 3-sigma confidence threshold; a low-confidence or implausibly-large
+    # (>20px) result falls back silently to pure ephemeris. This is NOT a
+    # global/session-wide calibration -- see pipeline/modules/position_refinement.py
+    # and docs/investigation_shadow_rotational_bias.md for why this differs from
+    # the CV-calibration approach rejected elsewhere in this codebase (project
+    # decision, 2026-09-02).
+    cv_position_refinement_enabled: bool = False
 
     # ── Multi-rate satellite compositing (Experiment 9 method) ────────────────
     # When True, Step 4 produces composite TIFs instead of plain planet-derotated

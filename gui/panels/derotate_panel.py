@@ -121,6 +121,29 @@ class DerotatePanel(BasePanel):
         from gui.panels.bsp_status import BspStatusRow
         fl.addRow(lbl_sat, BspStatusRow(self._satellite_composite))
 
+        # CV-based position refinement (opt-in). Covers both satellite BODY
+        # (needs CH4 -- silently skipped when absent, see Ch4StatusRow) and
+        # SHADOW (works with any filter). Only meaningful when satellite
+        # compositing itself is on, since the refinement code lives inside
+        # that pass -- gated on _satellite_composite's checked state below,
+        # not on CH4 presence (that would wrongly block shadow refinement).
+        self._cv_refinement = QCheckBox()
+        self._cv_refinement.setStyleSheet(_CHECK_STYLE)
+        self._cv_refinement.setChecked(False)
+        self._cv_refinement.setEnabled(self._satellite_composite.isChecked())
+        self._cv_refinement.setToolTip(S("step04.cv_refinement.tooltip"))
+        lbl_cv = QLabel(S("step04.cv_refinement"))
+        lbl_cv.setToolTip(S("step04.cv_refinement.tooltip"))
+        from gui.panels.ch4_status import Ch4StatusRow
+        self._ch4_status_row = Ch4StatusRow(self._cv_refinement)
+        fl.addRow(lbl_cv, self._ch4_status_row)
+
+        def _on_composite_toggled(checked: bool) -> None:
+            self._cv_refinement.setEnabled(checked)
+            if not checked:
+                self._cv_refinement.setChecked(False)
+        self._satellite_composite.toggled.connect(_on_composite_toggled)
+
         # True 3D oblate-spheroid reprojection warp: promoted 2026-08-17 from
         # an opt-in checkbox to the permanent, always-on default (see
         # DerotationConfig.use_true_reprojection's docstring) -- no UI
@@ -138,6 +161,7 @@ class DerotatePanel(BasePanel):
             "stack_weight_power":          self._stack_weight_power.value(),
             "normalize_brightness":        self._normalize.isChecked(),
             "satellite_composite_enabled": self._satellite_composite.isChecked(),
+            "cv_position_refinement_enabled": self._cv_refinement.isChecked(),
         }
         out_text = self._output_lbl.text().strip()
         if out_text:
@@ -177,6 +201,11 @@ class DerotatePanel(BasePanel):
         self._satellite_composite.setChecked(
             bool(data.get("satellite_composite_enabled", False))
         )
+        self._cv_refinement.setChecked(
+            bool(data.get("cv_position_refinement_enabled", False))
+            and self._satellite_composite.isChecked()
+        )
+        self._ch4_status_row.check(self._input_dir, target=data.get("target", "Jup"))
 
     def output_paths(self) -> list[Path]:
         if self._output_dir is None:
