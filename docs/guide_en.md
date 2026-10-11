@@ -112,27 +112,30 @@ Global settings define the base values that affect the entire pipeline. Always r
 
 ### 3.1 Planet Presets
 
-| Preset | Target Name | Horizons ID | Rotation Period |
-|--------|-------------|-------------|-----------------|
-| **Jupiter** | Jup | 599 | 9.9281 h |
-| **Saturn** | Sat | 699 | 10.56 h |
-| **Mars** | Mar | 499 | 24.6229 h |
-| **Uranus** | Ura | 799 | 17.24 h |
-| **Neptune** | Nep | 899 | 16.11 h |
-| **Mercury** | Mer | 199 | 1407.6 h |
-| **Venus** | Ven | 299 | 5832.5 h |
-| **Custom** | User input | User input | User input |
+| Preset | Target Name | Horizons ID | Rotation Period | True Polar/Equatorial Ratio |
+|--------|-------------|-------------|-----------------|-----------------------------|
+| **Jupiter** | Jup | 599 | 9.9281 h | 0.9351 |
+| **Saturn** | Sat | 699 | 10.56 h | 0.9021 |
+| **Mars** | Mar | 499 | 24.6229 h | 0.9941 |
+| **Uranus** | Ura | 799 | 17.24 h | 0.9771 |
+| **Neptune** | Nep | 899 | 16.11 h | 0.9829 |
+| **Mercury** | Mer | 199 | 1407.6 h | 1.00 |
+| **Venus** | Ven | 299 | 5832.5 h | 1.00 |
+| **Custom** | User input | User input | User input | User input |
 
-Selecting a preset automatically fills in the fields below.
+Selecting a preset automatically fills in the fields below. The de-rotation warp scale is 1.00 for every preset.
 
 ### 3.2 Parameter Details
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| **Planet Preset** | Jupiter | Select the target planet. When Custom is selected, the three fields below must be entered manually. |
+| **Planet Preset** | Jupiter | Select the target planet. When Custom is selected, the fields below must be entered manually. |
 | **Target Name** | Jup | Short identifier used in filenames and logs within the pipeline. |
-| **Horizons ID** | 599 | NASA JPL Horizons service body ID. Used by Step 04 de-rotation to automatically fetch the planet's north pole angle (NP.ang) for the observation date. |
+| **Horizons ID** | 599 | NASA JPL Horizons body ID. Step 04 uses it to look up the sub-observer latitude (for the 3D de-rotation warp) and the north pole angle NP.ang (for satellite tracking only). Jupiter, Saturn and Mars use bundled offline tables for 2016–2036; other targets and dates need an internet connection. **599 = Jupiter, 699 = Saturn**. Saturn (699) also turns on ring-aware processing automatically in Steps 02, 04 and 05. |
 | **Rotation Period (h)** | 9.9281 | The planet's rotation period in hours. This is the basis for de-rotation calculations in Step 04. |
+| **De-rotation Warp Scale** | 1.00 | Strength of the de-rotation warp (1.00 = the full physical rotation). The de-rotation computes the geometrically exact rotation, so **leave this at 1.00**. Any other value is reported as a likely timing, period or orientation problem. |
+| **True Polar/Equatorial Ratio** | (preset) | The planet's real physical oblateness (Rpol/Req), used by the 3D de-rotation warp. Filled in from the preset; change it only for a Custom target. |
+| **Max CPU Cores** | 0 (auto) | Maximum CPU cores the pipeline uses. Step 01 is capped at 4 cores; Step 02 uses the full value. 0 = auto. |
 | **Camera Mode** | Mono | **Mono**: Uses a filter wheel, separate SER files per filter. **Color**: Single color camera. Selecting Color automatically sets the filter list to `COLOR` and disables editing. |
 | **Filter List** | IR,R,G,B,CH4 | Comma-separated list of filters used. This list populates the channel dropdowns in Step 06 compositing. Automatically set to `COLOR` when Color camera mode is selected. |
 | **Language** | en | Interface language. Changes take effect immediately (panels are rebuilt in-place). |
@@ -200,11 +203,9 @@ Selects the best frames from SER files and stacks them into TIF files using **pe
 | **Output Folder** | Auto-set | — | Folder where Lucky Stacking result TIF files are saved. Automatically set to `step02_lucky_stack` relative to the SER input folder. |
 | **Top Frame % (%)** | 25 % | 5–100 % (step 5) | Only the top N% of frames by quality score are used for stacking. Lower value = stricter selection (sharper result, lower noise); higher value = more frames included (higher SNR). Use 10–25% on nights of good seeing, 50–75% on nights of poor seeing. |
 | **AP Size (px)** | 64 | 32–128 (step 32) | Alignment Point size. Size of the sub-region used for local shift estimation. **64px = default (recommended)**. 32px = finer local alignment (slower), 128px = broader reference area (faster). |
-| **Iterations** | 1 | 1–2 | Number of Lucky Stacking iterations. Each iteration refines the AP alignment reference using the previous stack result. **1** = default (fast); **2** = higher accuracy at ~2× processing time. |
-| **Warp Method** | Gaussian KR | — | Local warp interpolation method. **Gaussian KR** (default): smooth, boundary-safe, fast. **TPS**: Thin Plate Spline, similar to AS!4 triangulation — sharper local transitions but slower. |
-| **Fourier Quality Power** | 1.0 | 0.5–3.0 (step 0.5) | Exponent applied to each frame's Fourier amplitude when computing per-frequency weights: `w = │FFT│^power`. **1.0** = linear weighting (default, recommended). |
+| **Iterations** | 1 | 1–2 | Number of Lucky Stacking passes. **1** = default (recommended). **2** = the first stack becomes the alignment reference for a second pass; ~2× the processing time for a negligible improvement in practice. |
 | **SER Parallel Workers** | 1 | 0–32 | Number of SER files to process simultaneously. **0** = auto (cpu_count ÷ 4). **1** = sequential (default, safe for low-RAM systems). **Warning: high values multiply RAM usage (~950 MB per SER)**. |
-| **AS!4 AP Grid** | Off | — | When enabled, AP positions are generated using the same greedy Poisson-disc sampling (PDS) algorithm as AutoStakkert!4: three-tier radial density with denser coverage at the disc centre. When disabled, a uniform grid is used. The right-panel preview updates immediately when toggled. |
+| **AS!4 AP Grid** | Off | — | When enabled, AP positions are generated using the same greedy Poisson-disc sampling (PDS) algorithm as AutoStakkert!4: three AP sizes with denser coverage at the disc centre. The grid is generated once from a reference SER and shared by every SER in the session. When disabled, a uniform grid is used. The right-panel preview updates immediately when toggled. |
 | **Debayer** | On | — | *(Color camera mode only)* Converts the Bayer-pattern stacked output to an RGB image. Required for Steps 05–08 to process the result correctly. Disable only when you need to inspect the raw Bayer stack. |
 
 ### 5.2 AP Grid Preview
@@ -213,18 +214,23 @@ The right panel shows the first frame from the selected SER folder overlaid with
 
 - **AP (uniform)**: uniform grid, spacing = AP size ÷ 2.
 - **AP (AS!4 PDS)**: three-layer Poisson-disc grid matching AutoStakkert!4 density — denser at the disc centre, sparser at the limb.
+- **Disk** (cyan ellipse): the detected planet disk.
+- **Ring** (magenta ellipse, Saturn only): the disk + ring area in which APs may be placed. The grid label gets a `+Ring` suffix.
 
 The preview refreshes automatically when AP size changes or the AS!4 AP Grid checkbox is toggled.
 
 ### 5.3 Stacking Algorithm
 
-Lucky Stacking uses **Fourier-domain quality-weighted averaging** (Mackay 2013):
+Lucky Stacking uses **per-AP independent stacking**: each alignment point chooses its own best frames, so every region of the disc is built from the frames that were sharpest *there*. Seeing varies across the disc within a single frame, so this outperforms picking whole frames.
 
-1. **Frame quality scoring**: Each frame is scored with the `log_disk` metric (Laplacian-of-Gaussian variance on the planet disc), matching AS!4's *lapl3* quality measure.
-2. **Reference frame construction**: The top frames centred around the 75th-percentile quality rank are mean-stacked to form a stable reference (high-SNR, representative of "solidly good" seeing).
-3. **Global alignment**: Each selected frame is sub-pixel aligned to the reference via limb-centre ellipse fitting.
-4. **Fourier-domain stacking**: All aligned frames are transformed to the frequency domain. Each frequency component is accumulated with per-frame quality weighting `w(f) = |FFT(frame, f)|^power`, then inverse-transformed. This produces a stack that is sharper than a simple mean because high-quality (sharp) frames contribute more weight at high spatial frequencies.
-5. **Gaussian rolloff**: A Gaussian filter (σ_f = 0.20 in normalised frequency units) is applied to the output spectrum before IFFT, suppressing residual high-frequency noise.
+1. **Frame quality scoring**: every frame is scored with the `log_disk` metric (Laplacian-of-Gaussian variance on the planet disc), matching AS!4's *lapl3*. The top **Top Frame %** are kept.
+2. **Reference frame**: 50 frames centred on the 75th-percentile quality rank are aligned and averaged into a stable, high-SNR reference.
+3. **Global alignment**: each selected frame is shifted (sub-pixel) so its disc centre matches the reference.
+4. **Per-AP selection**: for each AP, the frames are ranked by the sharpness *inside that AP*. Its best half (≈ the top 12.5% of all frames at the default 25%) is stacked after a fine local NCC alignment, weighted towards the sharpest frames.
+5. **Blending**: every AP's stacked patch is blended into the output with a soft Gaussian mask, so there are no seams between APs.
+6. **Noise rolloff**: a gentle frequency-domain low-pass (σ_f = 0.20) suppresses residual high-frequency noise before wavelet sharpening.
+
+**Saturn (ring-aware APs)**: when the Horizons ID is 699, APs are also placed on the rings, not only on the globe. Ring APs are never blended into the globe, so the globe's sharpness is unaffected. This is automatic; there is no setting.
 
 **Parallelism model** (e.g., 32 cores, 4 SER parallel):
 ```
@@ -285,16 +291,25 @@ Stacks frames within the optimal windows detected in Step 03, correcting for pla
 | **Input Folder** | Auto-set | — | Automatically set to the same Step 02 Lucky Stacking TIF folder as Step 03. |
 | **Output Folder** | Auto-set | — | De-rotation stacked master TIF files are saved here. |
 | **Min Quality Threshold** | 0.05 | 0.0–1.0 (step 0.05) | Frames below this quality score are excluded from stacking. Raise to 0.3–0.5 when seeing conditions are poor to more strictly filter bad frames. |
+| **Stack Weight Power** | 1.0 | 0.5–5.0 | Each frame's weight in the stack is `quality score ^ power`. **1.0** = linear blend. Raise to 2.0–4.0 when frame quality varies a lot within a window and the stack looks soft: the best frames then dominate, at some cost in noise. Set per session; it is not a universal default. |
 | **Normalize Brightness** | Off | — | Normalizes the brightness of each frame before stacking. Enable when frames have significant brightness variations due to changing seeing conditions. |
-| **Satellite Composite** | Off | — | Composites Europa and its shadow using Skyfield BSP ephemeris. The status indicator next to the checkbox shows BSP file availability (see §7.3). |
+| **Satellite Composite** | Off | — | Composites every Galilean moon (Io, Europa, Ganymede, Callisto) and moon shadow that is on the disc, so they appear sharp instead of streaked. The status indicator next to the checkbox shows BSP file availability (see §7.5). |
+| **CV Position Refinement** | Off | — | Only available when Satellite Composite is on. Corrects the predicted moon/shadow positions by detecting them in the image, per window, and only when the detection is confident (otherwise the prediction is used unchanged). Moon bodies need CH4 data (the status label shows whether it is available); shadows work in every filter. |
 
-### 7.2 JPL Horizons Integration
+### 7.2 How De-rotation Works
 
-Step 04 automatically queries the NASA JPL Horizons API to retrieve the planet's north pole angle (NP.ang) at the time of observation. The **Horizons ID** in Global Settings must be set correctly. An internet connection is required.
+- **Rotation axis direction** is measured directly from the images: the belt orientation is detected across all frames of the session. The warp direction and its sign are also detected automatically from how features actually drift. None of these are settings.
+- **3D reprojection**: every pixel is mapped onto an oblate-spheroid model of the planet, rotated by the elapsed time, and projected back. The model uses the tilt of the planet towards Earth (sub-observer latitude) and the planet's true oblateness from Global Settings.
+- **Alignment**: each frame's disc centre and size are measured on the raw frame and corrected **before** the warp. Frames whose alignment is far off from the rest of the window are dropped automatically.
+- **Saturn**: the rings do not rotate with the atmosphere, so the warp is suppressed wherever the rings cover the globe.
 
-### 7.3 De-rotation Confidence (NCC)
+### 7.3 JPL Horizons Data
 
-The **warp scale** is a fixed physical constant (default 1.0) empirically calibrated from best-seeing data. It is not auto-tuned per window — the planet's rotation rate is constant, so the warp geometry does not change with seeing.
+Step 04 needs two values for each window's time: the **sub-observer latitude** (for the 3D warp) and the **north pole angle NP.ang** (for satellite tracking only). Jupiter, Saturn and Mars use bundled tables covering 2016–2036, so no internet connection is needed. Other targets or dates are fetched from the NASA JPL Horizons API and cached in `~/.astropipe/horizons_cache.json`. The **Horizons ID** in Global Settings must be set correctly.
+
+### 7.4 De-rotation Confidence (NCC)
+
+The **warp scale** (Global Settings) stays at 1.0, the full physical rotation. It is not auto-tuned per window: the planet's rotation rate is constant, so the warp geometry does not change with seeing.
 
 After Step 04 completes (standalone or as part of Run All), a **high-pass NCC sweep** is performed between the earliest and latest frames of the session's longest window. A Gaussian high-pass filter (σ=30 px) removes limb-darkening bias so that belt structures drive the correlation. The resulting **NCC at warp_scale=1.0** measures how reliably the de-rotation prediction matches the actual belt structure — a proxy for seeing quality and de-rotation reliability.
 
@@ -306,9 +321,9 @@ This is informational — the pipeline has already completed and results are sav
 
 The NCC value and measurement details are logged in `derotation_summary.txt` as `derot_confidence`.
 
-### 7.4 Satellite / Shadow Composite
+### 7.5 Satellite / Shadow Composite
 
-When **Satellite Composite** is checked, Europa and its shadow are handled separately from the planet de-rotation and blended into every filter stack.
+When **Satellite Composite** is checked, each Galilean moon and shadow on the disc is stacked separately, following its own motion, and blended into every filter stack. Without this, a moon moving across the disc during the window appears as a streak.
 
 **BSP status indicator** (coloured label next to the checkbox):
 
@@ -319,7 +334,11 @@ When **Satellite Composite** is checked, Europa and its shadow are handled separ
 | Red — network error | No internet connection | Connect to internet, then re-open the panel |
 | Red — `pip install skyfield` required | `skyfield` package not installed | Run `pip install skyfield` in the PlanetFlow environment |
 
-**Cross-filter consistency**: Europa and its shadow are positioned at the same location **relative to the planet disk** in every filter's output TIF (IR, R, G, B, CH4). This guarantees that the satellite appears at the same location across all composites (IR-RGB, CH4-G-IR, etc.) after Step 06 channel alignment — regardless of sub-pixel differences in each filter's disk position.
+**Cross-filter consistency**: each moon and shadow is placed at the same location **relative to the planet disk** in every filter's output TIF (IR, R, G, B, CH4). It therefore appears in the same place in every composite (IR-RGB, CH4-G-IR, etc.) after Step 06 channel alignment, regardless of sub-pixel differences in each filter's disk position.
+
+**Camera orientation**: the tracker needs to know whether north is up or down in your images. This is detected automatically from Jupiter's belt asymmetry (the South Equatorial Belt is wider and darker), voting window by window. If no window gives a confident answer, satellite tracking is **skipped** for the session and the log says so.
+
+> **Known limitation**: predicted shadow positions can still be off by a few degrees of rotation around the disc centre (roughly 9 px at typical distances). The cause is still under investigation. **CV Position Refinement** can correct this per window when the shadow is clearly visible. See [`investigation_shadow_rotational_bias.md`](investigation_shadow_rotational_bias.md).
 
 ---
 
@@ -340,10 +359,12 @@ Same structure as Step 07, but **stronger values can be safely used** since it's
 |-------|---------|-------------------|-----------------|
 | **L1** | 200 | 100–400 | Highest-resolution pixel-level detail |
 | **L2** | 200 | 100–400 | Fine structures (belts, streaks) |
-| **L3** | 200 | 50–300 | Medium-scale structures |
-| **L4** | 0 | 0–100 | Large-scale tonal contrast |
-| **L5** | 0 | 0 | Not recommended |
-| **L6** | 0 | 0 | Not recommended |
+| **L3** | 200 | — | Medium-scale structures. **Currently has no effect** (its calibrated maximum gain is 0) |
+| **L4–L6** | 0 | — | Large-scale structures. **Currently have no effect** |
+
+Each level row also has a **Denoise** control (0.0–3.0, default 0.0). It suppresses wavelet coefficients below `amount × noise level` before sharpening: 0.1 is gentle (the WaveSharp default), 1.0 is strong. It is most useful on L1–L2 to keep sensor noise from being amplified.
+
+Step 05 sharpens only inside the planet disc, fading the strength to zero at the limb. The fade width is measured automatically from each image. For **Saturn**, the rings are sharpened too, using a ring-shaped mask that leaves the dark gap between globe and rings untouched (sharpening that gap causes a bright rim artifact).
 
 ### 8.2 Live Preview
 
@@ -376,7 +397,9 @@ Multiple composite types (RGB, LRGB, false color) can be defined and produced in
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| **Max Channel Shift (px)** | 15.0 | 0.0–100.0 | Maximum allowed shift in channel-to-channel phase correlation alignment. If the computed shift exceeds this value, alignment is skipped (prevents runaway misalignment). Raise to 20–30 on nights with strong atmospheric dispersion. |
+| **Max Channel Shift (px)** | 15.0 | 0.0–100.0 | Maximum allowed shift in channel-to-channel phase correlation alignment. If the computed shift exceeds this value, alignment is skipped (prevents runaway misalignment). Raise to 20–30 on nights with strong atmospheric dispersion. A shift within this limit is also applied only if it actually improves the match with the reference channel inside the disc, which filters out confident-looking but wrong alignments. |
+| **Stretch** | Off | — | Stretches the colour channels together (shared black/white points), keeping natural colour ratios. |
+| **Saturation boost** | On | — | Automatically boosts colour saturation so the disc's chroma reaches a fixed target. Never reduces saturation; at most 4×. |
 | **Global Normalize** | On | — | When enabled, scales each window's composite so its mean luminance matches the cross-window average. Eliminates inter-window brightness flicker in the GIF output. |
 | **Filter Normalize** | Off | — | When enabled, equalizes per-filter brightness across all windows before compositing. Computes the planet-disk median for each (filter, window) pair and scales each window so all windows share the same disk median per filter. Corrects atmospheric transparency differences without blowing out the dynamic range. |
 | **Brightness Scale** | 1.0 | 0.1–2.0 (step 0.05) | Multiplier applied to the composite output brightness. 1.0 = unchanged. Values below 1.0 darken; values above 1.0 brighten. |
@@ -443,6 +466,10 @@ Applies wavelet sharpening to TIF files output by Step 02 Lucky Stacking and con
 | **Input Folder** | Auto-set | — | TIF folder to process. Auto-filled from the Step 02 output when Step 02 is enabled; otherwise type or browse to any TIF folder. |
 | **Output Folder** | Auto-set | — | Set automatically to `step07_wavelet_preview` alongside the input folder. |
 | **Apply color correction** | On | — | *(Color camera mode only)* Applies automatic white balance and chromatic aberration (CA) correction to the output PNGs. Disable only when you want the raw-color output for inspection. |
+| **Stretch** | Off | — | Contrast stretch of the output PNGs. |
+| **Saturation boost** | On | — | *(Color camera mode only)* Automatic saturation boost of the output PNGs. |
+
+Unlike Step 05, Step 07 sharpens the whole image evenly, with no limb fade. It also applies a light noise gate (`sharpen_filter = 0.1`) that Step 05 does not use.
 
 ### 10.2 Wavelet Levels (L1–L6)
 
@@ -509,7 +536,7 @@ Two output files are produced:
 | **Black Point** | 0.04 | 0.0–0.5 (step 0.01) | Pixels at or below this value are remapped to pure black (0). Suppresses background sky noise and gives the planet a clean dark border. Recommended range: **0.02–0.08**. |
 | **Gamma** | 0.9 | 0.1–3.0 (step 0.05) | Brightness gamma correction. **1.0** = no correction / **< 1.0** = brighter (typically 0.8–1.0 recommended) / **> 1.0** = darker. |
 | **Cell Size (px)** | 300 | 100–1024 (step 50) | Size in pixels of each composite image cell within the summary grid. |
-| **Save Analytic View** | Off | — | When checked, generates one `window_XX_analytic.png` per time window in the `analytic/` subdirectory. Only available in mono mode. |
+| **Save Analytic View** | On | — | When checked, generates one `window_XX_analytic.png` per time window in the `analytic/` subdirectory. Only available in mono mode. |
 
 ### 12.2 Live Preview
 
@@ -591,14 +618,17 @@ After pipeline execution, the following folders are created under the output bas
 ```
 {output_base}/
 ├── step03_quality/             # Step 03: Quality assessment results
+│   ├── quality_scores.csv
 │   ├── {filter}_ranking.csv
 │   ├── windows.json
 │   └── windows_summary.txt
 ├── step04_derotated/           # Step 04: De-rotation master TIFs
+│   ├── derotation_summary.txt  # pole_pa, warp scale, de-rotation confidence
 │   └── window_01/
-│       ├── IR_master.tif
-│       ├── R_master.tif
-│       └── ...
+│       ├── IR_derotated.tif
+│       ├── R_derotated.tif
+│       ├── ...
+│       └── derotation_log.json # per-frame alignment, satellite positions
 ├── step05_wavelet_master/      # Step 05: Wavelet master PNGs
 │   └── window_01/
 │       ├── IR_master.png
@@ -609,12 +639,14 @@ After pipeline execution, the following folders are created under the output bas
 │       ├── RGB_composite.png
 │       ├── IR-RGB_composite.png
 │       ├── CH4-G-IR_composite.png
-│       └── ...
+│       └── composite_log.json
 ├── step07_wavelet_preview/     # Step 07: Wavelet-processed preview PNGs
 │   ├── 2026-03-20-1046_1-U-IR-Jup_..._wavelet.png
 │   └── ...
-├── step08_gif/                 # Step 08: Animated GIF
-│   └── RGB_animation.gif
+├── step08_gif/                 # Step 08: Animated GIFs (one per composite)
+│   ├── RGB_animation.gif
+│   ├── IR-RGB_animation.gif
+│   └── CH4-G-IR_animation.gif
 └── step09_summary_grid/        # Step 09: Summary grid PNGs
     ├── summary_grid_simple.png   # Composites only (always generated)
     ├── summary_grid.png          # Composites + filters (mono camera, when Step 05 data exists)
