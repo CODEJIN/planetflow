@@ -1209,14 +1209,12 @@ class MainWindow(QMainWindow):
         lucky_stack = LuckyStackConfig(
             top_percent           = float(d.get("lucky_top_percent", 0.25)),
             ap_size               = int(d.get("lucky_ap_size", 64)),
-            n_iterations          = int(d.get("lucky_n_iterations", 2)),
+            n_iterations          = int(d.get("lucky_n_iterations", 1)),
             n_workers             = _global_workers,   # Step 2 uses all available cores
             n_ser_parallel        = int(d.get("lucky_n_ser_parallel", 1)),
-            use_tps               = bool(d.get("lucky_use_tps", False)),
             ap_grid_mode          = APGridMode.AS4 if bool(d.get("lucky_use_as4_ap_grid", False)) else APGridMode.UNIFORM,
             use_ncc               = bool(d.get("lucky_use_ncc", False)),
             per_ap_selection      = bool(d.get("lucky_per_ap_selection", False)),
-            fourier_quality_power = float(d.get("lucky_fourier_power", 1.0)),
             debayer               = bool(d.get("lucky_debayer", True)),
             sigma_clip            = bool(d.get("lucky_sigma_clip", False)),
         )
@@ -1264,7 +1262,7 @@ class MainWindow(QMainWindow):
             horizons_id           = str(d.get("horizons_id", "599")),
             warp_scale            = float(d.get("warp_scale", 1.00)),
             normalize_brightness  = bool(d.get("normalize_brightness", False)),
-            min_quality_threshold = float(d.get("min_quality_threshold", 0.3)),
+            min_quality_threshold = float(d.get("min_quality_threshold", 0.05)),
             stack_weight_power    = float(d.get("stack_weight_power", 1.0)),
             # Always on (2026-08-17, promoted from opt-in to permanent
             # default -- see DerotationConfig.use_true_reprojection's
@@ -1302,7 +1300,7 @@ class MainWindow(QMainWindow):
 
         specs = _parse_specs(d.get("composite_specs"))
         composite = CompositeConfig(
-            max_shift_px            = float(d.get("max_shift_px", 8.0)),
+            max_shift_px            = float(d.get("max_shift_px", 15.0)),
             global_normalize        = bool(d.get("global_normalize", True)),
             global_filter_normalize = bool(d.get("global_filter_normalize", False)),
             brightness_scale        = float(d.get("brightness_scale", 1.0)),
@@ -1326,7 +1324,7 @@ class MainWindow(QMainWindow):
 
         grid = SummaryGridConfig(
             black_point     = float(d.get("black_point", 0.04)),
-            gamma           = float(d.get("gamma", 0.8)),
+            gamma           = float(d.get("gamma", 0.9)),
             cell_size_px    = int(d.get("cell_size_px", 300)),
             composites      = grid_composites,
             save_analytic   = bool(d.get("save_analytic", True)),

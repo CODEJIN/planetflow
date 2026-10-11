@@ -33,12 +33,10 @@ _DEFAULTS: dict[str, Any] = {
     "step02_output_dir":  "",
     "lucky_top_percent":  0.25,
     "lucky_ap_size":      64,
-    "lucky_n_iterations": 2,
-    "lucky_use_tps":          False,
+    "lucky_n_iterations": 1,
     "lucky_use_as4_ap_grid":  False,
     "lucky_use_ncc":          True,
     "lucky_per_ap_selection": True,
-    "lucky_fourier_power":    1.0,
     "lucky_sigma_clip":       False,  # was silently dropped by build_config() before 2026-09-18
     "lucky_n_workers":    0,   # kept for migration compat; UI uses global_max_workers
     "global_max_workers": 0,   # 0=auto (all cores); Step 1 caps at 4, Step 2 uses all
