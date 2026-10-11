@@ -337,6 +337,10 @@ class LuckyStackPanel(BasePanel):
         self._fourier_power.setValue(float(data.get("lucky_fourier_power", 1.0)))
         self._n_ser_parallel.setValue(int(data.get("lucky_n_ser_parallel", 1)))
 
+        # Ring-aware AP extent (see LuckyStackConfig / lucky_stack.build_reference_frame):
+        # automatic for has_rings targets (Saturn), no manual toggle.
+        _has_rings = str(data.get("horizons_id", "599")) == "699"
+
         # Debayer checkbox: visible and meaningful only in color camera mode
         _is_color = data.get("camera_mode", "mono") == "color"
         self._lbl_debayer.setVisible(_is_color)
@@ -349,6 +353,7 @@ class LuckyStackPanel(BasePanel):
             _ap_sz = int(data.get("lucky_ap_size", 64))
             self._preview.set_params(ap_size=_ap_sz, ap_step=_ap_sz // 2)
             self._preview.set_use_as4_ap_grid(bool(data.get("lucky_use_as4_ap_grid", False)))
+            self._preview.set_ring_aware_extent(_has_rings)
 
     def validate(self, config: dict, batch_mode: bool = False) -> list:
         from gui.validation import ValidationIssue, count_files

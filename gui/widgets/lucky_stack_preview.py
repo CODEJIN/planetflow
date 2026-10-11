@@ -109,6 +109,7 @@ class _Worker(QObject):
         ap_min_brightness: float,
         ap_min_contrast: float,
         use_as4_ap_grid: bool = False,
+        ring_aware_extent: bool = False,
     ) -> None:
         super().__init__()
         self._path           = ser_path
@@ -117,6 +118,7 @@ class _Worker(QObject):
         self._min_bright     = ap_min_brightness
         self._min_cont       = ap_min_contrast
         self._use_as4_ap_grid = use_as4_ap_grid
+        self._ring_aware_extent = ring_aware_extent
 
     @Slot()
     def run(self) -> None:
@@ -126,6 +128,7 @@ class _Worker(QObject):
             from pipeline.modules.derotation import find_disk_center
             from pipeline.modules.lucky_stack import (
                 generate_ap_grid, generate_as4_ap_grid, LuckyStackConfig,
+                _fit_outer_blob_ellipse,
             )
 
             with ser_io.SERReader(self._path) as reader:
@@ -151,15 +154,21 @@ class _Worker(QObject):
                 ap_min_contrast   = self._min_cont,
             )
 
+            ring_ellipse = None
+            if self._ring_aware_extent:
+                ring_ellipse = _fit_outer_blob_ellipse(gray)
+
             if self._use_as4_ap_grid:
                 # AS!4 greedy PDS: returns (ax, ay, ap_size) triples already
-                aps = generate_as4_ap_grid(cx, cy, disk_radius, gray, cfg)
+                aps = generate_as4_ap_grid(cx, cy, disk_radius, gray, cfg, ring_ellipse=ring_ellipse)
                 grid_label = "AP (AS!4 PDS)"
             else:
                 # Uniform grid: returns (ax, ay) pairs → add ap_size
-                raw_aps = generate_ap_grid(cx, cy, disk_radius, gray, cfg)
+                raw_aps = generate_ap_grid(cx, cy, disk_radius, gray, cfg, ring_ellipse=ring_ellipse)
                 aps = [(ax, ay, cfg.ap_size) for ax, ay in raw_aps]
                 grid_label = "AP (uniform)"
+            if ring_ellipse is not None:
+                grid_label += "+Ring"
 
             # ── Draw overlay ──────────────────────────────────────────────────
             overlay, scale = _fit_to(disp.copy(), _PANEL_SIZE)
@@ -177,6 +186,18 @@ class _Worker(QObject):
                 0, 360,
                 (0, 210, 255), 2,
             )
+
+            # Ring-inclusive blob ellipse (magenta), when ring-aware extent is active
+            if ring_ellipse is not None:
+                r_cx, r_cy, r_semi_a, r_semi_b, r_angle = ring_ellipse
+                cv2.ellipse(
+                    overlay,
+                    (int(r_cx * sx), int(r_cy * sy)),
+                    (max(1, int(r_semi_a * s_avg)), max(1, int(r_semi_b * s_avg))),
+                    r_angle,
+                    0, 360,
+                    (255, 80, 220), 2,
+                )
 
             # Find the AP closest to disk centre to draw as a sample patch box
             sample_ap = None
@@ -212,6 +233,8 @@ class _Worker(QObject):
             thick = 1
             cv2.putText(overlay, grid_label, (4, 14), font, fsc, (60, 240, 100), thick, cv2.LINE_AA)
             cv2.putText(overlay, "Disk",     (4, 26), font, fsc, (0, 210, 255),  thick, cv2.LINE_AA)
+            if ring_ellipse is not None:
+                cv2.putText(overlay, "Ring", (4, 38), font, fsc, (255, 80, 220), thick, cv2.LINE_AA)
 
             size_counts = Counter(sz for _, _, sz in aps)
             size_str = " ".join(f"{sz}px×{cnt}" for sz, cnt in sorted(size_counts.items()))
@@ -241,6 +264,7 @@ class LuckyStackPreviewWidget(QWidget):
         self._ap_min_brightness: float = 0.196
         self._ap_min_contrast:   float = 0.01
         self._use_as4_ap_grid:  bool  = False
+        self._ring_aware_extent: bool = False
 
         self._running = False
         self._pending = False
@@ -325,6 +349,17 @@ class LuckyStackPreviewWidget(QWidget):
             self._use_as4_ap_grid = enabled
             self.schedule_update()
 
+    def set_ring_aware_extent(self, has_rings: bool) -> None:
+        """has_rings: True for a ringed target (horizons_id == "699"/Saturn).
+
+        Automatic, no separate manual enable — mirrors
+        lucky_stack.build_reference_frame's has_rings parameter, which always
+        widens AP eligibility to the disk+ring blob ellipse for such targets.
+        """
+        if self._ring_aware_extent != has_rings:
+            self._ring_aware_extent = has_rings
+            self.schedule_update()
+
     def schedule_update(self, delay: int = 500) -> None:
         if self._input_dir is None:
             return
@@ -367,6 +402,7 @@ class LuckyStackPreviewWidget(QWidget):
             self._ap_min_brightness,
             self._ap_min_contrast,
             self._use_as4_ap_grid,
+            self._ring_aware_extent,
         )
         thread = QThread(self)
         worker.moveToThread(thread)

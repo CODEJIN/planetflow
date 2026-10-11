@@ -132,17 +132,23 @@ def run(
 
     # ── Session-wide AS4 AP pre-computation ──────────────────────────────────
     cfg = config.lucky_stack
+    # has_rings mirrors pipeline/steps/derotate_stack.py's own has_rings check —
+    # automatically widens lucky_stack's AP eligibility to the disk+ring blob
+    # ellipse for Saturn (see lucky_stack.build_reference_frame); silently
+    # inert for every other target. No manual toggle.
+    has_rings = config.derotation.horizons_id == "699"  # Saturn
     _session_aps = None
     _session_ref_cx = 0.0
     _session_ref_cy = 0.0
+    _session_ring_ellipse = None
 
     if getattr(cfg, "ap_grid_mode", APGridMode.UNIFORM) == APGridMode.AS4:
         ref_ser = _pick_reference_ser(ser_files, getattr(cfg, "ap_reference_filter", ""))
         if ref_ser is not None:
             print(f"  [Step2] Session AP reference: {ref_ser.name}", flush=True)
             try:
-                _session_aps, _session_ref_cx, _session_ref_cy, _ref_r = \
-                    compute_session_aps_from_ser(ref_ser, cfg)
+                _session_aps, _session_ref_cx, _session_ref_cy, _ref_r, _session_ring_ellipse = \
+                    compute_session_aps_from_ser(ref_ser, cfg, has_rings=has_rings)
                 from collections import Counter as _Ctr
                 _c = _Ctr(sz for _, _, sz in _session_aps)
                 print(
@@ -154,6 +160,7 @@ def run(
             except Exception as _e:
                 print(f"  [Step2] WARNING: Session AP computation failed ({_e}) — falling back to per-SER grid.", flush=True)
                 _session_aps = None
+                _session_ring_ellipse = None
         else:
             print("  [Step2] WARNING: No suitable reference SER found — falling back to per-SER grid.", flush=True)
 
@@ -191,6 +198,8 @@ def run(
             session_ref_cx=_session_ref_cx,
             session_ref_cy=_session_ref_cy,
             cancel_event=cancel_event,
+            has_rings=has_rings,
+            session_ring_ellipse=_session_ring_ellipse,
         )
         with _counter_lock:
             _file_counter[0] += 1
@@ -282,6 +291,8 @@ def _process_one(
     session_ref_cx: float = 0.0,
     session_ref_cy: float = 0.0,
     cancel_event=None,
+    has_rings: bool = False,
+    session_ring_ellipse=None,
 ) -> Dict:
     """Run lucky stacking on a single SER file.
 
@@ -298,6 +309,8 @@ def _process_one(
             session_ref_cx=session_ref_cx,
             session_ref_cy=session_ref_cy,
             cancel_event=cancel_event,
+            has_rings=has_rings,
+            session_ring_ellipse=session_ring_ellipse,
         )
     except Exception as exc:
         print(f"\n  ERROR processing {ser_path.name}: {exc}")

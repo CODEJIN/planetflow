@@ -1218,6 +1218,7 @@ class MainWindow(QMainWindow):
             per_ap_selection      = bool(d.get("lucky_per_ap_selection", False)),
             fourier_quality_power = float(d.get("lucky_fourier_power", 1.0)),
             debayer               = bool(d.get("lucky_debayer", True)),
+            sigma_clip            = bool(d.get("lucky_sigma_clip", False)),
         )
 
         ser_crop = SerCropConfig(

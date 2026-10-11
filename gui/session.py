@@ -39,6 +39,7 @@ _DEFAULTS: dict[str, Any] = {
     "lucky_use_ncc":          True,
     "lucky_per_ap_selection": True,
     "lucky_fourier_power":    1.0,
+    "lucky_sigma_clip":       False,  # was silently dropped by build_config() before 2026-09-18
     "lucky_n_workers":    0,   # kept for migration compat; UI uses global_max_workers
     "global_max_workers": 0,   # 0=auto (all cores); Step 1 caps at 4, Step 2 uses all
     "lucky_n_ser_parallel": 1, # SER-level parallelism; 0=auto (cpu//4)

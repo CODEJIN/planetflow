@@ -34,6 +34,7 @@ Performance targets (280×280 px SER, 10 000 frames, 1 034 selected at 10%):
 """
 from __future__ import annotations
 
+import math
 import multiprocessing as _mp
 import threading as _threading
 import time
@@ -249,18 +250,92 @@ def score_frames_log_disk(
 
 # ── 2. Reference frame construction ───────────────────────────────────────────
 
+RingEllipse = Tuple[float, float, float, float, float]  # (cx, cy, semi_a, semi_b, angle_deg)
+
+
+def _fit_outer_blob_ellipse(
+    image: np.ndarray,
+    margin_factor: float = 0.10,
+    fixed_threshold: int = 0,
+) -> Optional[RingEllipse]:
+    """Fit an ellipse to the WHOLE illuminated blob (disk + ring, if any).
+
+    Deliberately duplicates only the raw thresholding/contour/fitEllipse block
+    from derotation.py's _find_disk_center_impl() (Otsu threshold with margin,
+    morphological close, largest external contour, cv2.fitEllipse) -- WITHOUT
+    the disk-core isolation step that function applies afterwards to strip a
+    ring for de-rotation geometry. Kept as an independent copy rather than a
+    shared helper so this stays a zero-line change to find_disk_center() /
+    derotation.py, which Step 4/5/6 depend on heavily.
+
+    Used only to widen the AP-eligible region for has_rings targets (see
+    build_reference_frame's has_rings parameter) -- find_disk_center()'s own
+    ring-stripped (cx, cy, semi_a) remains the disk_radius used everywhere
+    else (global alignment search range, diagnostics, etc).
+
+    Returns (cx, cy, semi_major, semi_minor, angle_major_deg), or None if no
+    contour could be fit.
+    """
+    arr8 = np.clip(image * 255, 0, 255).astype(np.uint8)
+    if fixed_threshold > 0:
+        effective_thresh = int(fixed_threshold)
+    else:
+        thresh_val, _ = cv2.threshold(arr8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        effective_thresh = max(1, int(thresh_val * (1.0 - margin_factor)))
+    _, binary = cv2.threshold(arr8, effective_thresh, 255, cv2.THRESH_BINARY)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    if len(largest) < 5:
+        return None
+
+    (cx, cy), (ma, mi), angle = cv2.fitEllipse(largest)
+    if ma >= mi:
+        semi_a, semi_b, angle_major = ma / 2.0, mi / 2.0, angle
+    else:
+        semi_a, semi_b, angle_major = mi / 2.0, ma / 2.0, (angle + 90.0) % 180.0
+    return float(cx), float(cy), float(semi_a), float(semi_b), float(angle_major)
+
+
+def _in_ellipse(ax: float, ay: float, ellipse: RingEllipse) -> bool:
+    """True if point (ax, ay) lies inside (or on) the given rotated ellipse."""
+    cx, cy, semi_a, semi_b, angle_deg = ellipse
+    if semi_a <= 0 or semi_b <= 0:
+        return False
+    theta = math.radians(angle_deg)
+    dx, dy = ax - cx, ay - cy
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    dxr = dx * cos_t + dy * sin_t
+    dyr = -dx * sin_t + dy * cos_t
+    return (dxr / semi_a) ** 2 + (dyr / semi_b) ** 2 <= 1.0
+
+
 def build_reference_frame(
     reader: SERReader,
     scores: np.ndarray,
     cfg: LuckyStackConfig,
-) -> Tuple[np.ndarray, Tuple[float, float, float]]:
+    has_rings: bool = False,
+) -> Tuple[np.ndarray, Tuple[float, float, float], Optional[RingEllipse]]:
     """Build a high-SNR reference frame from the top-scored frames.
 
     Global-aligns each of the best reference_n_frames to the single best frame
     via phase correlation, then returns their unweighted mean.
 
+    Args:
+        has_rings: True for a ringed target (horizons_id == "699"/Saturn).
+            Automatically fits a disk+ring blob ellipse
+            (_fit_outer_blob_ellipse) to widen AP eligibility past the
+            disk-only radius for such targets. Silently inert otherwise (no
+            manual toggle -- this always applies to every has_rings target).
+
     Returns:
-        (reference_f32, (disk_cx, disk_cy, disk_radius))
+        (reference_f32, (disk_cx, disk_cy, disk_radius), ring_ellipse)
+        ring_ellipse is None unless has_rings is set and a blob could be fit.
 
     Raises:
         RuntimeError if the planet disk cannot be reliably detected.
@@ -315,7 +390,12 @@ def build_reference_frame(
             f"Disk not reliably detected in reference (radius={radius:.1f} px). "
             "Check that step01 produced a valid SER with the planet visible."
         )
-    return reference, (float(cx), float(cy), radius)
+
+    ring_ellipse: Optional[RingEllipse] = None
+    if has_rings:
+        ring_ellipse = _fit_outer_blob_ellipse(reference)
+
+    return reference, (float(cx), float(cy), radius), ring_ellipse
 
 
 # ── 3. AP grid generation ──────────────────────────────────────────────────────
@@ -326,12 +406,14 @@ def generate_ap_grid(
     disk_radius: float,
     reference: np.ndarray,
     cfg: LuckyStackConfig,
+    ring_ellipse: Optional[RingEllipse] = None,
 ) -> List[Tuple[int, int]]:
     """Create an AP grid over the planet disk in the reference frame.
 
     Includes only APs whose patch:
     - is fully contained within the image
-    - has its centre inside the disk
+    - has its centre inside the disk (or, when ring_ellipse is given, inside
+      that ellipse instead — see build_reference_frame's has_rings parameter)
     - has local RMS contrast >= cfg.ap_min_contrast (rejects uniform sky)
     - has mean brightness >= cfg.ap_min_brightness (rejects very dark limb;
       equivalent to AS!4 Min Bright=50, i.e. 50/255≈0.196)
@@ -349,9 +431,13 @@ def generate_ap_grid(
 
     for ay in range(half, H - half, cfg.ap_step):
         for ax in range(half, W - half, cfg.ap_step):
-            dist = np.sqrt((ax - disk_cx) ** 2 + (ay - disk_cy) ** 2)
-            if dist >= disk_radius:
-                continue
+            if ring_ellipse is not None:
+                if not _in_ellipse(ax, ay, ring_ellipse):
+                    continue
+            else:
+                dist = np.sqrt((ax - disk_cx) ** 2 + (ay - disk_cy) ** 2)
+                if dist >= disk_radius:
+                    continue
             patch = reference[ay - half : ay + half, ax - half : ax + half]
             if float(patch.std()) < cfg.ap_min_contrast:
                 continue
@@ -643,6 +729,7 @@ def generate_as4_ap_grid(
     disk_radius: float,
     reference: np.ndarray,
     cfg,
+    ring_ellipse: Optional[RingEllipse] = None,
 ) -> List[Tuple[int, int, int]]:
     """AS!4 greedy Poisson Disk Sampling AP grid (raster scan, reverse-engineered).
 
@@ -655,6 +742,22 @@ def generate_as4_ap_grid(
 
     Match rate vs AS!4 ground truth: 100% on 260323 & 260415; 96-100% on 260407.
     Returns (ax, ay, ap_size) triples — same format as generate_double_ap_grid.
+
+    ring_ellipse (see build_reference_frame's has_rings parameter): each
+    layer's disk-only pass runs FIRST and UNCHANGED (identical predicate,
+    scan order, and grid state to the ring_ellipse=None case), so the
+    validated AS!4-matched disk placement can never be perturbed by this
+    option. A second pass then greedily adds ring-only candidates (inside
+    ring_ellipse, outside the disk) against that SAME grid, so ring APs stay
+    properly spaced from the disk boundary without ever un-picking a disk
+    point the first pass already committed. This two-pass design exists
+    because an earlier single-pass version (widening the check-1 predicate
+    itself) let brand-new near-boundary candidates — whose full ap_size
+    patch straddles into the bright disk and can therefore pass the
+    brightness check too — win the greedy race ahead of the original
+    disk-interior picks purely due to scan order, relocating up to ~99% of
+    disk APs in testing (experiments/scratch_ring_aware_ap_sanity.py) even
+    though the geometric eligibility test alone was a pure superset.
     """
     H, W = reference.shape[:2]
     min_bright = getattr(cfg, "ap_min_brightness", 0.196)
@@ -673,6 +776,10 @@ def generate_as4_ap_grid(
 
     disk_r2 = disk_radius * disk_radius
 
+    def _in_disk(ax: int, ay: int) -> bool:
+        ddx, ddy = ax - disk_cx, ay - disk_cy
+        return ddx * ddx + ddy * ddy < disk_r2
+
     def _greedy_pds_layer(ap_size: int) -> None:
         half = ap_size // 2
         min_dist    = int(round(ap_size * 35 / 64))
@@ -681,37 +788,42 @@ def generate_as4_ap_grid(
         cell        = min_dist  # grid cell size = min_dist guarantees ≤3×3 cell check
         grid: Dict[Tuple[int, int], List[Tuple[int, int]]] = defaultdict(list)
 
-        for ay in range(half, H - half):
-            for ax in range(half, W - half):
-                # Check 1: inside disk
-                ddx = ax - disk_cx
-                ddy = ay - disk_cy
-                if ddx * ddx + ddy * ddy >= disk_r2:
-                    continue
-                # Check 2: brightness (integral image lookup)
-                s_val = (integ[ay + half, ax + half]
-                         - integ[ay - half, ax + half]
-                         - integ[ay + half, ax - half]
-                         + integ[ay - half, ax - half])
-                if s_val * inv_area < _min_bright_abs:
-                    continue
-                # Check 3: min-dist — only inspect 3×3 neighbouring grid cells
-                cx_cell = ax // cell
-                cy_cell = ay // cell
-                too_close = False
-                for dcx in (-1, 0, 1):
-                    for dcy in (-1, 0, 1):
-                        for sx, sy in grid[(cx_cell + dcx, cy_cell + dcy)]:
-                            if (ax - sx) * (ax - sx) + (ay - sy) * (ay - sy) < min_dist_sq:
-                                too_close = True
+        def _scan(in_region) -> None:
+            for ay in range(half, H - half):
+                for ax in range(half, W - half):
+                    if not in_region(ax, ay):
+                        continue
+                    # Brightness (integral image lookup)
+                    s_val = (integ[ay + half, ax + half]
+                             - integ[ay - half, ax + half]
+                             - integ[ay + half, ax - half]
+                             + integ[ay - half, ax - half])
+                    if s_val * inv_area < _min_bright_abs:
+                        continue
+                    # min-dist — only inspect 3×3 neighbouring grid cells
+                    cx_cell = ax // cell
+                    cy_cell = ay // cell
+                    too_close = False
+                    for dcx in (-1, 0, 1):
+                        for dcy in (-1, 0, 1):
+                            for sx, sy in grid[(cx_cell + dcx, cy_cell + dcy)]:
+                                if (ax - sx) * (ax - sx) + (ay - sy) * (ay - sy) < min_dist_sq:
+                                    too_close = True
+                                    break
+                            if too_close:
                                 break
                         if too_close:
                             break
-                    if too_close:
-                        break
-                if not too_close:
-                    grid[(cx_cell, cy_cell)].append((ax, ay))
-                    aps.append((ax, ay, ap_size))
+                    if not too_close:
+                        grid[(cx_cell, cy_cell)].append((ax, ay))
+                        aps.append((ax, ay, ap_size))
+
+        # Pass 1: disk-only, byte-identical to the ring_ellipse=None behavior.
+        _scan(_in_disk)
+        # Pass 2: ring-only candidates, added against the grid pass 1 already
+        # populated -- purely additive, never revisits pass 1's decisions.
+        if ring_ellipse is not None:
+            _scan(lambda ax, ay: _in_ellipse(ax, ay, ring_ellipse) and not _in_disk(ax, ay))
 
     _greedy_pds_layer(sz1)
     _greedy_pds_layer(sz2)
@@ -723,10 +835,21 @@ def generate_as4_ap_grid(
 def compute_session_aps_from_ser(
     ser_path: Path,
     cfg,
-) -> Tuple[List[Tuple[int, int, int]], float, float, float]:
+    has_rings: bool = False,
+) -> Tuple[List[Tuple[int, int, int]], float, float, float, Optional[RingEllipse]]:
     """Generate AS!4-style AP grid from the mid-frame of a reference SER.
 
-    Returns (aps, disk_cx, disk_cy, disk_radius).
+    Args:
+        has_rings: True for a ringed target (horizons_id == "699"/Saturn).
+            Automatically widens AP eligibility to a disk+ring blob ellipse
+            (see build_reference_frame). Silently inert otherwise (no manual
+            toggle -- this always applies to every has_rings target).
+
+    Returns (aps, disk_cx, disk_cy, disk_radius, ring_ellipse).
+    ring_ellipse is None unless has_rings is set and a blob could be fit;
+    callers that reuse these session APs per-file (see
+    lucky_stack_ser's session_aps re-filter) must pass it through as
+    session_ring_ellipse so ring APs aren't re-filtered back out.
     Used by step02_lucky_stack to compute session-wide AP positions once.
     """
     with SERReader(ser_path) as reader:
@@ -735,8 +858,11 @@ def compute_session_aps_from_ser(
         if frame.ndim == 3:
             frame = frame.mean(axis=2).astype(np.float32)
     cx, cy, semi_a, _semi_b, _angle = find_disk_center(frame)
-    aps = generate_as4_ap_grid(cx, cy, float(semi_a), frame, cfg)
-    return aps, cx, cy, float(semi_a)
+    ring_ellipse: Optional[RingEllipse] = None
+    if has_rings:
+        ring_ellipse = _fit_outer_blob_ellipse(frame)
+    aps = generate_as4_ap_grid(cx, cy, float(semi_a), frame, cfg, ring_ellipse=ring_ellipse)
+    return aps, cx, cy, float(semi_a), ring_ellipse
 
 
 # ── 4. Per-AP shift estimation ─────────────────────────────────────────────────
@@ -1252,6 +1378,77 @@ def _build_per_ap_quality_map(
 
 # ── 5. Per-frame warp + remap ──────────────────────────────────────────────────
 
+def _kr_regress(
+    shift_x: np.ndarray, shift_y: np.ndarray, weight: np.ndarray, sigma: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Gaussian kernel regression (Nadaraya-Watson) over a sparse shift/weight grid.
+
+    Shared by _compute_warp_maps / _compute_adaptive_warp_maps, both for their
+    normal single-field case and for the disk/ring split case below. Pixels
+    with < 5% of this field's OWN peak influence get zero correction — the
+    threshold is always local to the field being smoothed, never a global
+    peak shared across unrelated regions (see _composite_disk_ring).
+
+    Returns (map_dx, map_dy, conf_map), each float32 [H, W].
+    """
+    ksize = int(6.0 * sigma + 1) | 1  # odd kernel, >= 6 sigma wide
+    smooth_wx = cv2.GaussianBlur(shift_x * weight, (ksize, ksize), sigma)
+    smooth_wy = cv2.GaussianBlur(shift_y * weight, (ksize, ksize), sigma)
+    smooth_w  = cv2.GaussianBlur(weight,            (ksize, ksize), sigma)
+
+    peak_w = float(np.max(smooth_w))
+    if peak_w <= 0.0:
+        zero = np.zeros_like(smooth_w, dtype=np.float32)
+        return zero, zero, zero
+
+    coverage_ok = smooth_w >= peak_w * 0.05
+    map_dx = np.where(coverage_ok, smooth_wx / np.maximum(smooth_w, 1e-9), 0.0).astype(np.float32)
+    map_dy = np.where(coverage_ok, smooth_wy / np.maximum(smooth_w, 1e-9), 0.0).astype(np.float32)
+    conf_map = np.where(coverage_ok, smooth_w / peak_w, 0.0).astype(np.float32)
+    return map_dx, map_dy, conf_map
+
+
+def _split_disk_ring_points(
+    ap_xy: List[Tuple[int, int]],
+    disk_cx: Optional[float],
+    disk_cy: Optional[float],
+    disk_radius: Optional[float],
+) -> Optional[List[bool]]:
+    """Return a per-point is_ring bool list, or None if there's nothing to split.
+
+    None means: disk geometry wasn't provided, or every point is already
+    inside disk_radius (the ordinary non-ringed case) -- callers should skip
+    splitting entirely and use the original single-field computation
+    unchanged, so has_rings=False sessions are byte-for-byte unaffected.
+    """
+    if disk_cx is None or disk_cy is None or disk_radius is None:
+        return None
+    disk_r2 = disk_radius * disk_radius
+    is_ring = [
+        (ax - disk_cx) ** 2 + (ay - disk_cy) ** 2 >= disk_r2
+        for ax, ay in ap_xy
+    ]
+    return is_ring if any(is_ring) else None
+
+
+def _composite_disk_ring(
+    disk_field: np.ndarray, ring_field: np.ndarray,
+    disk_cx: float, disk_cy: float, disk_radius: float,
+    feather_sigma: float = 3.0,
+) -> np.ndarray:
+    """Blend a disk-only and a ring-only field by region, feathered at the seam.
+
+    disk_field wins strictly inside disk_radius, ring_field strictly outside;
+    a narrow Gaussian-feathered band around the boundary avoids a hard
+    discontinuity in the shift field right at the limb.
+    """
+    H, W = disk_field.shape[:2]
+    yy, xx = np.mgrid[0:H, 0:W]
+    in_disk = (((xx - disk_cx) ** 2 + (yy - disk_cy) ** 2) < disk_radius * disk_radius).astype(np.float32)
+    alpha = cv2.GaussianBlur(in_disk, (0, 0), feather_sigma)
+    return (alpha * disk_field + (1.0 - alpha) * ring_field).astype(np.float32)
+
+
 def _compute_warp_maps(
     frame_aligned: np.ndarray,
     reference: np.ndarray,
@@ -1260,6 +1457,9 @@ def _compute_warp_maps(
     query_pts: np.ndarray,    # kept for API compatibility; not used
     cfg: LuckyStackConfig,
     ref_precomp: Optional[List] = None,
+    disk_cx: Optional[float] = None,
+    disk_cy: Optional[float] = None,
+    disk_radius: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int]:
     """Compute per-AP shifts and build smooth full-resolution warp maps.
 
@@ -1275,6 +1475,18 @@ def _compute_warp_maps(
     (requires σ ≥ ap_step/√2) while still preserving atmospheric corrections
     at scales above ~2×ap_step.  Pixels with < 5% of peak AP influence
     receive zero correction (background / limb fade-out).
+
+    disk_cx/disk_cy/disk_radius (optional): when given AND ap_positions has
+    points outside disk_radius (ring-aware extent on a has_rings target —
+    see build_reference_frame), the disk and ring APs are smoothed as two
+    INDEPENDENT kernel-regression fields (_kr_regress) and composited by
+    region (_composite_disk_ring) instead of one shared field. Without this
+    split, ring AP shifts — a fundamentally different signal from disk
+    atmospheric turbulence — leak into the disk's interpolated field through
+    the shared Gaussian kernel, which for ap_step this small (e.g. sigma ~
+    20-30px) mainly affects pixels within one ap_step of the disk boundary.
+    When disk_radius is None, or every AP is already inside it, this is
+    exactly the original single-field computation (byte-for-byte).
 
     Returns:
         (map_dx, map_dy, n_good_aps)
@@ -1297,6 +1509,7 @@ def _compute_warp_maps(
     )
 
     n_good = 0
+    good_xy: List[Tuple[int, int]] = []
     for i, (ax, ay) in enumerate(ap_positions):
         if batch_shifts is not None and batch_shifts[i] is not None:
             dx, dy, conf = batch_shifts[i]
@@ -1317,34 +1530,40 @@ def _compute_warp_maps(
         shift_y[ay, ax] = float(dy) * conf
         weight[ay, ax]  = conf
         n_good += 1
+        good_xy.append((ax, ay))
 
     if n_good < 3:
         zero = np.zeros((H, W), dtype=np.float32)
         return zero, zero, n_good, zero
 
-    # Gaussian kernel regression: smooth the shift × weight and weight maps,
-    # then divide.  sigma = ap_step × ap_sigma_factor.  Must be ≥ ap_step/√2
-    # ≈ 0.71 × ap_step to guarantee C∞-smooth gradients between adjacent APs.
-    # Higher values reduce noise in AP shifts at the cost of spatial resolution.
+    # sigma = ap_step × ap_sigma_factor.  Must be ≥ ap_step/√2 ≈ 0.71 × ap_step
+    # to guarantee C∞-smooth gradients between adjacent APs. Higher values
+    # reduce noise in AP shifts at the cost of spatial resolution.
     sigma = float(cfg.ap_step) * cfg.ap_sigma_factor
-    ksize = int(6.0 * sigma + 1) | 1  # odd kernel, ≥ 6σ wide
 
-    smooth_wx = cv2.GaussianBlur(shift_x * weight, (ksize, ksize), sigma)
-    smooth_wy = cv2.GaussianBlur(shift_y * weight, (ksize, ksize), sigma)
-    smooth_w  = cv2.GaussianBlur(weight,            (ksize, ksize), sigma)
+    is_ring = _split_disk_ring_points(good_xy, disk_cx, disk_cy, disk_radius)
+    if is_ring is None:
+        map_dx, map_dy, conf_map = _kr_regress(shift_x, shift_y, weight, sigma)
+        return map_dx, map_dy, n_good, conf_map
 
-    # Normalise; zero out pixels with negligible AP coverage (< 5% of peak)
-    coverage_threshold = float(np.max(smooth_w)) * 0.05
-    coverage_ok = smooth_w >= coverage_threshold
+    ring_shift_x = np.zeros((H, W), dtype=np.float32)
+    ring_shift_y = np.zeros((H, W), dtype=np.float32)
+    ring_weight  = np.zeros((H, W), dtype=np.float32)
+    for (ax, ay), ring in zip(good_xy, is_ring):
+        if ring:
+            ring_shift_x[ay, ax] = shift_x[ay, ax]
+            ring_shift_y[ay, ax] = shift_y[ay, ax]
+            ring_weight[ay, ax]  = weight[ay, ax]
+            shift_x[ay, ax] = 0.0
+            shift_y[ay, ax] = 0.0
+            weight[ay, ax]  = 0.0
 
-    map_dx = np.where(coverage_ok, smooth_wx / np.maximum(smooth_w, 1e-9), 0.0).astype(np.float32)
-    map_dy = np.where(coverage_ok, smooth_wy / np.maximum(smooth_w, 1e-9), 0.0).astype(np.float32)
+    disk_dx, disk_dy, disk_cm = _kr_regress(shift_x, shift_y, weight, sigma)
+    ring_dx, ring_dy, ring_cm = _kr_regress(ring_shift_x, ring_shift_y, ring_weight, sigma)
 
-    # Per-pixel NCC confidence map: smooth_w normalized to [0,1].
-    # Pixels inside well-covered AP regions → high; outside coverage → 0.
-    # Used as per-pixel stacking weight when cfg.use_ncc=True.
-    peak_w = float(np.max(smooth_w))
-    conf_map = np.where(coverage_ok, smooth_w / max(peak_w, 1e-9), 0.0).astype(np.float32)
+    map_dx = _composite_disk_ring(disk_dx, ring_dx, disk_cx, disk_cy, disk_radius)
+    map_dy = _composite_disk_ring(disk_dy, ring_dy, disk_cx, disk_cy, disk_radius)
+    conf_map = _composite_disk_ring(disk_cm, ring_cm, disk_cx, disk_cy, disk_radius)
 
     return map_dx, map_dy, n_good, conf_map
 
@@ -1357,6 +1576,9 @@ def _compute_adaptive_warp_maps(
     ap_positions: List[Tuple[int, int, int]],
     cfg,
     ref_precomp: Optional[List] = None,
+    disk_cx: Optional[float] = None,
+    disk_cy: Optional[float] = None,
+    disk_radius: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int]:
     """Adaptive-AP version of Gaussian kernel regression warp maps.
 
@@ -1368,6 +1590,15 @@ def _compute_adaptive_warp_maps(
         ap_positions: list of (ax, ay, ap_size) triples.
         cfg:          LuckyStackConfig with ap_confidence_threshold,
                       ap_search_range fields.
+        disk_cx/disk_cy/disk_radius: optional; see _compute_warp_maps'
+            docstring for the disk/ring split this enables. Particularly
+            important here: kr_sigma defaults to 64px, which can be
+            comparable to or larger than a real disk's own radius (confirmed
+            on real Saturn data, 2026-09-15: disk_radius=62px, ring APs
+            66-149px away all within the kernel's 3-sigma=192px reach) — so
+            without this split, ring-aware extent (has_rings) visibly
+            blurred the WHOLE disk, not just its edge, by blending ring
+            shift estimates into the disk's field at significant weight.
 
     Returns:
         (map_dx, map_dy, n_good_aps)
@@ -1379,6 +1610,7 @@ def _compute_adaptive_warp_maps(
     shift_y = np.zeros((H, W), dtype=np.float32)
     weight  = np.zeros((H, W), dtype=np.float32)
     n_good  = 0
+    good_xy: List[Tuple[int, int]] = []
 
     # Opt-2: batch rfft2 — one call per size group per frame
     _use_ncc = bool(getattr(cfg, "use_ncc", False))
@@ -1415,20 +1647,36 @@ def _compute_adaptive_warp_maps(
         shift_y[ay, ax] = float(dy) * w
         weight[ay, ax]  = w
         n_good += 1
+        good_xy.append((ax, ay))
 
     if n_good < 3:
         zero = np.zeros((H, W), dtype=np.float32)
         return zero, zero, n_good, zero
 
-    ksize  = int(6.0 * kr_sigma + 1) | 1
-    sw_x   = cv2.GaussianBlur(shift_x * weight, (ksize, ksize), kr_sigma)
-    sw_y   = cv2.GaussianBlur(shift_y * weight, (ksize, ksize), kr_sigma)
-    sw     = cv2.GaussianBlur(weight,            (ksize, ksize), kr_sigma)
-    cov_ok = sw >= float(np.max(sw)) * 0.05
-    map_dx = np.where(cov_ok, sw_x / np.maximum(sw, 1e-9), 0.0).astype(np.float32)
-    map_dy = np.where(cov_ok, sw_y / np.maximum(sw, 1e-9), 0.0).astype(np.float32)
-    peak_sw = float(np.max(sw))
-    conf_map = np.where(cov_ok, sw / max(peak_sw, 1e-9), 0.0).astype(np.float32)
+    is_ring = _split_disk_ring_points(good_xy, disk_cx, disk_cy, disk_radius)
+    if is_ring is None:
+        map_dx, map_dy, conf_map = _kr_regress(shift_x, shift_y, weight, kr_sigma)
+        return map_dx, map_dy, n_good, conf_map
+
+    ring_shift_x = np.zeros((H, W), dtype=np.float32)
+    ring_shift_y = np.zeros((H, W), dtype=np.float32)
+    ring_weight  = np.zeros((H, W), dtype=np.float32)
+    for (ax, ay), ring in zip(good_xy, is_ring):
+        if ring:
+            ring_shift_x[ay, ax] = shift_x[ay, ax]
+            ring_shift_y[ay, ax] = shift_y[ay, ax]
+            ring_weight[ay, ax]  = weight[ay, ax]
+            shift_x[ay, ax] = 0.0
+            shift_y[ay, ax] = 0.0
+            weight[ay, ax]  = 0.0
+
+    disk_dx, disk_dy, disk_cm = _kr_regress(shift_x, shift_y, weight, kr_sigma)
+    ring_dx, ring_dy, ring_cm = _kr_regress(ring_shift_x, ring_shift_y, ring_weight, kr_sigma)
+
+    map_dx = _composite_disk_ring(disk_dx, ring_dx, disk_cx, disk_cy, disk_radius)
+    map_dy = _composite_disk_ring(disk_dy, ring_dy, disk_cx, disk_cy, disk_radius)
+    conf_map = _composite_disk_ring(disk_cm, ring_cm, disk_cx, disk_cy, disk_radius)
+
     return map_dx, map_dy, n_good, conf_map
 
 
@@ -1764,6 +2012,27 @@ def _per_ap_independent_stack(
         g1d_b = cv2.getGaussianKernel(blend_size, sigma_blend)
         gmask = (g1d_b @ g1d_b.T).astype(np.float64)
         gmask /= gmask.max()
+
+        # Ring-aware extent (has_rings targets, see build_reference_frame): a
+        # ring AP's blend patch can be wide enough to reach past disk_radius
+        # into the disk interior (confirmed on real Saturn data, 2026-09-15
+        # -- ring APs blend_half=ap_size away from a disk barely larger than
+        # that reached almost to the disk center), pixel-blending independently
+        # stacked/aligned ring content into disk output and blurring it. Zero
+        # (feathered) this AP's mask wherever it would land inside disk_radius
+        # -- disk-family APs are untouched, preserving their existing
+        # past-the-limb blend margin exactly as before this fix.
+        _dist2_center = (ax - disk_cx) ** 2 + (ay - disk_cy) ** 2
+        if _dist2_center >= disk_radius * disk_radius:
+            _pyy, _pxx = np.mgrid[0:blend_size, 0:blend_size]
+            _abs_x = (ax - blend_half) + _pxx
+            _abs_y = (ay - blend_half) + _pyy
+            _in_disk = (
+                (_abs_x - disk_cx) ** 2 + (_abs_y - disk_cy) ** 2 < disk_radius * disk_radius
+            ).astype(np.float64)
+            _outside_disk_feathered = 1.0 - cv2.GaussianBlur(_in_disk, (0, 0), 3.0)
+            gmask = gmask * _outside_disk_feathered
+
         hann_ap   = _get_hann(ap_size)
         ref_patch = reference[ay - half: ay + half, ax - half: ax + half].astype(np.float32)
         ap_scores   = score_matrix[:, j]
@@ -2168,12 +2437,14 @@ def _worker_process_chunk(chunk_indices: List[int]) -> tuple:
         # ── AP warp maps ──────────────────────────────────────────────────
         if adaptive_mode:
             map_dx, map_dy, n_good, conf_map = _compute_adaptive_warp_maps(
-                frame_aligned, reference, ap_positions, cfg, ref_precomp=ref_precomp
+                frame_aligned, reference, ap_positions, cfg, ref_precomp=ref_precomp,
+                disk_cx=disk_cx, disk_cy=disk_cy, disk_radius=disk_radius,
             )
         else:
             map_dx, map_dy, n_good, conf_map = _compute_warp_maps(
                 frame_aligned, reference, ap_positions, hann2d, query_pts, cfg,
                 ref_precomp=ref_precomp,
+                disk_cx=disk_cx, disk_cy=disk_cy, disk_radius=disk_radius,
             )
         if n_good < 3:
             n_global_only += 1
@@ -2282,12 +2553,14 @@ def _sigma_clip_stack(
 
         if adaptive_mode:
             map_dx, map_dy, _, _cm = _compute_adaptive_warp_maps(
-                frame_aligned, reference, ap_positions, cfg, ref_precomp=_sc_ref_precomp
+                frame_aligned, reference, ap_positions, cfg, ref_precomp=_sc_ref_precomp,
+                disk_cx=disk_cx, disk_cy=disk_cy, disk_radius=disk_radius,
             )
         else:
             map_dx, map_dy, _, _cm = _compute_warp_maps(
                 frame_aligned, reference, ap_positions, hann2d, query_pts, cfg,
                 ref_precomp=_sc_ref_precomp,
+                disk_cx=disk_cx, disk_cy=disk_cy, disk_radius=disk_radius,
             )
 
         remap_x = (xx_base + map_dx - dx_g).astype(np.float32)
@@ -2558,12 +2831,14 @@ def apply_warp_and_stack(
                 )
             elif adaptive_mode:
                 map_dx, map_dy, n_good, conf_map = _compute_adaptive_warp_maps(
-                    frame_aligned, reference, ap_positions, cfg, ref_precomp=_ref_precomp
+                    frame_aligned, reference, ap_positions, cfg, ref_precomp=_ref_precomp,
+                    disk_cx=disk_cx, disk_cy=disk_cy, disk_radius=disk_radius,
                 )
             else:
                 map_dx, map_dy, n_good, conf_map = _compute_warp_maps(
                     frame_aligned, reference, ap_positions, hann2d, query_pts, cfg,
                     ref_precomp=_ref_precomp,
+                    disk_cx=disk_cx, disk_cy=disk_cy, disk_radius=disk_radius,
                 )
             if n_good < 3:
                 n_global_only += 1
@@ -2697,6 +2972,8 @@ def lucky_stack_ser(
     session_ref_cx: float = 0.0,
     session_ref_cy: float = 0.0,
     cancel_event=None,
+    has_rings: bool = False,
+    session_ring_ellipse: Optional[RingEllipse] = None,
 ) -> Tuple[np.ndarray, Dict]:
     """Run the full lucky stacking pipeline on a single SER file.
 
@@ -2709,6 +2986,15 @@ def lucky_stack_ser(
                            center and used directly (highest priority — overrides all grid modes).
         session_ref_cx:    Disk cx of the reference SER that generated session_aps.
         session_ref_cy:    Disk cy of the reference SER that generated session_aps.
+        has_rings:         True for a ringed target (horizons_id == "699"/Saturn).
+                           Automatically widens AP eligibility from the disk-only
+                           circular radius to a fitted disk+ring blob ellipse.
+                           Silently inert otherwise (no manual toggle -- this
+                           always applies to every has_rings target).
+        session_ring_ellipse: The ring ellipse compute_session_aps_from_ser() fit for
+                           session_aps' reference SER (session-wide mode only) — needed
+                           to re-validate reused session APs against this file's own
+                           disk without dropping ring APs back out.
 
     Returns:
         (stacked_image, log_dict)
@@ -2827,25 +3113,36 @@ def lucky_stack_ser(
 
         # ── Phase 3: Initial reference frame ─────────────────────────────
         print("  [3/5] Building reference…", end="\r", flush=True)
-        reference, (disk_cx, disk_cy, disk_radius) = build_reference_frame(
-            reader, scores, cfg
+        reference, (disk_cx, disk_cy, disk_radius), ring_ellipse = build_reference_frame(
+            reader, scores, cfg, has_rings=has_rings
         )
         t2 = time.perf_counter()
+        _ring_note = ""
+        if ring_ellipse is not None:
+            _r_semi_a, _r_semi_b = ring_ellipse[2], ring_ellipse[3]
+            _ring_note = f"  ring_ellipse=({_r_semi_a:.0f}x{_r_semi_b:.0f}px)"
         print(
             f"  [3/5] Reference built   ({t2-t1:.1f}s)  "
-            f"disk=({disk_cx:.1f},{disk_cy:.1f}) r={disk_radius:.1f}px",
+            f"disk=({disk_cx:.1f},{disk_cy:.1f}) r={disk_radius:.1f}px" + _ring_note,
             flush=True,
         )
 
         # ── Phase 3.1: Session AP offset correction ──────────────────────
         # If session_aps provided, shift by (disk_cx - ref_cx, disk_cy - ref_cy)
-        # and re-filter to keep only APs whose centres land inside this disk.
+        # and re-filter to keep only APs whose centres land inside this disk
+        # (or, when session_ring_ellipse is given, inside that ellipse shifted
+        # by the same delta — otherwise ring APs generated upstream by
+        # compute_session_aps_from_ser would be silently dropped back out here).
         _session_ap_positions: Optional[List] = None
         if session_aps:
             H_img, W_img = reference.shape[:2]
             _dx = disk_cx - session_ref_cx
             _dy = disk_cy - session_ref_cy
             _r2 = disk_radius * disk_radius
+            _shifted_ellipse: Optional[RingEllipse] = None
+            if session_ring_ellipse is not None:
+                _e_cx, _e_cy, _e_sa, _e_sb, _e_ang = session_ring_ellipse
+                _shifted_ellipse = (_e_cx + _dx, _e_cy + _dy, _e_sa, _e_sb, _e_ang)
             _shifted: List[Tuple[int, int, int]] = []
             for _ax, _ay, _sz in session_aps:
                 _nax = int(round(_ax + _dx))
@@ -2854,10 +3151,14 @@ def lucky_stack_ser(
                 if (_nax - _half < 0 or _nax + _half > W_img
                         or _nay - _half < 0 or _nay + _half > H_img):
                     continue
-                _ddx = _nax - disk_cx
-                _ddy = _nay - disk_cy
-                if _ddx * _ddx + _ddy * _ddy < _r2:
-                    _shifted.append((_nax, _nay, _sz))
+                if _shifted_ellipse is not None:
+                    if _in_ellipse(_nax, _nay, _shifted_ellipse):
+                        _shifted.append((_nax, _nay, _sz))
+                else:
+                    _ddx = _nax - disk_cx
+                    _ddy = _nay - disk_cy
+                    if _ddx * _ddx + _ddy * _ddy < _r2:
+                        _shifted.append((_nax, _nay, _sz))
             _session_ap_positions = _shifted if _shifted else None
             from collections import Counter as _Ctr2
             if _session_ap_positions:
@@ -2984,7 +3285,7 @@ def lucky_stack_ser(
             elif ap_grid_mode == APGridMode.AS4:
                 # Standalone AS4 greedy PDS mode (no session sharing).
                 ap_positions = generate_as4_ap_grid(
-                    disk_cx, disk_cy, disk_radius, reference, cfg
+                    disk_cx, disk_cy, disk_radius, reference, cfg, ring_ellipse=ring_ellipse
                 )
                 ap_size_info = _Counter(sz for _, _, sz in ap_positions)
                 ap_desc = "as4_pds: " + " ".join(
@@ -3016,7 +3317,7 @@ def lucky_stack_ser(
                 )
             else:
                 ap_positions = generate_ap_grid(
-                    disk_cx, disk_cy, disk_radius, reference, cfg
+                    disk_cx, disk_cy, disk_radius, reference, cfg, ring_ellipse=ring_ellipse
                 )
                 ap_desc = f"size={cfg.ap_size}px"
             t3 = time.perf_counter()
@@ -3143,6 +3444,16 @@ def lucky_stack_ser(
             "total":     round(t_total, 2),
         },
         "debayered": _debayered,
+        "has_rings": has_rings,
+        "ap_ring_aware": ring_ellipse is not None,
         **stats,
     }
+    if ring_ellipse is not None:
+        log["ring_ellipse_px"] = {
+            "cx": round(ring_ellipse[0], 2),
+            "cy": round(ring_ellipse[1], 2),
+            "semi_a": round(ring_ellipse[2], 2),
+            "semi_b": round(ring_ellipse[3], 2),
+            "angle_deg": round(ring_ellipse[4], 2),
+        }
     return stacked, log
