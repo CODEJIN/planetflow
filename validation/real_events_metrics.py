@@ -22,8 +22,8 @@ Matched-filter contrast (per object, per filter, per window):
 This is a Gaussian-weighted local mean rather than a single-pixel extremum, and
 needs no wavelet sharpening.
 
-Usage:
-    python validation/real_events_metrics.py D:/Astro/real_events_v2 --out D:/Astro/real_events_v2/summary
+Usage (paper configuration):
+    python validation/real_events_metrics.py D:/Astro/real_events_v2 --out D:/Astro/real_events_v2/summary \n        --exclude 260328:shadow
 """
 from __future__ import annotations
 
@@ -149,6 +149,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("root", type=Path)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--exclude", nargs="*", default=[], metavar="SESSION:TYPE",
+                    help="Exclude an object type in a session, e.g. 260328:shadow (as in the paper)")
+    ap.add_argument("--n-boot", type=int, default=5000)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -157,6 +160,9 @@ def main() -> None:
         print(f"[{sess.name}]")
         rows.extend(measure_session(sess))
     df = pd.DataFrame(rows)
+    for ex in args.exclude:
+        sess, otype = ex.split(":")
+        df = df[~((df["session"].astype(str) == sess) & (df["obj_type"] == otype))]
     df.to_csv(args.out / "real_events_metrics.csv", index=False)
     if df.empty:
         print("no measurements")
@@ -169,6 +175,14 @@ def main() -> None:
     gate_sharp = df["ext_sharp_base"] >= 0.05
     gate_raw = df["ext_raw_base"] >= 0.05
 
+    rng = np.random.default_rng(0)
+
+    def _boot(v: np.ndarray):
+        if len(v) < 2:
+            return np.nan, np.nan
+        means = [rng.choice(v, len(v)).mean() for _ in range(args.n_boot)]
+        return tuple(round(float(x), 1) for x in np.percentile(means, [2.5, 97.5]))
+
     out = []
     for (otype, filt), g in df.groupby(["obj_type", "filter"]):
         gs = g[gate_sharp.loc[g.index]]
@@ -178,6 +192,8 @@ def main() -> None:
             "obj_type": otype, "filter": filt, "N": len(g),
             "N_sharp": len(gs), "sharp_ext_mean%": round(gs["d_ext_sharp"].mean(), 1),
             "N_raw": len(gr), "raw_ext_mean%": round(gr["d_ext_raw"].mean(), 1),
+            "raw_ext_median%": round(gr["d_ext_raw"].median(), 1),
+            "raw_boot95": _boot(gr["d_ext_raw"].to_numpy()),
             "mf_ratio_of_means%": round(_pct(g["mf_comp"].mean(), g["mf_base"].mean()), 1),
             "mf_median%": round(g["d_mf"].median(), 1),
             "mf_frac_positive": round((g["mf_comp"] > g["mf_base"]).mean(), 2),
