@@ -41,6 +41,7 @@ import math
 import pickle
 import shutil
 import sys
+import zlib
 from dataclasses import replace as _dc_replace
 from datetime import datetime
 from pathlib import Path
@@ -214,7 +215,8 @@ def _sat_pos(x: float, y: float, cx: float, cy: float, r: float, name: str) -> S
 def run_case(rows: List[dict], t_ref: datetime, P: np.ndarray, frame_centers: Dict[str, Tuple[float, float]],
              disk: Tuple[float, float, float], o_ref: Tuple[float, float], dv_r_per_h: float,
              obj_type: str, r_app: float, amplitude: float, sess: dict, cfg: PipelineConfig,
-             tmp_dir: Path, sign: float, deltas_deg: List[float]) -> List[dict]:
+             tmp_dir: Path, sign: float, deltas_deg: List[float],
+             noise_sigma: Optional[Dict[str, float]] = None, noise_mult: float = 1.0) -> List[dict]:
     cx, cy, R = disk
     x_ref, y_ref = cx + o_ref[0], cy + o_ref[1]
     vsx, vsy = _surface_velocity(x_ref, y_ref, cx, cy, R, sess, cfg, sign)
@@ -235,6 +237,12 @@ def run_case(rows: List[dict], t_ref: datetime, P: np.ndarray, frame_centers: Di
         offsets[row["stem"]] = (ox, oy)
         fcx, fcy = frame_centers[row["stem"]]
         img = _inject(_lum(row["path"]), fcx + ox, fcy + oy, r_app, obj_type, amplitude)
+        if noise_mult > 1.0 and noise_sigma:
+            # Raise the total per-frame noise to noise_mult x the measured level
+            # (independent per frame, fixed seed for reproducibility).
+            seed = zlib.crc32(f"{row['stem']}|{obj_type}|{amplitude}|{dv_r_per_h}|{o_ref}|{noise_mult}".encode())
+            sig = math.sqrt(noise_mult ** 2 - 1.0) * noise_sigma[row["stem"]]
+            img = np.clip(img + np.random.default_rng(seed).normal(0.0, sig, img.shape), 0.0, 1.0).astype(np.float32)
         p = tmp_dir / Path(row["path"]).name
         image_io.write_tif_16bit(img, p)
         inj_rows.append({**row, "path": p})
@@ -256,10 +264,28 @@ def run_case(rows: List[dict], t_ref: datetime, P: np.ndarray, frame_centers: Di
 
     base = {"obj_type": obj_type, "dv_R_per_h": dv_r_per_h, "o_ref_x": o_ref[0], "o_ref_y": o_ref[1],
             "r_frac": math.hypot(*o_ref) / R, "r_app_px": r_app, "amplitude": amplitude,
-            "disk_r_px": R, "n_frames": len(rows_sorted), "baseline_smear_px": smear_px}
+            "disk_r_px": R, "n_frames": len(rows_sorted), "baseline_smear_px": smear_px,
+            "noise_mult": noise_mult}
     out: List[dict] = []
     out.append({**base, "method": "single_rate", "delta_deg": 0.0,
                 **_metrics(S - P, R_T, x_ref, y_ref, r_ap), "artifact_rms": 0.0})
+
+    # Single-frame paste baseline (the current manual practice, in its best
+    # form): the object is taken from the ONE frame closest to the reference
+    # time and composited with the same capsule mask and Poisson blend, so the
+    # only difference from multi-rate is the number of frames stacked.
+    if rows_sorted:
+        k = min(range(len(rows_sorted)),
+                key=lambda i: abs((rows_sorted[i]["timestamp"] - t_ref).total_seconds()))
+        rk = rows_sorted[k]
+        pos_k = _sat_pos(cx + offsets[rk["stem"]][0], cy + offsets[rk["stem"]][1], cx, cy, R, "synthetic")
+        ref0 = _sat_pos(x_ref, y_ref, cx, cy, R, "synthetic")
+        single = _satellite_translate_stack([rk], [pos_k], ref0)
+        traj0 = [(cx + offsets[r["stem"]][0], cy + offsets[r["stem"]][1]) for r in rows_sorted]
+        M1 = _blend_poisson(S.copy(), single, ref0, r_app * _COVERAGE_SCALE, traj_xy=traj0, mask_shape="capsule")
+        out.append({**base, "method": "single_frame_paste", "delta_deg": 0.0,
+                    **_metrics(M1 - P, R_T, x_ref, y_ref, r_ap),
+                    "artifact_rms": _artifact_rms(M1, S, x_ref, y_ref, r_ap + 2, r_ap + 12, local)})
 
     for delta in deltas_deg:
         c, s_ = math.cos(math.radians(delta)), math.sin(math.radians(delta))
@@ -315,8 +341,11 @@ def main() -> None:
                          "placed along +/- the drift axis")
     ap.add_argument("--deltas", nargs="+", type=float, default=[0.0, 2.0, 4.0, 8.0, 12.0])
     ap.add_argument("--r-app", type=float, default=3.0, help="Apparent object radius (px)")
-    ap.add_argument("--sat-amp", type=float, default=0.15)
-    ap.add_argument("--shadow-amp", type=float, default=0.85)
+    ap.add_argument("--sat-amp", nargs="+", type=float, default=[0.15])
+    ap.add_argument("--shadow-amp", nargs="+", type=float, default=[0.85])
+    ap.add_argument("--noise-mult", nargs="+", type=float, default=[1.0],
+                    help="Total per-frame noise as a multiple of the measured level (1 = data as is)")
+    ap.add_argument("--results-name", default="results.csv")
     ap.add_argument("--quick", action="store_true", help="Sign check only")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -349,10 +378,16 @@ def main() -> None:
             print(f"\n=== window {wi + 1} {t_ref:%H:%M} {filt}  ({len(rows)} frames, B={B:.2f}) ===")
             P, plog = _derotate(rows, t_ref, sess_w, cfg)
             cx, cy, R, _, _ = derotation.find_disk_center(P)
-            centers = {}
+            centers, noise_sigma = {}, {}
             for r in rows:
-                fcx, fcy, *_ = derotation.find_disk_center(_lum(r["path"]))
+                im = _lum(r["path"])
+                fcx, fcy, fr, *_ = derotation.find_disk_center(im)
                 centers[r["stem"]] = (fcx, fcy)
+                # Pixel-scale residual (robust sigma) inside 0.6 R: an upper bound on the frame noise.
+                hp = im - cv2.GaussianBlur(im, (0, 0), 1.5)
+                yy, xx = np.mgrid[0:im.shape[0], 0:im.shape[1]]
+                v = hp[(xx - fcx) ** 2 + (yy - fcy) ** 2 < (0.6 * fr) ** 2]
+                noise_sigma[r["stem"]] = float(1.4826 * np.median(np.abs(v - np.median(v))))
             tmp = args.out_dir / "tmp_inject"
 
             # Drift direction at the centre, used to lay out reference positions.
@@ -366,7 +401,7 @@ def main() -> None:
                 best = None
                 for sg in (1.0, -1.0):
                     rr = run_case(rows, t_ref, P, centers, (cx, cy, R), (0.0, 0.0), 0.0, "shadow",
-                                  args.r_app, args.shadow_amp, sess_w, cfg, tmp, sg, [])
+                                  args.r_app, args.shadow_amp[0], sess_w, cfg, tmp, sg, [])
                     fr = rr[0]["flux_recovery"]
                     print(f"[sign check] sign={sg:+.0f}: single-rate flux_recovery={fr:.3f} "
                           f"elongation={rr[0]['elongation']:.2f}")
@@ -380,22 +415,23 @@ def main() -> None:
             for frac in args.r_fracs:
                 for side in ((1.0,) if frac == 0 else (1.0, -1.0)):
                     o_ref = (side * frac * R * ux, side * frac * R * uy)
-                    for obj_type, amp in (("satellite", args.sat_amp), ("shadow", args.shadow_amp)):
-                        for dv in args.dv:
-                            rr = run_case(rows, t_ref, P, centers, (cx, cy, R), o_ref, dv, obj_type,
-                                          args.r_app, amp, sess_w, cfg, tmp, sign, args.deltas)
-                            for r in rr:
-                                r.update(window=wi + 1, filter=filt, t_ref=f"{t_ref:%Y-%m-%dT%H:%M}")
-                            all_rows.extend(rr)
-                            s0 = rr[0]
-                            m0 = next(r for r in rr if r["method"] == "multi_rate" and r["delta_deg"] == 0.0)
-                            print(f"  {obj_type:9s} r={frac:.1f}{'+' if side > 0 else '-'} dv={dv:.2f}R/h "
-                                  f"smear={s0['baseline_smear_px']:.1f}px | flux S={s0['flux_recovery']:.3f} "
-                                  f"M={m0['flux_recovery']:.3f} | nrmse S={s0['nrmse']:.3f} M={m0['nrmse']:.3f}")
+                    objs = [("satellite", a) for a in args.sat_amp] + [("shadow", a) for a in args.shadow_amp]
+                    for (obj_type, amp), nm, dv in [(o, nm, dv) for o in objs for nm in args.noise_mult for dv in args.dv]:
+                        rr = run_case(rows, t_ref, P, centers, (cx, cy, R), o_ref, dv, obj_type,
+                                      args.r_app, amp, sess_w, cfg, tmp, sign, args.deltas,
+                                      noise_sigma=noise_sigma, noise_mult=nm)
+                        for r in rr:
+                            r.update(window=wi + 1, filter=filt, t_ref=f"{t_ref:%Y-%m-%dT%H:%M}")
+                        all_rows.extend(rr)
+                        s0 = rr[0]
+                        m0 = next(r for r in rr if r["method"] == "multi_rate" and r["delta_deg"] == 0.0)
+                        print(f"  {obj_type:9s} r={frac:.1f}{'+' if side > 0 else '-'} dv={dv:.2f}R/h "
+                              f"smear={s0['baseline_smear_px']:.1f}px | flux S={s0['flux_recovery']:.3f} "
+                              f"M={m0['flux_recovery']:.3f} | nrmse S={s0['nrmse']:.3f} M={m0['nrmse']:.3f}")
             # Write incrementally so a long run is never lost.
-            _write_csv(all_rows, args.out_dir / "results.csv")
-    _write_csv(all_rows, args.out_dir / "results.csv")
-    print(f"\nWrote {len(all_rows)} rows → {args.out_dir / 'results.csv'}")
+            _write_csv(all_rows, args.out_dir / args.results_name)
+    _write_csv(all_rows, args.out_dir / args.results_name)
+    print(f"\nWrote {len(all_rows)} rows → {args.out_dir / args.results_name}")
 
 
 def _write_csv(rows: List[dict], path: Path) -> None:

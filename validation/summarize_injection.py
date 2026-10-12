@@ -35,12 +35,15 @@ def main() -> None:
     for (obj, dv), g in base.groupby(["obj_type", "dv_R_per_h"]):
         s = g[g["method"] == "single_rate"]
         m = g[g["method"] == "multi_rate"]
+        f1 = g[g["method"] == "single_frame_paste"]
         rows.append({
             "obj_type": obj, "dv_R_per_h": dv, "n": len(s),
             "smear_px_median": round(s["baseline_smear_px"].median(), 2),
             **{f"S_{k}": _fmt(s[k]) for k in ["peak_recovery", "flux_recovery", "nrmse", "elongation"]},
             **{f"M_{k}": _fmt(m[k]) for k in ["peak_recovery", "flux_recovery", "nrmse", "elongation"]},
             "M_artifact_rms": _fmt(m["artifact_rms"]),
+            **({f"F_{k}": _fmt(f1[k]) for k in ["peak_recovery", "flux_recovery", "nrmse", "elongation"]}
+               if len(f1) else {}),
         })
     ta = pd.DataFrame(rows)
     ta.to_csv(args.out / "table_velocity.csv", index=False)
@@ -68,7 +71,8 @@ def main() -> None:
 
     with pd.option_context("display.width", 250, "display.max_columns", 40):
         print(ta[["obj_type", "dv_R_per_h", "n", "smear_px_median", "S_peak_recovery", "M_peak_recovery",
-                  "S_nrmse", "M_nrmse", "M_flux_recovery", "M_artifact_rms"]].to_string(index=False))
+                  "S_nrmse", "M_nrmse", "M_flux_recovery", "M_artifact_rms"]
+                 + [c for c in ("F_peak_recovery", "F_nrmse") if c in ta.columns]].to_string(index=False))
         print("\nfraction of paired cases where multi-rate beats single-rate (rows: dv, cols: delta deg)")
         print(tb.pivot(index="dv_R_per_h", columns="delta_deg", values="frac_multi_better").to_string())
         print("\nmedian offset / sigma_perp per delta:")
@@ -80,12 +84,14 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.6))
-    colors = {"single_rate": "#c0392b", "multi_rate": "#2471a3"}
-    labels = {"single_rate": "single-rate", "multi_rate": "multi-rate"}
+    colors = {"single_rate": "#c0392b", "multi_rate": "#2471a3", "single_frame_paste": "#7f8c8d"}
+    labels = {"single_rate": "single-rate", "multi_rate": "multi-rate", "single_frame_paste": "single-frame paste"}
     for ax, metric, ylab in ((axes[0], "peak_recovery", "Peak recovery (1 = truth)"),
                              (axes[1], "nrmse", "NRMSE vs truth (0 = truth)")):
         for obj, ls in (("satellite", "-"), ("shadow", "--")):
-            for meth in ("single_rate", "multi_rate"):
+            for meth in ("single_rate", "single_frame_paste", "multi_rate"):
+                if not (base["method"] == meth).any():
+                    continue
                 g = base[(base["obj_type"] == obj) & (base["method"] == meth)].groupby("dv_R_per_h")[metric]
                 med = g.median()
                 ax.plot(med.index, med.values, ls, marker="o", ms=3, color=colors[meth],
