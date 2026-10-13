@@ -512,6 +512,19 @@ class QualityConfig:
     outlier_sigma: float = 1.5           # Sigma threshold for outlier exclusion
     #   Jupiter rotates ~0.6°/min; 13.5 min = ~8° rotation (practical limit ~20°)
 
+    # Auto-detect discrete 180° camera-orientation flips (GEM meridian flip,
+    # or an alt-az mount re-seated between re-slews) via pairwise
+    # adjacent-frame NCC margin — see derotation.detect_orientation_flip_map().
+    # Purely image-based (NEVER a timestamp-gap heuristic — confirmed
+    # unreliable: false negatives if capture software bridges the gap, false
+    # positives from clouds/pauses). Default True, matching this codebase's
+    # existing auto-detect-by-default philosophy (resolve_tracker_flip_ns,
+    # derot_flip, flip_pole_axis) — unlike those, this is a plain on/off
+    # toggle rather than an override value, kept as an explicit escape hatch
+    # since this is the first auto-detector that physically rotates raw
+    # pixel data at read time rather than only choosing a warp parameter.
+    detect_orientation_flips: bool = True
+
     @property
     def window_minutes(self) -> float:
         """Derived: window duration in minutes (window_frames × cycle_minutes)."""

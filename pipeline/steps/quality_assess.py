@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from pipeline.config import PipelineConfig
-from pipeline.modules import image_io, quality
+from pipeline.modules import derotation, image_io, quality
 
 
 def run(
@@ -38,9 +38,10 @@ def run(
 
     Returns:
         {
-          "scores":  {filter: [row_dict, ...]},        # normalised
-          "windows": [window_dict, ...],               # all windows, chronological
-          "groups":  {filter: [(path, meta), ...]},    # for downstream steps
+          "scores":   {filter: [row_dict, ...]},        # normalised
+          "windows":  [window_dict, ...],               # all windows, chronological
+          "groups":   {filter: [(path, meta), ...]},    # for downstream steps
+          "flip_map": {stem: flip180, ...},              # from detect_orientation_flip_map()
         }
     """
     # ── Output directory ───────────────────────────────────────────────────────
@@ -62,12 +63,24 @@ def run(
     total = sum(len(v) for v in groups.values())
     print(f"  Scoring {total} files across {len(groups)} filters…")
 
+    # ── Detect discrete 180° camera-orientation flips (meridian flip / ───────
+    # alt-az re-seat) once for the whole session, before any per-frame
+    # scoring. See derotation.detect_orientation_flip_map()'s docstring --
+    # purely NCC-margin based, never a timestamp-gap heuristic. Returns {}
+    # (every frame flip180=False) for the common case of no detected flip,
+    # which makes every downstream read a strict no-op vs. before this
+    # feature existed.
+    flip_map: Dict[str, bool] = {}
+    if config.quality.detect_orientation_flips:
+        flip_map = derotation.detect_orientation_flip_map(groups)
+
     # ── Compute quality metrics ────────────────────────────────────────────────
     scores = quality.compute_scores(
         groups,
         lap_w=config.quality.laplacian_weight,
         ten_w=config.quality.fourier_hf_weight,     # re-used for Tenengrad
         nv_w =config.quality.norm_variance_weight,
+        flip_map=flip_map,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )
@@ -115,9 +128,10 @@ def run(
     print(summary)
 
     return {
-        "scores":  scores,
-        "windows": windows,
-        "groups":  groups,
+        "scores":   scores,
+        "windows":  windows,
+        "groups":   groups,
+        "flip_map": flip_map,
     }
 
 

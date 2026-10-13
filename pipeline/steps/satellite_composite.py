@@ -195,7 +195,7 @@ def _satellite_translate_stack(
         pos = positions[i]
         if pos is None or not pos.on_disk:
             continue
-        raw = image_io.read_tif(row["path"])
+        raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
         img = raw.astype(np.float32) / 65535.0 if raw.dtype == np.uint16 else raw.astype(np.float32)
         if img.ndim == 3 and not keep_color:
             img = img.mean(axis=2)
@@ -716,6 +716,9 @@ def _apply_satellite_composite(
     if ref_filt is None:
         return {}
     disk_centers: Dict[str, dict] = {}
+    # Reads a Step4 OUTPUT path (filter_results comes from
+    # derotation.derotate_window()), already orientation-corrected upstream
+    # -- not a row dict, no flip180 lookup needed here.
     ref_raw = image_io.read_tif(filter_results[ref_filt][0])
     ref_lum = ref_raw.astype(np.float32) / 65535.0 if ref_raw.dtype == np.uint16 else ref_raw.astype(np.float32)
     if ref_lum.ndim == 3:
@@ -753,6 +756,8 @@ def _apply_satellite_composite(
         if ch4_entry and ch4_entry[0] is not None and ch4_entry[0].exists():
             satellite_refinement_log = {"attempted": True, "applied": False, "offset_px": None,
                                          "confidence": None, "peak_sig": None}
+            # ch4_entry[0] is a Step4 OUTPUT path, already orientation-
+            # corrected upstream -- not a row dict, no flip180 lookup needed.
             ch4_raw = image_io.read_tif(ch4_entry[0])
             ch4_lum = (ch4_raw.astype(np.float32) / 65535.0 if ch4_raw.dtype == np.uint16
                        else ch4_raw.astype(np.float32))
@@ -828,6 +833,8 @@ def _apply_satellite_composite(
 
         print(f"    [{filt}] satellite composite…")
 
+        # out_path is a Step4 OUTPUT path, already orientation-corrected
+        # upstream -- not a row dict, no flip180 lookup needed here.
         planet_raw = image_io.read_tif(out_path)
         planet = (planet_raw.astype(np.float32) / 65535.0 if planet_raw.dtype == np.uint16
                   else planet_raw.astype(np.float32))
@@ -1052,7 +1059,7 @@ def _detect_tracker_flip_ns(
         win_frames: List[np.ndarray] = []
         for row in win["per_filter"][filt]["included"]:
             try:
-                raw = image_io.read_tif(row["path"])
+                raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
                 lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
                 lum = lum.astype(np.float32)
                 if lum.max() > 1.5:
@@ -1186,7 +1193,7 @@ def compute_session_disk_radius(windows: List[dict]) -> Optional[float]:
             continue
         for _row in _win["per_filter"][_filt]["included"]:
             try:
-                _raw = image_io.read_tif(_row["path"])
+                _raw = image_io.read_tif_oriented(_row["path"], _row.get("flip180", False))
                 _lum = _raw if _raw.ndim == 2 else _raw.mean(axis=2).astype(np.float32)
                 _lum = _lum.astype(np.float32)
                 if _lum.max() > 1.5:

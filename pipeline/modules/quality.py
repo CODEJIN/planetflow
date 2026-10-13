@@ -158,6 +158,7 @@ def compute_scores(
     lap_w: float = 0.5,
     ten_w: float = 0.3,
     nv_w:  float = 0.2,
+    flip_map: Optional[Dict[str, bool]] = None,
     progress_callback=None,
     cancel_event=None,
 ) -> Dict[str, List[dict]]:
@@ -168,9 +169,20 @@ def compute_scores(
         lap_w:   Weight for Laplacian variance.
         ten_w:   Weight for Tenengrad.
         nv_w:    Weight for normalised variance.
+        flip_map: Optional {stem: flip180} from
+                  derotation.detect_orientation_flip_map() — frames whose
+                  stem maps to True are read 180°-rotated (see
+                  image_io.read_tif_oriented) before scoring, and every
+                  returned row carries its own "flip180" flag so every
+                  downstream consumer of these row dicts (Step 4's
+                  de-rotation stacking, satellite/shadow compositing) reads
+                  the same corrected orientation without needing its own
+                  flip-detection logic. None (default) = no frame is
+                  rotated and every row gets "flip180": False — fully
+                  backward compatible with every existing caller.
 
     Returns:
-        {filter_name: [{"stem", "timestamp", "path",
+        {filter_name: [{"stem", "timestamp", "path", "flip180",
                         "laplacian", "tenengrad", "norm_variance",
                         "raw_score"}, ...]}
         Sorted by timestamp within each filter.  raw_score is the
@@ -190,7 +202,8 @@ def compute_scores(
         for path, meta in entries:
             if cancel_event is not None and cancel_event.is_set():
                 break
-            img = image_io.read_tif(path)
+            flip180 = bool(flip_map.get(meta["stem"], False)) if flip_map else False
+            img = image_io.read_tif_oriented(path, flip180)
             m = quality_metrics(img)
 
             # Raw combined score (not yet normalised across the filter)
@@ -201,6 +214,7 @@ def compute_scores(
                 "timestamp":    meta["timestamp"],
                 "path":         path,
                 "filter":       filt,
+                "flip180":      flip180,
                 "laplacian":    m["laplacian"],
                 "tenengrad":    m["tenengrad"],
                 "norm_variance": m["norm_variance"],

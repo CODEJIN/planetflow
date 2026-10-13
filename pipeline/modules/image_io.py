@@ -250,6 +250,25 @@ def read_tif(path: Path) -> np.ndarray:
     return img
 
 
+def read_tif_oriented(path: Path, flip180: bool = False) -> np.ndarray:
+    """read_tif(path), physically rotated 180° when flip180 is True.
+
+    For a discrete camera-orientation flip (GEM meridian flip, or an alt-az
+    mount re-seated between re-slews -- see
+    derotation.detect_orientation_flip_map()) a 180° rotation is an EXACT
+    operation for any (H, W) or (H, W, 3) array: a plain double-axis flip,
+    no interpolation. flip180=False (default) returns exactly what
+    read_tif(path) returns -- this is what makes every call site that
+    switches from read_tif() to this function a strict no-op for any frame
+    the flip detector doesn't mark as flipped (in particular, every frame of
+    every session with no detected flip).
+    """
+    img = read_tif(path)
+    if flip180:
+        img = np.ascontiguousarray(img[::-1, ::-1])
+    return img
+
+
 # ── Image writing ──────────────────────────────────────────────────────────────
 
 def write_png_16bit(image: np.ndarray, path: Path) -> None:

@@ -3190,7 +3190,7 @@ def map_space_window_stack(
     n_stacked = 0
 
     for row in included_rows:
-        img = image_io.read_tif(row["path"])
+        img = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
         # Mono only for Phase B (proving the core hypothesis) -- color/mono
         # handling parity with derotate_filter() is a Phase E concern.
         lum = img.mean(axis=2) if img.ndim == 3 else img
@@ -3801,6 +3801,268 @@ def auto_detect_ns_flip(
         print("  [derot_flip] low confidence — defaulting to derot_flip=False")
         return False, float(scores[False]), float(scores[True])
     return derot_flip, float(scores[False]), float(scores[True])
+
+
+# Mono filters in priority order; "color" is appended for color-camera sessions.
+# Duplicated from pipeline/steps/derotate_stack.py / satellite_composite.py's own
+# module-level literal of the same name -- same precedent as those two files'
+# independent copies (no shared constants module exists for this).
+_FILT_PREF_EXT_LOCAL = ["IR", "R", "G", "B", "CH4", "color"]
+
+
+def _pairwise_rot180_ncc_margin(
+    img_a: np.ndarray,
+    img_b: np.ndarray,
+    crop_margin_factor: float = 1.3,
+) -> Optional[float]:
+    """NCC(a, rot180(b)) - NCC(a, b), measured on disk-centered, common-size crops.
+
+    Used by detect_orientation_flip_map() to tell whether *img_b* is a
+    discrete 180°-rotated camera orientation relative to *img_a* (a GEM
+    meridian flip, or an alt-az mount re-seated between re-slews) — margin
+    > 0 means the rotated hypothesis matches better.
+
+    Both frames are recentred (translation only, via cv2.warpAffine — same
+    convention as apply_shift()) onto a common fixed-size canvas before
+    comparison. This matters: comparing raw crops of two frames whose
+    find_disk_center() radius differs even slightly produces mismatched
+    crop shapes and spurious margins — confirmed directly during manual
+    validation of this function's design (see
+    project_meridian_flip_detection memory). Once both frames are centred on
+    the SAME canvas point, rot180 of the second crop is an EXACT
+    operation (plain array flip about that point, no interpolation).
+
+    Returns None when either frame's disk can't be detected or either
+    masked region is featureless (std too low for a meaningful NCC).
+    """
+    lum_a = _to_luminance(img_a)
+    lum_b = _to_luminance(img_b)
+    try:
+        cx_a, cy_a, ra, rb_a, _ = find_disk_center(lum_a)
+        cx_b, cy_b, rb, rb_b, _ = find_disk_center(lum_b)
+    except Exception:
+        return None
+    r_a = max(ra, rb_a)
+    r_b = max(rb, rb_b)
+    if r_a < 5 or r_b < 5:
+        return None
+
+    size = int(2 * math.ceil(crop_margin_factor * max(r_a, r_b)) + 1)
+    center = size / 2.0
+
+    def _recenter(img: np.ndarray, cx: float, cy: float) -> np.ndarray:
+        M = np.float32([[1, 0, center - cx], [0, 1, center - cy]])
+        return cv2.warpAffine(
+            img.astype(np.float32), M, (size, size),
+            flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE,
+        )
+
+    crop_a = _recenter(lum_a, cx_a, cy_a)
+    crop_b = _recenter(lum_b, cx_b, cy_b)
+
+    Y, X = np.ogrid[:size, :size]
+    mask = ((X - center) ** 2 + (Y - center) ** 2) < (0.9 * min(r_a, r_b)) ** 2
+
+    # σ=30 highpass: same convention as _measure_derot_confidence's _highpass
+    # (removes smooth limb-darkening gradient before correlating).
+    def _highpass(img: np.ndarray) -> np.ndarray:
+        return img - cv2.GaussianBlur(img, (0, 0), 30.0)
+
+    hp_a = _highpass(crop_a)
+    crop_b_rot = crop_b[::-1, ::-1]
+    hp_b = _highpass(crop_b)
+    hp_b_rot = _highpass(crop_b_rot)
+
+    a_px = hp_a[mask].astype(np.float64)
+    b_px = hp_b[mask].astype(np.float64)
+    b_rot_px = hp_b_rot[mask].astype(np.float64)
+    if a_px.std() < 1e-6 or b_px.std() < 1e-6 or b_rot_px.std() < 1e-6:
+        return None
+
+    ncc_normal = float(np.corrcoef(a_px, b_px)[0, 1])
+    ncc_rot180 = float(np.corrcoef(a_px, b_rot_px)[0, 1])
+    return ncc_rot180 - ncc_normal
+
+
+def detect_orientation_flip_map(
+    groups: Dict[str, List[Tuple[Path, dict]]],
+    filter_pref: Optional[List[str]] = None,
+    ncc_margin_threshold: float = 0.003,
+    crop_margin_factor: float = 1.3,
+) -> Dict[str, bool]:
+    """Detect discrete 180°-rotation events across a session and return a
+    per-frame flip map.
+
+    Motivation: a GEM meridian flip (or an alt-az mount re-seated between
+    re-slews) rotates the camera image exactly 180° (point-symmetric) at a
+    discrete moment mid-session. The rest of this pipeline (pole_pa,
+    derot_flip, tracker_flip_ns auto-detection, and the stack itself)
+    assumes one consistent orientation for the whole session; without this
+    fix a stack straddling such an event would superimpose belts/moons/
+    shadows at mirrored positions.
+
+    Detection is purely image-based (NCC margin from
+    _pairwise_rot180_ncc_margin on adjacent frames in one representative
+    filter's timeline) — deliberately NOT based on timestamp gaps, which are
+    unreliable (false negatives if capture software bridges the gap, false
+    positives from clouds/pauses). A real meridian flip was confirmed to
+    produce a margin an order of magnitude clear of every non-flip adjacent
+    pair measured across six real no-flip sessions (+0.0068 vs -0.0097..
+    -0.0204) — ncc_margin_threshold=0.003 is a deadband placed well inside
+    that gap, not a fitted/tuned knob.
+
+    A detected transition's boundary time is logged alongside whether it
+    coincided with an unusually large time gap, as a diagnostic sanity-check
+    only -- gap size never feeds the decision.
+
+    Ambiguous or undetectable pairs (disk detection failure, |margin| below
+    threshold) fall back to "no flip" (same orientation as the previous
+    frame) with a warning -- this mirrors resolve_tracker_flip_ns()'s
+    "don't guess when unsure" philosophy, adapted to a per-pair default
+    since stacking cannot skip a frame's inclusion decision the way
+    satellite tracking can skip drawing a marker.
+
+    Args:
+        groups: image_io.group_by_filter()'s return value — the full-session
+                scan this function needs to run exactly once, before any
+                per-window/per-filter processing.
+        filter_pref: Filter priority order to search for an anchor timeline
+                with >= 3 frames. Defaults to _FILT_PREF_EXT_LOCAL.
+        ncc_margin_threshold: Deadband around 0 for the pairwise margin.
+        crop_margin_factor: Passed through to _pairwise_rot180_ncc_margin.
+
+    Returns:
+        {stem: flip180} for every frame across every filter in *groups*.
+        Empty dict when no anchor filter has enough frames, or when zero
+        transitions are detected (the common case for a normal session).
+    """
+    if filter_pref is None:
+        filter_pref = _FILT_PREF_EXT_LOCAL
+
+    anchor = next((f for f in filter_pref if len(groups.get(f, [])) >= 3), None)
+    if anchor is None:
+        print("  [orientation_flip] No filter with >= 3 frames — flip detection skipped")
+        return {}
+
+    entries = sorted(groups[anchor], key=lambda e: e[1]["timestamp"])
+    n = len(entries)
+    print(f"  [orientation_flip] Scanning {n} frame(s) in {anchor} for discrete 180° flips…")
+
+    imgs: List[np.ndarray] = [image_io.read_tif(p) for p, _ in entries]
+    timestamps = [m["timestamp"] for _, m in entries]
+
+    gaps = [
+        (timestamps[i + 1] - timestamps[i]).total_seconds()
+        for i in range(n - 1)
+    ]
+    median_gap = float(np.median(gaps)) if gaps else 0.0
+
+    margins: List[Optional[float]] = [
+        _pairwise_rot180_ncc_margin(imgs[i], imgs[i + 1], crop_margin_factor)
+        for i in range(n - 1)
+    ]
+
+    transitions: List[int] = []
+    for i, m in enumerate(margins):
+        if m is None:
+            warnings.warn(
+                f"  [orientation_flip] pair [{i}→{i+1}] disk detection failed — "
+                "falling back to no flip for this pair"
+            )
+            continue
+        if -ncc_margin_threshold <= m <= ncc_margin_threshold:
+            continue
+        if m < 0:
+            continue  # confidently no transition
+
+        # Candidate transition — skip-one confirmation to reject a single
+        # noisy pair (debounce): compare entries[i-1] vs entries[i+2]
+        # directly, which predicts the same relative orientation.
+        confirmed = True
+        if 0 <= i - 1 and i + 2 < n:
+            m_confirm = _pairwise_rot180_ncc_margin(
+                imgs[i - 1], imgs[i + 2], crop_margin_factor
+            )
+            confirmed = m_confirm is not None and m_confirm > ncc_margin_threshold
+        if not confirmed:
+            warnings.warn(
+                f"  [orientation_flip] candidate transition at [{i}→{i+1}] "
+                f"(margin={m:.4f}) not confirmed by skip-one check — treated as noise"
+            )
+            continue
+
+        transitions.append(i)
+        dt = (timestamps[i + 1] - timestamps[i]).total_seconds()
+        gap_note = (
+            "coincides with an unusually large time gap"
+            if median_gap > 0 and dt > 3 * median_gap
+            else "no unusual time gap here (expected — detection is NCC-based only)"
+        )
+        print(
+            f"  [orientation_flip] TRANSITION detected between "
+            f"{timestamps[i]} and {timestamps[i+1]}  (margin={m:+.4f}, "
+            f"Δt={dt:.0f}s, session median Δt={median_gap:.0f}s) — {gap_note}"
+        )
+
+    if not transitions:
+        print("  [orientation_flip] No discrete 180° flips detected")
+        return {}
+
+    boundaries = sorted(
+        timestamps[i] + (timestamps[i + 1] - timestamps[i]) / 2
+        for i in transitions
+    )
+
+    flip_map: Dict[str, bool] = {}
+    n_flipped = 0
+    n_total = 0
+    for _filt, flist in groups.items():
+        for _path, meta in flist:
+            n_preceding = sum(1 for b in boundaries if meta["timestamp"] >= b)
+            flipped = (n_preceding % 2) == 1
+            flip_map[meta["stem"]] = flipped
+
+    # Non-anchor frames captured between the two anchor frames that bracket a
+    # transition are ambiguous: the flip may have happened anywhere in that
+    # interval (capture can resume mid filter cycle), so the midpoint
+    # boundary above is only a guess for them. Resolve each one against the
+    # nearest same-filter frame outside the interval, whose orientation is
+    # unambiguous. Undetectable pairs keep the midpoint guess.
+    for i in transitions:
+        lo, hi = timestamps[i], timestamps[i + 1]
+        for filt, flist in groups.items():
+            if filt == anchor:
+                continue
+            fsorted = sorted(flist, key=lambda e: e[1]["timestamp"])
+            ambiguous = [e for e in fsorted if lo < e[1]["timestamp"] < hi]
+            if not ambiguous:
+                continue
+            before = [e for e in fsorted if e[1]["timestamp"] <= lo]
+            after = [e for e in fsorted if e[1]["timestamp"] >= hi]
+            ref = before[-1] if before else (after[0] if after else None)
+            if ref is None:
+                continue
+            ref_img = image_io.read_tif(ref[0])
+            ref_flip = flip_map[ref[1]["stem"]]
+            for path, meta in ambiguous:
+                m = _pairwise_rot180_ncc_margin(ref_img, image_io.read_tif(path), crop_margin_factor)
+                if m is None or abs(m) <= ncc_margin_threshold:
+                    warnings.warn(
+                        f"  [orientation_flip] {meta['stem']}: orientation near the "
+                        "transition is ambiguous — keeping the time-midpoint estimate"
+                    )
+                    continue
+                flip_map[meta["stem"]] = ref_flip != (m > 0)
+
+    for flipped in flip_map.values():
+        n_total += 1
+        n_flipped += int(flipped)
+
+    print(
+        f"  [orientation_flip] {len(transitions)} transition(s) → "
+        f"{n_flipped}/{n_total} frame(s) marked flip180=True across all filters"
+    )
+    return flip_map
 
 
 def equator_pa_from_disk_ellipse(image: np.ndarray) -> Optional[float]:
@@ -4454,7 +4716,7 @@ def derotate_filter(
     # → asymmetric limb artifact (thin left limb, thick right limb).
     # Fix: detect the disk centre once from the reference frame and use the
     # same (ref_cx, ref_cy, ref_semi_a) for every frame in the window.
-    _ref_raw = image_io.read_tif(reference_row["path"])
+    _ref_raw = image_io.read_tif_oriented(reference_row["path"], reference_row.get("flip180", False))
     if color_mode:
         if _ref_raw.ndim == 2:
             _ref_raw = np.stack([_ref_raw] * 3, axis=2)
@@ -4599,7 +4861,7 @@ def derotate_filter(
     ref_img: Optional[np.ndarray] = None
 
     for row in included_rows:
-        img = image_io.read_tif(row["path"])
+        img = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
 
         if color_mode:
             # Keep (H, W, 3); use luminance only for geometry/alignment
@@ -5226,7 +5488,7 @@ def derotate_window(
             c_included = c_filtered if c_filtered else c_included
         c_ref_row = min(c_included, key=lambda r: abs((r["timestamp"] - t_ref).total_seconds()))
         try:
-            c_raw = image_io.read_tif(c_ref_row["path"])
+            c_raw = image_io.read_tif_oriented(c_ref_row["path"], c_ref_row.get("flip180", False))
             if color_mode:
                 if c_raw.ndim == 2:
                     c_raw = np.stack([c_raw] * 3, axis=2)
