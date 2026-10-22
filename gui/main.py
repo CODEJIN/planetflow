@@ -1,6 +1,14 @@
 """Application entry point for the planetary imaging pipeline GUI."""
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # Step 2 runs Pass 1 in spawned worker processes. In a frozen
+    # (PyInstaller) build each worker re-launches this executable;
+    # freeze_support() turns that launch into the worker instead of a second
+    # GUI. Kept above the heavy Qt imports so frozen workers exit before them.
+    import multiprocessing
+    multiprocessing.freeze_support()
+
 import sys
 from pathlib import Path
 
