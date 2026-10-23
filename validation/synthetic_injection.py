@@ -57,7 +57,9 @@ from pipeline.modules import derotation, image_io  # noqa: E402
 from pipeline.modules.satellite_tracker import SatellitePos  # noqa: E402
 from pipeline.steps import derotate_stack, quality_assess  # noqa: E402
 from pipeline.steps.satellite_composite import (  # noqa: E402
+    _blend_one,
     _blend_poisson,
+    _capsule_gaussian_mask,
     _satellite_translate_stack,
 )
 
@@ -144,6 +146,15 @@ def _artifact_rms(m: np.ndarray, s: np.ndarray, x: float, y: float,
     d2 = (xx - x) ** 2 + (yy - y) ** 2
     ann = (d2 >= r_in * r_in) & (d2 <= r_out * r_out)
     return float(np.sqrt(np.mean((m[ann] - s[ann]) ** 2)) / max(local_level, 1e-6))
+
+
+def _trail_rms(x_img: np.ndarray, truth: np.ndarray, region: np.ndarray, local_level: float) -> float:
+    """RMS difference from the ground truth over the compositing region outside
+    the object aperture, relative to the local planet level: the smear trail
+    left behind plus any background mismatch the blend introduces."""
+    if not region.any():
+        return float("nan")
+    return float(np.sqrt(np.mean((x_img[region] - truth[region]) ** 2)) / max(local_level, 1e-6))
 
 
 # ── Pipeline plumbing ─────────────────────────────────────────────────────────
@@ -252,6 +263,13 @@ def run_case(rows: List[dict], t_ref: datetime, P: np.ndarray, frame_centers: Di
     R_T = T - P
     r_ap = max(3.0 * r_app, r_app + 3 * _PSF_SIGMA_PX)
     local = float(np.median(P[int(y_ref) - 6:int(y_ref) + 7, int(x_ref) - 6:int(x_ref) + 7]))
+    # Trail region: the production capsule mask along the true trajectory,
+    # minus the object aperture.
+    traj_true = [(cx + ox, cy + oy) for ox, oy in offsets.values()]
+    hh, ww = P.shape
+    yy_, xx_ = np.mgrid[0:hh, 0:ww]
+    trail_region = ((_capsule_gaussian_mask(P.shape, traj_true, r_app * _COVERAGE_SCALE) > 0.1)
+                    & ((xx_ - x_ref) ** 2 + (yy_ - y_ref) ** 2 > r_ap * r_ap))
 
     align = {f["stem"]: f.get("align_shift_px", [0.0, 0.0]) for f in slog.get("frames", [])}
     kept = {f["stem"] for f in slog.get("frames", []) if not f.get("outlier_excluded")}
@@ -268,7 +286,8 @@ def run_case(rows: List[dict], t_ref: datetime, P: np.ndarray, frame_centers: Di
             "noise_mult": noise_mult}
     out: List[dict] = []
     out.append({**base, "method": "single_rate", "delta_deg": 0.0,
-                **_metrics(S - P, R_T, x_ref, y_ref, r_ap), "artifact_rms": 0.0})
+                **_metrics(S - P, R_T, x_ref, y_ref, r_ap), "artifact_rms": 0.0,
+                "trail_rms": _trail_rms(S, T, trail_region, local)})
 
     # Single-frame paste baseline (the current manual practice, in its best
     # form): the object is taken from the ONE frame closest to the reference
@@ -285,7 +304,8 @@ def run_case(rows: List[dict], t_ref: datetime, P: np.ndarray, frame_centers: Di
         M1 = _blend_poisson(S.copy(), single, ref0, r_app * _COVERAGE_SCALE, traj_xy=traj0, mask_shape="capsule")
         out.append({**base, "method": "single_frame_paste", "delta_deg": 0.0,
                     **_metrics(M1 - P, R_T, x_ref, y_ref, r_ap),
-                    "artifact_rms": _artifact_rms(M1, S, x_ref, y_ref, r_ap + 2, r_ap + 12, local)})
+                    "artifact_rms": _artifact_rms(M1, S, x_ref, y_ref, r_ap + 2, r_ap + 12, local),
+                    "trail_rms": _trail_rms(M1, T, trail_region, local)})
 
     for delta in deltas_deg:
         c, s_ = math.cos(math.radians(delta)), math.sin(math.radians(delta))
@@ -300,8 +320,16 @@ def run_case(rows: List[dict], t_ref: datetime, P: np.ndarray, frame_centers: Di
         M = _blend_poisson(S.copy(), stack, ref, r_app * _COVERAGE_SCALE, traj_xy=traj, mask_shape="capsule")
         out.append({**base, "method": "multi_rate", "delta_deg": delta,
                     **_metrics(M - P, R_T, x_ref, y_ref, r_ap),
-                    "artifact_rms": _artifact_rms(M, S, x_ref, y_ref, r_ap + 2, r_ap + 12, local)})
+                    "artifact_rms": _artifact_rms(M, S, x_ref, y_ref, r_ap + 2, r_ap + 12, local),
+                    "trail_rms": _trail_rms(M, T, trail_region, local)})
         if delta == 0.0:
+            # Same stack and capsule mask, merged by Gaussian alpha blending
+            # (production _blend_one) instead of the Poisson solve.
+            Ma = _blend_one(S.copy(), stack, ref, r_app * _COVERAGE_SCALE, traj_xy=traj, mask_shape="capsule")
+            out.append({**base, "method": "multi_rate_alpha", "delta_deg": 0.0,
+                        **_metrics(Ma - P, R_T, x_ref, y_ref, r_ap),
+                        "artifact_rms": _artifact_rms(Ma, S, x_ref, y_ref, r_ap + 2, r_ap + 12, local),
+                        "trail_rms": _trail_rms(Ma, T, trail_region, local)})
             _save_panel(P, S, M, T, x_ref, y_ref, r_ap, tmp_dir.parent / "panels",
                         f"{obj_type}_dv{dv_r_per_h:.2f}_r{base['r_frac']:.2f}_{rows[0]['stem'][:15]}.png")
     return out
@@ -340,7 +368,7 @@ def main() -> None:
                     help="Distance of the reference position from disk centre (fraction of radius), "
                          "placed along +/- the drift axis")
     ap.add_argument("--deltas", nargs="+", type=float, default=[0.0, 2.0, 4.0, 8.0, 12.0])
-    ap.add_argument("--r-app", type=float, default=3.0, help="Apparent object radius (px)")
+    ap.add_argument("--r-app", nargs="+", type=float, default=[3.0], help="Apparent object radius (px)")
     ap.add_argument("--sat-amp", nargs="+", type=float, default=[0.15])
     ap.add_argument("--shadow-amp", nargs="+", type=float, default=[0.85])
     ap.add_argument("--noise-mult", nargs="+", type=float, default=[1.0],
@@ -401,7 +429,7 @@ def main() -> None:
                 best = None
                 for sg in (1.0, -1.0):
                     rr = run_case(rows, t_ref, P, centers, (cx, cy, R), (0.0, 0.0), 0.0, "shadow",
-                                  args.r_app, args.shadow_amp[0], sess_w, cfg, tmp, sg, [])
+                                  args.r_app[0], args.shadow_amp[0], sess_w, cfg, tmp, sg, [])
                     fr = rr[0]["flux_recovery"]
                     print(f"[sign check] sign={sg:+.0f}: single-rate flux_recovery={fr:.3f} "
                           f"elongation={rr[0]['elongation']:.2f}")
@@ -416,9 +444,10 @@ def main() -> None:
                 for side in ((1.0,) if frac == 0 else (1.0, -1.0)):
                     o_ref = (side * frac * R * ux, side * frac * R * uy)
                     objs = [("satellite", a) for a in args.sat_amp] + [("shadow", a) for a in args.shadow_amp]
-                    for (obj_type, amp), nm, dv in [(o, nm, dv) for o in objs for nm in args.noise_mult for dv in args.dv]:
+                    for (obj_type, amp), ra, nm, dv in [(o, ra, nm, dv) for o in objs for ra in args.r_app
+                                                        for nm in args.noise_mult for dv in args.dv]:
                         rr = run_case(rows, t_ref, P, centers, (cx, cy, R), o_ref, dv, obj_type,
-                                      args.r_app, amp, sess_w, cfg, tmp, sign, args.deltas,
+                                      ra, amp, sess_w, cfg, tmp, sign, args.deltas,
                                       noise_sigma=noise_sigma, noise_mult=nm)
                         for r in rr:
                             r.update(window=wi + 1, filter=filt, t_ref=f"{t_ref:%Y-%m-%dT%H:%M}")
