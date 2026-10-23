@@ -503,6 +503,11 @@ class QualityConfig:
     # Frames with norm_score below this threshold are excluded before window search.
     # 0.0 = use all frames (disabled). Recommended: 0.2–0.3 to drop obviously bad frames.
     min_quality_threshold: float = 0.05
+    # Auto-detect meridian flips (180° camera rotation mid-session) and rotate
+    # post-flip frames back to the session's first orientation before scoring
+    # (pipeline/modules/orientation.py). Image-based, so it also covers
+    # externally stacked inputs; input files are never modified.
+    auto_orient_flip: bool = True
 
     # ── De-rotation window parameters ─────────────────────────────────────────
     # window_frames: number of filter cycles (= time-series frames) that form
