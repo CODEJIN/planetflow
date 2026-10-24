@@ -131,7 +131,7 @@ class QualityPanel(BasePanel):
         # Cycle seconds
         self._cycle_seconds = QSpinBox()
         self._cycle_seconds.setStyleSheet(_INT_SPINBOX_STYLE)
-        self._cycle_seconds.setRange(10, 600)
+        self._cycle_seconds.setRange(10, 1800)
         self._cycle_seconds.setSingleStep(15)
         self._cycle_seconds.setValue(225)
         self._cycle_seconds.setToolTip(S("step03.cycle_seconds.tooltip"))

@@ -71,6 +71,17 @@ TARGET_ABBREV: Dict[str, str] = {
 }
 
 
+def _canonical_target(name: str) -> str:
+    """Normalise a target name so "Mars", "Mar" and "mars" compare equal.
+
+    FireCapture writes whatever object name the user typed (e.g. "Mars"),
+    while the planet presets use WinJUPOS abbreviations ("Mar").
+    """
+    key = name.strip().lower()
+    abbrev = TARGET_ABBREV.get(key)
+    return (abbrev or key).lower()
+
+
 def _extract_date_from_parents(path: Path) -> Optional[str]:
     """Search the two nearest parent directories for a YYYY-MM-DD name."""
     for ancestor in (path.parent, path.parent.parent):
@@ -206,13 +217,14 @@ def group_by_filter(
         {filter_name: [(path, meta), ...]}  sorted by timestamp within each group.
     """
     groups: Dict[str, List[Tuple[Path, Dict]]] = {}
+    want = _canonical_target(target)
 
     for p in sorted(tif_dir.glob("*.tif")):
         meta = parse_filename(p)
         if meta is None:
             continue
         # Skip only when target is positively known and doesn't match
-        if meta["target"] is not None and meta["target"] != target:
+        if meta["target"] is not None and _canonical_target(meta["target"]) != want:
             continue
         f = meta["filter"] if meta["filter"] is not None else "color"
         meta = {**meta, "filter": f}

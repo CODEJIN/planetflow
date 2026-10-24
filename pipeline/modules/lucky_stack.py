@@ -35,6 +35,7 @@ Performance targets (280×280 px SER, 10 000 frames, 1 034 selected at 10%):
 from __future__ import annotations
 
 import math
+import os
 import multiprocessing as _mp
 import threading as _threading
 import time
@@ -42,7 +43,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor, as_completed as _as_completed
 from queue import Empty as _QueueEmpty
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -66,6 +67,16 @@ def _pixel_scale(reader: SERReader) -> float:
     the resulting float array is in [0, 1].
     """
     return 255.0 if int(reader.header.get("PixelDepth", 8)) <= 8 else 65535.0
+
+
+def _frame_workers(cfg) -> int:
+    """Per-SER worker budget: cfg.n_workers (0 = all cores) split across
+    the cfg.n_ser_parallel SER files being processed at once."""
+    n_workers = int(getattr(cfg, "n_workers", 1))
+    if n_workers <= 0:
+        n_workers = _mp.cpu_count()
+    n_ser = max(1, int(getattr(cfg, "n_ser_parallel", 1)))
+    return max(1, n_workers // n_ser)
 
 
 # ── 1. Quality scoring ─────────────────────────────────────────────────────────
@@ -225,19 +236,36 @@ def score_frames_log_disk(
     sampled_idx: List[int] = list(range(0, n_frames, score_step))
     sampled_scores: List[float] = []
 
-    for i, idx in enumerate(sampled_idx):
-        raw = reader.get_frame(idx)
+    def _score_one(raw: np.ndarray) -> float:
         f = raw.astype(np.float32) / raw.max()
         mask = f > thr
         if mask.sum() < 50:
-            sampled_scores.append(0.0)
-        else:
-            blurred = cv2.GaussianBlur(f, (0, 0), sigma)
-            lap = cv2.Laplacian(blurred, cv2.CV_32F, ksize=3)
-            sampled_scores.append(float(lap[mask].var()))
+            return 0.0
+        blurred = cv2.GaussianBlur(f, (0, 0), sigma)
+        lap = cv2.Laplacian(blurred, cv2.CV_32F, ksize=3)
+        return float(lap[mask].var())
 
-        if progress_callback is not None and i % 50 == 0:
-            progress_callback(idx, n_frames)
+    # Frames are read sequentially on this thread (the reader's file handle
+    # is not thread-safe) and scored in batches on a thread pool — the
+    # per-frame work is almost entirely GIL-free OpenCV, so threads scale
+    # (~3x at 4-8 threads). Each score depends only on its own frame, so
+    # the result is identical to the sequential loop. Capped at 8: no
+    # further gain measured beyond that on 400×400 frames.
+    n_threads = min(_frame_workers(cfg), 8)
+    batch = 256
+    executor = _ThreadPoolExecutor(max_workers=n_threads) if n_threads > 1 else None
+    try:
+        for b0 in range(0, len(sampled_idx), batch):
+            raws = [reader.get_frame(idx) for idx in sampled_idx[b0:b0 + batch]]
+            if executor is not None:
+                sampled_scores.extend(executor.map(_score_one, raws))
+            else:
+                sampled_scores.extend(_score_one(raw) for raw in raws)
+            if progress_callback is not None:
+                progress_callback(sampled_idx[b0 + len(raws) - 1], n_frames)
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
     scores = np.interp(
         np.arange(n_frames, dtype=np.float32),
@@ -928,11 +956,14 @@ def _batch_qsf_refine(cc_batch: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     cols = (px[:, None] + di[None, :]) % W   # (n, 3)
 
     k_idx = np.arange(n, dtype=np.intp)
-    z = cc_batch.astype(np.float64)[
+    # Gather the 3×3 neighbourhoods first, then widen — float32→float64 is
+    # exact, so this equals widening the whole (n, H, W) batch first without
+    # the full-size copy.
+    z = cc_batch[
         k_idx[:, None, None],
         rows[:, :, None],
         cols[:, None, :],
-    ]   # (n, 3, 3)
+    ].astype(np.float64)   # (n, 3, 3)
 
     denom_x = z[:, 1, 0] - 2.0 * z[:, 1, 1] + z[:, 1, 2]
     denom_x = np.where(np.abs(denom_x) > 1e-12, denom_x, 1e-12)
@@ -1785,6 +1816,184 @@ def _compute_warp_maps_tps(
     return map_dx, map_dy, n_good, conf_map
 
 
+# ── 5c-1. Per-AP independent stacking: Pass 1 helpers ─────────────────────────
+
+class _Pass1Params(NamedTuple):
+    """Read-only inputs for _pass1_frame (picklable for worker processes)."""
+    reference: np.ndarray
+    ap_positions: List
+    disk_cx: float
+    disk_cy: float
+    disk_radius: float
+    default_ap_size: int
+    stab_thresh: int
+    score_metric: str
+    ksize: int
+    log_sigma: float
+    log_thr: float
+
+
+def _pass1_frame(
+    frame: np.ndarray, p: _Pass1Params,
+) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    """Pass 1 for one frame: global alignment + per-AP local quality score.
+
+    Returns (dx_g, dy_g, ap_scores float32[n_ap], aligned_frame). The single
+    implementation shared by the in-process and worker-process paths, so
+    both produce identical results.
+    """
+    H, W = p.reference.shape[:2]
+    dx_g, dy_g = limb_center_align(p.disk_cx, p.disk_cy, frame, fixed_threshold=p.stab_thresh)
+    if abs(dx_g) > p.disk_radius * 0.5 or abs(dy_g) > p.disk_radius * 0.5:
+        dx_g, dy_g = subpixel_align(p.reference, frame)
+    aligned = apply_shift(frame, dx_g, dy_g)
+    ap_scores = np.zeros(len(p.ap_positions), dtype=np.float32)
+    if p.score_metric != "log_disk":
+        gx = cv2.Sobel(aligned, cv2.CV_32F, 1, 0, ksize=p.ksize)
+        gy = cv2.Sobel(aligned, cv2.CV_32F, 0, 1, ksize=p.ksize)
+        mag2 = gx ** 2 + gy ** 2
+    for j, ap in enumerate(p.ap_positions):
+        ax, ay = int(ap[0]), int(ap[1])
+        half = (int(ap[2]) if len(ap) >= 3 else p.default_ap_size) // 2
+        if ay - half < 0 or ay + half > H or ax - half < 0 or ax + half > W:
+            continue
+        patch = aligned[ay - half: ay + half, ax - half: ax + half]
+        if p.score_metric == "log_disk":
+            pf = patch.astype(np.float32)
+            pm = float(pf.max())
+            if pm > 1e-9:
+                pf /= pm
+            mask_p = pf > p.log_thr
+            if mask_p.sum() < 5:
+                ap_scores[j] = 0.0
+            else:
+                bl = cv2.GaussianBlur(pf, (0, 0), p.log_sigma)
+                lp = cv2.Laplacian(bl, cv2.CV_32F, ksize=3)
+                ap_scores[j] = float(lp[mask_p].var())
+        else:
+            ap_scores[j] = float(mag2[ay - half: ay + half, ax - half: ax + half].max())
+    return dx_g, dy_g, ap_scores, aligned
+
+
+# Pass 1 is many small GIL-holding operations (find_disk_center, per-AP
+# patch scoring), so a thread pool runs it *slower* than one thread
+# (measured 2026-10-22: 8 threads 60 s vs 1 thread 42 s on 2854 frames).
+# It runs in worker processes instead, sharing the frame stack through
+# shared memory. Below this many frames the pool start-up cost (spawn +
+# imports, ~1-2 s) outweighs the gain and Pass 1 stays in-process.
+_PASS1_PROCESS_MIN_FRAMES = 150
+
+_P1_WORKER: Dict = {}
+
+
+def _attach_shm(name: str):
+    from multiprocessing import shared_memory
+    shm = shared_memory.SharedMemory(name=name)
+    if os.name == "posix":
+        # Python < 3.13 registers attached segments with this process's
+        # resource tracker, which would unlink the parent's segment when the
+        # worker exits. The parent owns (and unlinks) it.
+        from multiprocessing import resource_tracker
+        resource_tracker.unregister(shm._name, "shared_memory")  # type: ignore[attr-defined]
+    return shm
+
+
+def _pass1_worker_init(
+    frames_shm: str, shape: Tuple[int, ...],
+    ref_shm: str, ref_shape: Tuple[int, ...], ref_dtype: str,
+    params: _Pass1Params,
+) -> None:
+    cv2.setNumThreads(1)   # one process per core already; avoid oversubscription
+    shm_f = _attach_shm(frames_shm)
+    shm_r = _attach_shm(ref_shm)
+    _P1_WORKER["shm"] = (shm_f, shm_r)
+    _P1_WORKER["frames"] = np.ndarray(shape, dtype=np.float32, buffer=shm_f.buf)
+    reference = np.ndarray(ref_shape, dtype=np.dtype(ref_dtype), buffer=shm_r.buf)
+    _P1_WORKER["params"] = params._replace(reference=reference)
+
+
+def _pass1_worker_chunk(indices: List[int]) -> Tuple[List[int], np.ndarray, np.ndarray]:
+    """Run _pass1_frame on frames[indices]; each slot is overwritten in place
+    with its aligned frame (every slot belongs to exactly one chunk)."""
+    frames = _P1_WORKER["frames"]
+    p = _P1_WORKER["params"]
+    shifts = np.zeros((len(indices), 2), dtype=np.float32)
+    ap_scores = np.zeros((len(indices), len(p.ap_positions)), dtype=np.float32)
+    for k, i in enumerate(indices):
+        dx_g, dy_g, ap_scores[k], aligned = _pass1_frame(frames[i], p)
+        shifts[k] = (dx_g, dy_g)
+        frames[i] = aligned
+    return indices, shifts, ap_scores
+
+
+def _pass1_in_processes(
+    selected_frames: np.ndarray,
+    params: _Pass1Params,
+    n_workers: int,
+    shm_holder: List,
+    progress_callback=None,
+    progress_total: int = 0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pass 1 over all frames in a spawn-based process pool.
+
+    selected_frames is copied once into a shared-memory block that the
+    workers overwrite in place with the aligned frames, so the returned
+    aligned stack costs no memory beyond what the in-process path allocates.
+    The block is appended to shm_holder; the caller must release it (via
+    _release_shm) once it no longer uses the returned array.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import shared_memory
+
+    n_sel = len(selected_frames)
+    shape = (n_sel,) + selected_frames.shape[1:]
+    shm = shared_memory.SharedMemory(create=True, size=max(1, selected_frames.nbytes))
+    shm_holder.append(shm)
+    frames_sh = np.ndarray(shape, dtype=np.float32, buffer=shm.buf)
+    frames_sh[...] = selected_frames
+    # The reference goes through shared memory too, keeping initargs tiny:
+    # on Windows the parent's write of initargs to a spawning worker blocks
+    # until that worker has imported this module (~1 s) and read them, once
+    # they exceed the pipe buffer — which serialised worker start-up
+    # (~0.9 s per worker, measured 2026-10-22).
+    ref = params.reference
+    shm_r = shared_memory.SharedMemory(create=True, size=max(1, ref.nbytes))
+    shm_holder.append(shm_r)
+    np.ndarray(ref.shape, dtype=ref.dtype, buffer=shm_r.buf)[...] = ref
+
+    global_shifts = np.zeros((n_sel, 2), dtype=np.float32)
+    score_matrix = np.zeros((n_sel, len(params.ap_positions)), dtype=np.float32)
+    # ~4 chunks per worker: balances load and gives a smooth progress bar.
+    chunk_sz = max(1, -(-n_sel // (n_workers * 4)))
+    chunks = [list(range(k, min(k + chunk_sz, n_sel))) for k in range(0, n_sel, chunk_sz)]
+    done = 0
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=_mp.get_context("spawn"),
+        initializer=_pass1_worker_init,
+        initargs=(shm.name, shape, shm_r.name, ref.shape, ref.dtype.str,
+                  params._replace(reference=None)),
+    ) as executor:
+        for fut in _as_completed([executor.submit(_pass1_worker_chunk, c) for c in chunks]):
+            indices, shifts_c, scores_c = fut.result()
+            global_shifts[indices] = shifts_c
+            score_matrix[indices] = scores_c
+            done += len(indices)
+            if progress_callback:
+                progress_callback(done, progress_total)
+    return global_shifts, score_matrix, frames_sh
+
+
+def _release_shm(shm) -> None:
+    try:
+        shm.close()
+    except BufferError:
+        pass   # a view is still alive (e.g. held by a traceback); freed with it
+    try:
+        shm.unlink()
+    except FileNotFoundError:
+        pass
+
 
 def _per_ap_independent_stack(
     selected_frames: np.ndarray,
@@ -1799,6 +2008,38 @@ def _per_ap_independent_stack(
     progress_callback=None,
     bayer_code=None,
     pixel_scale: float = 65535.0,
+) -> Tuple[np.ndarray, Dict]:
+    """See _per_ap_independent_stack_body. This wrapper only guarantees the
+    Pass 1 shared-memory block is released once the body's arrays are gone."""
+    shm_holder: List = []
+    try:
+        return _per_ap_independent_stack_body(
+            selected_frames, selected_indices, scores, reference,
+            disk_cx, disk_cy, disk_radius, ap_positions, cfg,
+            progress_callback=progress_callback,
+            bayer_code=bayer_code,
+            pixel_scale=pixel_scale,
+            shm_holder=shm_holder,
+        )
+    finally:
+        for shm in shm_holder:
+            _release_shm(shm)
+
+
+def _per_ap_independent_stack_body(
+    selected_frames: np.ndarray,
+    selected_indices: np.ndarray,
+    scores: np.ndarray,
+    reference: np.ndarray,
+    disk_cx: float,
+    disk_cy: float,
+    disk_radius: float,
+    ap_positions: List,
+    cfg,
+    progress_callback=None,
+    bayer_code=None,
+    pixel_scale: float = 65535.0,
+    shm_holder: Optional[List] = None,
 ) -> Tuple[np.ndarray, Dict]:
     """True per-AP independent lucky stacking (patch-based, legacy).
 
@@ -1833,139 +2074,72 @@ def _per_ap_independent_stack(
     _log_thr      = float(getattr(cfg, "log_disk_threshold", 0.25))
 
     # ── Pass 1: global alignment + per-AP score matrix ────────────────────────
-    global_shifts = np.zeros((n_sel, 2), dtype=np.float32)   # (dx_g, dy_g)
-    score_matrix  = np.zeros((n_sel, n_ap), dtype=np.float32)
-
-    n_workers = int(getattr(cfg, "n_workers", 1))
-    if n_workers <= 0:
-        n_workers = _mp.cpu_count()
-    n_ser = max(1, int(getattr(cfg, "n_ser_parallel", 1)))
-    n_workers = max(1, n_workers // n_ser)
+    n_workers = _frame_workers(cfg)
 
     # progress total = n_sel (Pass 1 frames) + n_ap (Pass 2 APs)
     _prog_total = n_sel + n_ap
+    _p1_params = _Pass1Params(
+        reference=reference, ap_positions=list(ap_positions),
+        disk_cx=float(disk_cx), disk_cy=float(disk_cy), disk_radius=float(disk_radius),
+        default_ap_size=int(cfg.ap_size), stab_thresh=_stab_thresh,
+        score_metric=_score_metric, ksize=_ksize,
+        log_sigma=_log_sigma, log_thr=_log_thr,
+    )
+    _use_procs = n_workers > 1 and n_sel >= _PASS1_PROCESS_MIN_FRAMES
     print(f"    [Pass 1] global align + scoring: {n_sel} frames × {n_ap} APs"
-          f"  (n_workers={n_workers})", flush=True)
+          f"  ({f'{n_workers} processes' if _use_procs else 'in-process'})", flush=True)
 
-    # Closure captures all read-only arrays directly — threads share memory,
-    # no pickling or fork needed.  cv2.Sobel / limb_center_align release GIL.
-    def _pass1_chunk(chunk_indices: List[int]) -> Tuple[np.ndarray, np.ndarray]:
-        shifts_c = np.zeros((len(chunk_indices), 2), dtype=np.float32)
-        scores_c = np.zeros((len(chunk_indices), n_ap), dtype=np.float32)
-        for li, i in enumerate(chunk_indices):
-            frame = selected_frames[i]
-            dx_g, dy_g = limb_center_align(disk_cx, disk_cy, frame, fixed_threshold=_stab_thresh)
-            if abs(dx_g) > disk_radius * 0.5 or abs(dy_g) > disk_radius * 0.5:
-                dx_g, dy_g = subpixel_align(reference, frame)
-            shifts_c[li] = (dx_g, dy_g)
-            aligned = apply_shift(frame, dx_g, dy_g)
-            if _score_metric != "log_disk":
-                gx = cv2.Sobel(aligned, cv2.CV_32F, 1, 0, ksize=_ksize)
-                gy = cv2.Sobel(aligned, cv2.CV_32F, 0, 1, ksize=_ksize)
-                mag2 = gx ** 2 + gy ** 2
-            for j, ap in enumerate(ap_positions):
-                ax, ay = int(ap[0]), int(ap[1])
-                half = (int(ap[2]) if len(ap) >= 3 else cfg.ap_size) // 2
-                if ay - half < 0 or ay + half > H or ax - half < 0 or ax + half > W:
-                    continue
-                patch = aligned[ay - half: ay + half, ax - half: ax + half]
-                if _score_metric == "log_disk":
-                    pf = patch.astype(np.float32)
-                    pm = float(pf.max())
-                    if pm > 1e-9:
-                        pf /= pm
-                    mask_p = pf > _log_thr
-                    if mask_p.sum() < 5:
-                        scores_c[li, j] = 0.0
-                    else:
-                        bl = cv2.GaussianBlur(pf, (0, 0), _log_sigma)
-                        lp = cv2.Laplacian(bl, cv2.CV_32F, ksize=3)
-                        scores_c[li, j] = float(lp[mask_p].var())
-                else:
-                    scores_c[li, j] = float(mag2[ay - half: ay + half, ax - half: ax + half].max())
-        return shifts_c, scores_c
-
-    if n_workers > 1:
-        all_idx  = list(range(n_sel))
-        chunk_sz = max(1, (n_sel + n_workers - 1) // n_workers)
-        chunks   = [all_idx[k:k + chunk_sz] for k in range(0, n_sel, chunk_sz)]
-        done_count = 0
-        with _ThreadPoolExecutor(max_workers=n_workers) as executor:
-            for chunk_idx, (shifts_c, scores_c) in zip(chunks, executor.map(_pass1_chunk, chunks)):
-                for li, i in enumerate(chunk_idx):
-                    global_shifts[i] = shifts_c[li]
-                    score_matrix[i]  = scores_c[li]
-                done_count += len(chunk_idx)
-                if progress_callback:
-                    progress_callback(done_count, _prog_total)
-    else:
-        for i, frame in enumerate(selected_frames):
-            dx_g, dy_g = limb_center_align(
-                disk_cx, disk_cy, frame, fixed_threshold=_stab_thresh
+    # aligned_frames[i] = selected_frames[i] globally shifted by
+    # global_shifts[i] (bicubic, sub-pixel) — Pass 2 extracts its patches
+    # from it without re-running warpAffine per frame×AP. Pass 1 already
+    # computes exactly this array (for scoring), so it is kept rather than
+    # recomputed.
+    aligned_frames: Optional[np.ndarray] = None
+    if _use_procs:
+        if shm_holder is None:
+            shm_holder = []
+        try:
+            global_shifts, score_matrix, aligned_frames = _pass1_in_processes(
+                selected_frames, _p1_params, n_workers, shm_holder,
+                progress_callback=progress_callback, progress_total=_prog_total,
             )
-            if abs(dx_g) > disk_radius * 0.5 or abs(dy_g) > disk_radius * 0.5:
-                dx_g, dy_g = subpixel_align(reference, frame)
+        except Exception as _e:
+            print(f"    [Pass 1] process pool failed ({_e!r}) — running in-process", flush=True)
+            aligned_frames = None
+            while shm_holder:
+                _release_shm(shm_holder.pop())
+
+    if aligned_frames is None:
+        global_shifts = np.zeros((n_sel, 2), dtype=np.float32)   # (dx_g, dy_g)
+        score_matrix  = np.zeros((n_sel, n_ap), dtype=np.float32)
+        aligned_frames = np.empty((n_sel, H, W), dtype=np.float32)
+        for i, frame in enumerate(selected_frames):
+            dx_g, dy_g, score_matrix[i], aligned_frames[i] = _pass1_frame(frame, _p1_params)
             global_shifts[i] = (dx_g, dy_g)
-
-            aligned = apply_shift(frame, dx_g, dy_g)
-            if _score_metric != "log_disk":
-                gx_full = cv2.Sobel(aligned, cv2.CV_32F, 1, 0, ksize=_ksize)
-                gy_full = cv2.Sobel(aligned, cv2.CV_32F, 0, 1, ksize=_ksize)
-                mag2_full = gx_full ** 2 + gy_full ** 2
-            for j, ap in enumerate(ap_positions):
-                ax, ay = int(ap[0]), int(ap[1])
-                half = (int(ap[2]) if len(ap) >= 3 else cfg.ap_size) // 2
-                if ay - half < 0 or ay + half > H or ax - half < 0 or ax + half > W:
-                    continue
-                patch = aligned[ay - half: ay + half, ax - half: ax + half]
-                if _score_metric == "log_disk":
-                    pf = patch.astype(np.float32)
-                    pm = float(pf.max())
-                    if pm > 1e-9:
-                        pf /= pm
-                    mask_p = pf > _log_thr
-                    if mask_p.sum() < 5:
-                        score_matrix[i, j] = 0.0
-                    else:
-                        bl = cv2.GaussianBlur(pf, (0, 0), _log_sigma)
-                        lp = cv2.Laplacian(bl, cv2.CV_32F, ksize=3)
-                        score_matrix[i, j] = float(lp[mask_p].var())
-                else:
-                    score_matrix[i, j] = float(mag2_full[ay - half: ay + half, ax - half: ax + half].max())
-
             if progress_callback and i % 100 == 0:
                 progress_callback(i, _prog_total)
 
     print(f"    [Pass 1] done", flush=True)
 
-    # ── Intermediate: build sub-pixel globally-aligned frames ────────────────
-    # Apply sub-pixel (bicubic) global shift to every selected frame so Pass 2
-    # can extract patches without re-running warpAffine per frame×AP.
-    #
-    # For colour (Bayer) SER: debayer each raw frame to RGB *before* apply_shift.
-    # apply_shift uses INTER_CUBIC which mixes adjacent pixels via bilinear
-    # interpolation — if applied to a Bayer frame (alternating R/G/G/B), it
-    # blends neighbouring colour channels and destroys the mosaic pattern.
+    # ── Intermediate: colour (Bayer) frames ───────────────────────────────────
+    # For colour (Bayer) SER: debayer each raw frame to RGB *before* the
+    # global shift. apply_shift uses INTER_CUBIC which mixes adjacent pixels
+    # — if applied to a Bayer frame (alternating R/G/G/B), it blends
+    # neighbouring colour channels and destroys the mosaic pattern.
     # After stacking hundreds of such blended frames, all channels converge to
     # the same grey value.  Debayering first turns the 2D Bayer frame into a
     # proper (H,W,3) RGB image; INTER_CUBIC then interpolates within each
     # colour channel independently, preserving colour.
     #
-    # aligned_frames (2D Bayer) is still built and used for Pass-2 NCC /
+    # aligned_frames (2D Bayer) is still used for Pass-2 NCC /
     # phaseCorrelate shift estimation — fine because both reference and frame
     # patches share the same Bayer pattern, so phase correlation finds the
     # correct local shift.  Only the *accumulated* patches use aligned_frames_rgb.
-    aligned_frames = np.empty((n_sel, H, W), dtype=np.float32)
     if bayer_code is not None:
         _u16_dtype = np.uint16 if pixel_scale > 255.0 else np.uint8
         aligned_frames_rgb = np.empty((n_sel, H, W, 3), dtype=np.float32)
-    else:
-        aligned_frames_rgb = None  # assigned below
-
-    for i, frame in enumerate(selected_frames):
-        dx_g, dy_g = float(global_shifts[i, 0]), float(global_shifts[i, 1])
-        aligned_frames[i] = apply_shift(frame, dx_g, dy_g)
-        if bayer_code is not None:
+        for i, frame in enumerate(selected_frames):
+            dx_g, dy_g = float(global_shifts[i, 0]), float(global_shifts[i, 1])
             # debayer raw Bayer frame → RGB, THEN shift.
             # Use BORDER_CONSTANT=0 (not BORDER_REPLICATE) so that large-shift
             # frames don't fill the border with edge-column Bayer artefacts
@@ -1980,8 +2154,7 @@ def _per_ap_independent_stack(
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=0,
             )
-
-    if bayer_code is None:
+    else:
         aligned_frames_rgb = aligned_frames  # (n_sel, H, W) single-channel
     _n_ch = 3 if bayer_code is not None else 1
 

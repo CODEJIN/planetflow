@@ -474,23 +474,48 @@ def _subpixel_ray_edge(
     dr and adds the corresponding r_vals[0]/r_start), or None if no genuine
     interior minimum exists (result would land in the excluded margin).
     """
-    smoothed = _gaussian_filter1d_np(profile, sigma=smooth_sigma)
-    grad = np.gradient(smoothed, dr)
+    valid, sub_idx = _subpixel_ray_edges(profile[None, :], dr, smooth_sigma, margin)
+    return float(sub_idx[0]) if valid[0] else None
+
+
+def _subpixel_ray_edges(
+    profiles: np.ndarray,
+    dr: float,
+    smooth_sigma: float = 1.5,
+    margin: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Row-batched `_subpixel_ray_edge()`: one sampled profile per row of
+    `profiles` (n_rays, n_samples). Same per-row arithmetic in the same
+    order as the single-profile version (which is now a 1-row wrapper of
+    this), so results are bit-identical -- batching only removes the
+    per-ray Python overhead that dominated find_disk_center() (2026-10-22).
+
+    Returns (valid bool[n_rays], sub_idx float64[n_rays]); sub_idx is only
+    meaningful where valid is True.
+    """
+    n_rays = profiles.shape[0]
+    smoothed = np.stack([_gaussian_filter1d_np(p, sigma=smooth_sigma) for p in profiles])
+    # Not profiles.shape[1]: "same"-mode np.convolve returns the LONGER of
+    # profile and kernel, which the single-profile version also inherited.
+    n_samples = smoothed.shape[1]
+    grad = np.gradient(smoothed, dr, axis=1)
     if margin is None:
-        margin = max(3, len(grad) // 20)
+        margin = max(3, n_samples // 20)
     if margin <= 0:
         search = grad
     else:
-        if len(grad) <= 2 * margin:
-            return None
-        search = grad[margin:-margin]
-    idx = margin + int(np.argmin(search))
-    if idx <= 0 or idx >= len(grad) - 1:
-        return None
-    y0, y1, y2 = grad[idx - 1], grad[idx], grad[idx + 1]
+        if n_samples <= 2 * margin:
+            return np.zeros(n_rays, dtype=bool), np.zeros(n_rays, dtype=np.float64)
+        search = grad[:, margin:-margin]
+    idx = margin + np.argmin(search, axis=1)
+    valid = (idx > 0) & (idx < n_samples - 1)
+    i_c = np.clip(idx, 1, n_samples - 2)
+    rows = np.arange(n_rays)
+    y0, y1, y2 = grad[rows, i_c - 1], grad[rows, i_c], grad[rows, i_c + 1]
     denom = 2.0 * (y2 - 2.0 * y1 + y0)
-    sub = -(y2 - y0) / denom if abs(denom) > 1e-12 else 0.0
-    return idx + sub
+    big = np.abs(denom) > 1e-12
+    sub = np.where(big, -(y2 - y0) / np.where(big, denom, 1.0), 0.0)
+    return valid, idx + sub
 
 
 def _gradient_disk_r(
@@ -526,15 +551,19 @@ def _gradient_disk_r(
     r_vals  = np.linspace(r_start, r_end, n_samples)
     dr      = r_vals[1] - r_vals[0]
 
+    # All rays are sampled and edge-searched as one (n_rays, n_samples) batch
+    # instead of a per-ray Python loop (~13x faster, bit-identical). cos/sin
+    # stay per-angle scalar calls exactly as before: a vectorized np.cos may
+    # take a different (SIMD) code path whose last-ulp rounding can differ.
+    cos_a = np.array([np.cos(a) for a in angles])[:, None]
+    sin_a = np.array([np.sin(a) for a in angles])[:, None]
+    xs = cx + r_vals[None, :] * cos_a
+    ys = cy + r_vals[None, :] * sin_a
+    in_bounds = ~((xs < 0).any(axis=1) | (xs >= w - 1).any(axis=1) |
+                  (ys < 0).any(axis=1) | (ys >= h - 1).any(axis=1))
     edge_radii: list[float] = []
-    for angle in angles:
-        cos_a, sin_a = np.cos(angle), np.sin(angle)
-        xs = cx + r_vals * cos_a
-        ys = cy + r_vals * sin_a
-        if (xs < 0).any() or (xs >= w - 1).any() or \
-           (ys < 0).any() or (ys >= h - 1).any():
-            continue
-        profile = _bilinear_interp(image, ys, xs)
+    if in_bounds.any():
+        profiles = _bilinear_interp(image, ys[in_bounds], xs[in_bounds])
         # margin=0 matches this function's own long-established convention
         # (only reject when the argmin lands EXACTLY on index 0 or the last
         # index, not a wider margin) -- preserved exactly for byte-identical
@@ -542,10 +571,8 @@ def _gradient_disk_r(
         # _subpixel_ray_edge's own default margin instead, since it targets
         # a different (narrower, closer-in) search window where the wider
         # default margin matters (see that function's docstring).
-        sub_idx = _subpixel_ray_edge(profile, dr, smooth_sigma=smooth_sigma, margin=0)
-        if sub_idx is None:
-            continue
-        edge_radii.append(float(r_vals[0] + sub_idx * dr))
+        valid, sub_idx = _subpixel_ray_edges(profiles, dr, smooth_sigma=smooth_sigma, margin=0)
+        edge_radii = [float(v) for v in r_vals[0] + sub_idx[valid] * dr]
 
     if len(edge_radii) < 8:
         return (r_rough, len(edge_radii)) if return_n_valid else r_rough
