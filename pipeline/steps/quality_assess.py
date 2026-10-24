@@ -11,9 +11,6 @@ Output (when config.save_step03 is True):
         windows.json            — all windows (machine-readable)
         windows_summary.txt     — human-readable window summary
         <FILTER>_ranking.csv    — per-filter sorted ranking
-        orientation.json        — detected meridian flips / rotated frames
-        oriented/               — 180°-rotated copies of post-flip frames
-                                  (written regardless of save_step03)
 """
 from __future__ import annotations
 
@@ -23,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from pipeline.config import PipelineConfig
-from pipeline.modules import image_io, orientation, quality
+from pipeline.modules import image_io, quality
 
 
 def run(
@@ -61,18 +58,6 @@ def run(
     if not groups:
         print(f"  [WARNING] No matching TIF files found in {config.input_dir}")
         return {}
-
-    # ── Meridian-flip orientation normalisation ────────────────────────────────
-    # Done here, not in Step 2, because Step 3 is where both input paths meet
-    # (Step 2 output or externally stacked TIFs). Downstream steps read frames
-    # through the returned paths, so they all see one orientation.
-    if config.quality.auto_orient_flip:
-        groups = orientation.normalise_orientation(
-            groups,
-            work_dir=config.step_dir(3, "quality") / "oriented",
-            report_dir=out_dir,
-            cancel_event=cancel_event,
-        )
 
     total = sum(len(v) for v in groups.values())
     print(f"  Scoring {total} files across {len(groups)} filters…")
