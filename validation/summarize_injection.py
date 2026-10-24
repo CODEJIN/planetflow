@@ -83,44 +83,48 @@ def main() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.6))
+    # Sized for the printed page (17 cm wide) so that the smallest text stays at 7 pt.
+    plt.rcParams.update({"font.size": 7.5, "axes.labelsize": 7.5, "xtick.labelsize": 7,
+                         "ytick.labelsize": 7, "legend.fontsize": 6.5})
+    fig, axes = plt.subplots(1, 3, figsize=(6.9, 2.5))
     colors = {"single_rate": "#c0392b", "multi_rate": "#2471a3", "single_frame_paste": "#7f8c8d"}
     labels = {"single_rate": "single-rate", "multi_rate": "multi-rate", "single_frame_paste": "single-frame paste"}
-    for ax, metric, ylab in ((axes[0], "peak_recovery", "Peak recovery (1 = truth)"),
-                             (axes[1], "nrmse", "NRMSE vs truth (0 = truth)")):
+    for ax, metric, ylab in ((axes[0], "peak_recovery", "Peak recovery (1 = true)"),
+                             (axes[1], "nrmse", "NRMSE (0 = true)")):
         for obj, ls in (("satellite", "-"), ("shadow", "--")):
-            for meth in ("single_rate", "single_frame_paste", "multi_rate"):
+            # The pasting baseline is compared in Table 4, not plotted here.
+            for meth in ("single_rate", "multi_rate"):
                 if not (base["method"] == meth).any():
                     continue
                 g = base[(base["obj_type"] == obj) & (base["method"] == meth)].groupby("dv_R_per_h")[metric]
                 med = g.median()
-                ax.plot(med.index, med.values, ls, marker="o", ms=3, color=colors[meth],
+                ax.plot(med.index, med.values, ls, marker="o", ms=2.5, lw=1.1, color=colors[meth],
                         label=f"{labels[meth]}, {obj}")
                 ax.fill_between(med.index, g.quantile(0.25).values, g.quantile(0.75).values,
                                 color=colors[meth], alpha=0.12, lw=0)
-        ax.set_xlabel(r"Object $-$ surface velocity $\Delta v$ ($R_J$ h$^{-1}$)")
+        ax.set_xlabel(r"Relative speed $\Delta v$ ($R_J$ h$^{-1}$)")
         ax.set_ylabel(ylab)
         ax.grid(alpha=0.3)
     axes[0].axhline(1.0, color="k", lw=0.6)
-    axes[0].legend(fontsize=7, frameon=False)
+    axes[0].legend(frameon=False, handlelength=2.2)
 
     ax = axes[2]
-    shades = {0.1: "#9ecae1", 0.2: "#4292c6", 0.45: "#08306b"}
-    for dv, col in shades.items():
+    shades = {0.1: ("#9ecae1", "o"), 0.2: ("#4292c6", "s"), 0.45: ("#08306b", "^")}
+    for dv, (col, mk) in shades.items():
         g = mr[np.isclose(mr["dv_R_per_h"], dv)]
         if g.empty:
             continue
         gm = g.groupby("delta_deg").agg(x=("offset_over_sigma", "median"), y=("nrmse", "median"))
-        ax.plot(gm["x"], gm["y"], marker="o", ms=3, color=col, label=rf"multi-rate, $\Delta v$={dv:g}")
+        ax.plot(gm["x"], gm["y"], marker=mk, ms=3, lw=1.1, color=col, label=rf"multi-rate, $\Delta v$ = {dv:g}")
         ax.axhline(g["nrmse_single"].median(), color=col, ls=":", lw=1)
     ax.plot([], [], ":", color="gray", label=r"single-rate (same $\Delta v$)")
-    ax.set_xlabel(r"Placement offset / mask width $\sigma_\perp$")
-    ax.set_ylabel("NRMSE vs truth")
+    ax.set_xlabel(r"Cross-path error / band width $\sigma_\perp$")
+    ax.set_ylabel("NRMSE (0 = true)")
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=7, frameon=False)
-    fig.tight_layout()
-    fig.savefig(args.out / "injection_summary.pdf")
-    fig.savefig(args.out / "injection_summary.png", dpi=150)
+    ax.legend(frameon=False)
+    fig.tight_layout(w_pad=0.8)
+    fig.savefig(args.out / "injection_summary.pdf", bbox_inches="tight", pad_inches=0.02)
+    fig.savefig(args.out / "injection_summary.png", dpi=150, bbox_inches="tight", pad_inches=0.02)
     print(f"\nFigure → {args.out / 'injection_summary.pdf'}")
 
 

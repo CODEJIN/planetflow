@@ -64,7 +64,7 @@ def _overlay(ax, rgb, alpha, x0, y0):
     rgba = np.zeros(alpha.shape + (4,), dtype=np.float32)
     rgba[..., :3] = rgb
     rgba[..., 3] = np.clip(alpha, 0, 1) * 0.75
-    ax.imshow(rgba[y0:y0 + ax._crop_h, x0:x0 + ax._crop_w], interpolation="bilinear")
+    ax.imshow(rgba[y0:y0 + ax._crop_h, x0:x0 + ax._crop_w], interpolation="none")
 
 
 def main() -> None:
@@ -135,15 +135,15 @@ def main() -> None:
         fcx, fcy, fr, *_ = find_disk_center(img)
         panels_top.append((img, (fcx, fcy, fr), rows[i]["timestamp"], i))
 
-    fig = plt.figure(figsize=(9.0, 9.6), facecolor="black")
+    fig = plt.figure(figsize=(6.7, 7.15), facecolor="black")  # 17 cm printed width
     gs = fig.add_gridspec(3, 6, hspace=0.16, wspace=0.06, left=0.01, right=0.99, top=0.97, bottom=0.01)
 
     def show(ax, img, geom, title):
         dcx, dcy, dr = geom
         disp, x0, y0 = _crop(_display(img, dcx, dcy, dr), dcx, dcy, dr)
-        ax.imshow(disp, cmap="gray", vmin=0, vmax=1)
+        ax.imshow(disp, cmap="gray", vmin=0, vmax=1, interpolation="none")
         ax._crop_h, ax._crop_w = disp.shape
-        ax.set_title(title, color="white", fontsize=8.5, pad=3)
+        ax.set_title(title, color="white", fontsize=7.5, pad=3)
         ax.axis("off")
         return x0, y0
 
@@ -152,7 +152,7 @@ def main() -> None:
 
     for k, (img, geom, ts, i) in enumerate(panels_top):
         ax = fig.add_subplot(gs[0, 2 * k:2 * k + 2])
-        x0, y0 = show(ax, img, geom, f"Input frame {i + 1} · {ts:%H:%M:%S} UTC")
+        x0, y0 = show(ax, img, geom, f"Input image {i + 1} · {ts:%H:%M:%S} UTC")
         adx, ady = rows[i]["align_shift_px"]
         for label, col, plist, ref, app_r in objs:
             p = plist[i]
@@ -162,26 +162,26 @@ def main() -> None:
 
     geom = (cx, cy, r)
     ax = fig.add_subplot(gs[1, 0:2])
-    x0, y0 = show(ax, planet, geom, "Planet stack (planet rate)")
+    x0, y0 = show(ax, planet, geom, "Stack at planet rate")
     for label, col, plist, ref, app_r in objs:
         for p in plist:
             if p is not None:
                 mark(ax, p.x_px, p.y_px, x0, y0, col, size=12)
     for k, (label, col, plist, ref, app_r) in enumerate(objs[:2]):
         ax = fig.add_subplot(gs[1, 2 + 2 * k:4 + 2 * k])
-        x0, y0 = show(ax, stacks[k], geom, f"{label} stack ({label} rate)")
+        x0, y0 = show(ax, stacks[k], geom, f"Stack at {label} rate")
         mark(ax, ref.x_px, ref.y_px, x0, y0, col, size=40)
 
     ax = fig.add_subplot(gs[2, 1:3])
-    x0, y0 = show(ax, planet, geom, "Capsule compositing masks")
+    x0, y0 = show(ax, planet, geom, "Blending bands")
     for (label, col, plist, ref, app_r), m in zip(objs, masks):
         _overlay(ax, col, m, x0, y0)
     ax = fig.add_subplot(gs[2, 3:5])
-    show(ax, final, geom, "Final composite")
+    show(ax, final, geom, "Final result")
 
     handles = [plt.Line2D([], [], ls="none", marker="o", mfc="none", mec=col, label=label)
                for label, col, *_ in objs]
-    fig.legend(handles=handles, loc="lower left", frameon=False, fontsize=8, labelcolor="white",
+    fig.legend(handles=handles, loc="lower left", frameon=False, fontsize=7, labelcolor="white",
                bbox_to_anchor=(0.02, 0.02))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
