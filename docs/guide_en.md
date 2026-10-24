@@ -583,7 +583,7 @@ For each composite (RGB, IR-RGB, etc.), shows how much each filter image was shi
 
 ## 13. Run All
 
-![Run All](images_en/run_all.png)
+![Run All](images_en/all_run.png)
 *Figure 13-1: Pipeline running state*
 
 Clicking the Run All button in the left sidebar automatically executes all enabled steps in sequence.
