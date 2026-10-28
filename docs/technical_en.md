@@ -718,7 +718,7 @@ Pass 2 — per window:
 
 | GUI Parameter | Default | Internal Behavior |
 |---|---|---|
-| **Max Channel Shift (px)** | 15.0 | A phase-correlation shift larger than this (in either axis) is never applied. Raise to 20–30 on nights with strong atmospheric dispersion |
+| **Max Channel Shift (px)** | 25.0 | Search radius of the gradient-NCC alignment; a peak on the search boundary leaves that channel unshifted. Sessions at the former 8/15 px defaults are migrated to 25 (session v17) |
 | **Global Normalize** | On | After compositing, scales each window's composite so its mean luminance matches the cross-window average. Removes brightness flicker in the GIF |
 | **Global Filter Normalize** | Off | Before compositing, computes the disk median for every (filter, window) and scales each window so all windows share the same median per filter. Pure scaling, so the dark background is preserved and nothing clips. Corrects transparency drift across the session |
 | **Brightness Scale** | 1.0 | `output = composite × brightness_scale`, applied last. Range 0.1–2.0 |

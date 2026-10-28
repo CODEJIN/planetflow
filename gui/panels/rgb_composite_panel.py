@@ -242,7 +242,7 @@ class _Step06MonoWidget(QWidget):
         self._max_shift.setRange(0.0, 100.0)
         self._max_shift.setDecimals(1)
         self._max_shift.setSingleStep(1.0)
-        self._max_shift.setValue(15.0)
+        self._max_shift.setValue(25.0)
         self._max_shift.setToolTip(_tip_shift)
         lbl_shift = QLabel(S("step06.max_shift"))
         lbl_shift.setToolTip(_tip_shift)
@@ -362,7 +362,7 @@ class _Step06MonoWidget(QWidget):
             self._step_status.refresh(p)
             if hasattr(self, "_preview"):
                 self._preview.set_input_dir(p / "step05_wavelet_master")
-        self._max_shift.setValue(float(data.get("max_shift_px", 15.0)))
+        self._max_shift.setValue(float(data.get("max_shift_px", 25.0)))
         self._brightness_scale.setValue(float(data.get("brightness_scale", 1.0)))
         self._chk_global_normalize.setChecked(bool(data.get("global_normalize", True)))
         self._chk_filter_normalize.setChecked(bool(data.get("global_filter_normalize", False)))

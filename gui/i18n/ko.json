@@ -64,7 +64,7 @@
   "step06.cc.cap_after": "보정 후",
   "step06.cc.done": "자동 계산 완료  ({wh})  R×{rg:.3f}  G×1.000  B×{bg:.3f}  R_shift=({rsx:+.2f},{rsy:+.2f})  B_shift=({bsx:+.2f},{bsy:+.2f})",
   "step06.input_dir.tooltip": "Step 5 마스터 이미지가 있는 폴더 (자동)",
-  "step06.max_shift.tooltip": "채널 간 정렬 시 허용되는 최대 이동량(px)입니다.\n너무 크면 잘못된 채널이 정렬될 수 있습니다.",
+  "step06.max_shift.tooltip": "채널 간 정렬의 탐색 범위(px)입니다.\n가장 잘 맞는 위치가 범위 끝에 걸리면 그 채널은 이동하지 않습니다.\n필터를 바꾸는 사이 행성이 많이 흘러가면 값을 높이세요.",
   "step06.global_normalize.tooltip": "합성 후 모든 윈도우의 밝기를 정규화합니다.\n각 윈도우 컴포짓의 평균 밝기를 전체 평균에 맞춰 조정합니다.\nGIF 출력 시 윈도우 간 밝기 깜빡임(flickering)을 억제합니다.",
   "step06.filter_normalize.tooltip": "합성 전 모든 윈도우에 걸쳐 필터별 밝기를 정규화합니다.\n각 (필터, 윈도우) 쌍의 행성 디스크 중앙값을 계산하고, 전체 평균에 맞춰 순수 배율만 적용합니다.\n다이나믹 레인지를 날리지 않고 대기 투명도 변화에 따른 윈도우 간 색상 이질감을 보정합니다.",
   "step06.brightness_scale.tooltip": "모든 합성 출력에 적용하는 밝기 배율입니다.\n1.0 = 변경 없음 (기본값).\n최종 합성 밝기를 균일하게 조정합니다.",

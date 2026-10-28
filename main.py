@@ -118,8 +118,10 @@ def main() -> None:
                 CompositeSpec("CH4-G-IR", R="CH4", G="G", B="IR", align_ref="IR"),
             ],
             align_channels=True,
-            # Reduced from 15 → 8 px to prevent noise-driven CH4 misalignment
-            max_shift_px=8.0,
+            # Search radius for gradient-NCC alignment; tracking drift between
+            # filter captures reached 11.5 px on real data (271026), which an
+            # 8 px radius rejected.
+            max_shift_px=25.0,
             stretch_plow=0.1,
             stretch_phigh=99.9,
         ),

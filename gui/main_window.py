@@ -1300,7 +1300,7 @@ class MainWindow(QMainWindow):
 
         specs = _parse_specs(d.get("composite_specs"))
         composite = CompositeConfig(
-            max_shift_px            = float(d.get("max_shift_px", 15.0)),
+            max_shift_px            = float(d.get("max_shift_px", 25.0)),
             global_normalize        = bool(d.get("global_normalize", True)),
             global_filter_normalize = bool(d.get("global_filter_normalize", False)),
             brightness_scale        = float(d.get("brightness_scale", 1.0)),

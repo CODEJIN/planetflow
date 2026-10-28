@@ -64,7 +64,7 @@
   "step06.cc.cap_after": "After",
   "step06.cc.done": "Auto-calc done  ({wh})  R×{rg:.3f}  G×1.000  B×{bg:.3f}  R_shift=({rsx:+.2f},{rsy:+.2f})  B_shift=({bsx:+.2f},{bsy:+.2f})",
   "step06.input_dir.tooltip": "Folder containing Step 5 master images (auto)",
-  "step06.max_shift.tooltip": "Maximum allowed shift (px) during channel alignment.\nToo large a value may align the wrong channels.",
+  "step06.max_shift.tooltip": "Search range (px) for channel alignment.\nIf the best match is at the edge of this range, the channel is left unshifted.\nRaise it if the planet drifts a lot between filter captures.",
   "step06.global_normalize.tooltip": "Normalizes brightness across all windows after compositing.\nScales each window's composite so its mean luminance matches the global average.\nEliminates inter-window flicker in the GIF output.",
   "step06.filter_normalize.tooltip": "Normalizes per-filter brightness across all windows before compositing.\nComputes the planet-disk median for each (filter, window) pair, then scales each window so all windows share the same disk median for that filter.\nCorrects inter-window atmospheric transparency differences without blowing out the dynamic range.",
   "step06.brightness_scale.tooltip": "Brightness multiplier applied to every composite output.\n1.0 = unchanged (default).\nScales the final composite brightness uniformly.",

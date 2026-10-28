@@ -872,7 +872,7 @@ class CompositeConfig:
         CompositeSpec("CH4-G-IR", R="CH4", G="G", B="IR"),
     ])
     align_channels: bool = True      # gradient-NCC alignment between channels (composite.estimate_channel_shift)
-    max_shift_px: float = 15.0       # alignment search radius; offsets beyond it → channel left unshifted (0 = 25 px)
+    max_shift_px: float = 25.0       # alignment search radius; offsets beyond it → channel left unshifted (0 = 25 px)
     # Colour-channel stretch mode (applied to R, G, B before compositing):
     #   "joint"       – same lo/hi computed from all colour channels combined;
     #                   preserves natural colour ratios (recommended, matches GIMP)

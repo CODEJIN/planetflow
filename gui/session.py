@@ -12,7 +12,7 @@ from typing import Any
 SESSION_DIR  = Path.home() / ".astropipe"
 SESSION_FILE = SESSION_DIR / "session.json"
 
-SESSION_VERSION = 16  # bump when _DEFAULTS or migration logic changes
+SESSION_VERSION = 17  # bump when _DEFAULTS or migration logic changes
 
 # Default values written on first run
 _DEFAULTS: dict[str, Any] = {
@@ -192,6 +192,17 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     if ver < 16:
         if data.get("planet") == "Saturn" and float(data.get("warp_scale", 1.00)) == 0.10:
             data["warp_scale"] = 1.00
+
+    # v16→v17: max_shift_px is now the search radius of the gradient-NCC
+    # channel alignment (composite.estimate_channel_shift), not a clamp on
+    # phase correlation's runaway shifts. The old 8 px default (v5→v6)
+    # rejected real tracking drift between filter captures — 8.0–11.5 px
+    # on 271026 Saturn (w06/w13/w15), leaving those channels unshifted —
+    # while gradient NCC found a sane peak for every pair at 25 px. Only
+    # sessions still at a former default (8.0 or 15.0) are moved.
+    if ver < 17:
+        if float(data.get("max_shift_px", 25.0)) in (8.0, 15.0):
+            data["max_shift_px"] = 25.0
 
     data["session_version"] = SESSION_VERSION
     return data
