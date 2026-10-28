@@ -403,12 +403,24 @@ def _bilinear_interp(image: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> np.nd
                fy *(1-fx)*_safe(y1, x0) +    fy *fx*_safe(y1, x1))
 
 
-def _gaussian_filter1d_np(x: np.ndarray, sigma: float) -> np.ndarray:
-    """1D Gaussian smoothing via numpy convolution (replaces scipy.ndimage.gaussian_filter1d)."""
+def _gaussian_filter1d_np(x: np.ndarray, sigma: float, edge_pad: bool = False) -> np.ndarray:
+    """1D Gaussian smoothing via numpy convolution (replaces scipy.ndimage.gaussian_filter1d).
+
+    edge_pad=False (default) keeps the historical "same"-mode zero padding,
+    which pulls the smoothed profile toward 0 over the last ~3σ samples —
+    a radial limb search then sees a fake steep drop at the window's end
+    wherever the profile has not reached 0 there (sky plateau ≈0.03).
+    edge_pad=True replicates the end samples instead. Only the dark-disk
+    fallback of _find_disk_center_impl opts in: switching every caller
+    changed Jupiter radii by +1.2–4.1 px (260407 step02), which would move
+    every validated derotation/plate-scale result.
+    """
     radius = max(1, int(3.0 * sigma + 0.5))
     t = np.arange(-radius, radius + 1, dtype=np.float64)
     kernel = np.exp(-0.5 * (t / sigma) ** 2)
     kernel /= kernel.sum()
+    if edge_pad:
+        return np.convolve(np.pad(x.astype(np.float64), radius, mode="edge"), kernel, mode="valid")
     return np.convolve(x.astype(np.float64), kernel, mode="same")
 
 
@@ -483,6 +495,7 @@ def _subpixel_ray_edges(
     dr: float,
     smooth_sigma: float = 1.5,
     margin: Optional[int] = None,
+    edge_pad: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Row-batched `_subpixel_ray_edge()`: one sampled profile per row of
     `profiles` (n_rays, n_samples). Same per-row arithmetic in the same
@@ -494,7 +507,7 @@ def _subpixel_ray_edges(
     meaningful where valid is True.
     """
     n_rays = profiles.shape[0]
-    smoothed = np.stack([_gaussian_filter1d_np(p, sigma=smooth_sigma) for p in profiles])
+    smoothed = np.stack([_gaussian_filter1d_np(p, sigma=smooth_sigma, edge_pad=edge_pad) for p in profiles])
     # Not profiles.shape[1]: "same"-mode np.convolve returns the LONGER of
     # profile and kernel, which the single-profile version also inherited.
     n_samples = smoothed.shape[1]
@@ -529,6 +542,8 @@ def _gradient_disk_r(
     smooth_sigma: float = 1.5,
     outlier_sigma: float = 2.0,
     return_n_valid: bool = False,
+    min_quadrants: int = 0,
+    edge_pad: bool = False,
 ):
     """Estimate disk radius from steepest-gradient limb edge along radial rays.
 
@@ -540,6 +555,15 @@ def _gradient_disk_r(
     comparing the return value alone is not reliable) should pass
     return_n_valid=True to additionally get the number of rays that
     contributed to the result.
+
+    min_quadrants: if > 0, the valid rays must span at least this many of
+    the four image quadrants, otherwise the result is treated like too few
+    rays (r_rough returned, n_valid_rays reported as 0). A real limb yields
+    valid rays all around; rays confined to one side mean a different edge
+    was found — on Saturn CH4 (271026), the lower edge of the bright ring
+    band crossing the globe, all valid rays at 25°–150°.
+
+    edge_pad: see _gaussian_filter1d_np.
 
     Returns:
         float radius, or (float radius, int n_valid_rays) if return_n_valid.
@@ -571,8 +595,13 @@ def _gradient_disk_r(
         # _subpixel_ray_edge's own default margin instead, since it targets
         # a different (narrower, closer-in) search window where the wider
         # default margin matters (see that function's docstring).
-        valid, sub_idx = _subpixel_ray_edges(profiles, dr, smooth_sigma=smooth_sigma, margin=0)
+        valid, sub_idx = _subpixel_ray_edges(profiles, dr, smooth_sigma=smooth_sigma, margin=0,
+                                             edge_pad=edge_pad)
         edge_radii = [float(v) for v in r_vals[0] + sub_idx[valid] * dr]
+        if min_quadrants > 0 and edge_radii:
+            quadrants = set((angles[in_bounds][valid] // (np.pi / 2)).astype(int).tolist())
+            if len(quadrants) < min_quadrants:
+                return (r_rough, 0) if return_n_valid else r_rough
 
     if len(edge_radii) < 8:
         return (r_rough, len(edge_radii)) if return_n_valid else r_rough
@@ -973,6 +1002,7 @@ def _find_disk_center_impl(
         raw_aspect = semi_b / semi_a if semi_a > 0 else 1.0
         confidence = 1.0
         shape_reliable = True
+        used_limb_fallback = False
         if raw_aspect < 0.80:
             confidence = 0.0  # overwritten below if a plausible result is found
             shape_reliable = False
@@ -1046,25 +1076,29 @@ def _find_disk_center_impl(
                 seed_r = bh2 / 2.0
                 limb_r, _n_valid_rays = _gradient_disk_r(
                     image, seed_cx, seed_cy, seed_r, search_frac=(0.5, 1.6),
-                    outlier_sigma=1.5, return_n_valid=True,
+                    outlier_sigma=1.5, return_n_valid=True, min_quadrants=3, edge_pad=True,
                 )
                 # _n_valid_rays >= 8 is required for _gradient_disk_r() to
                 # even attempt a real measurement (see its own docstring) —
                 # without checking this explicitly, its internal too-few-rays
                 # fallback (which just echoes r_rough back unchanged) would be
                 # indistinguishable from a genuine successful measurement.
-                # This matters in practice: real Saturn CH4 data typically
-                # gets very few valid rays here (confirmed 0-6 of 72) because
-                # CH4's limb gradient is weak/smooth enough that most rays'
-                # steepest drop lands at the search window's edge rather than
-                # a clean interior minimum — so most CH4 frames land in the
-                # "unconfirmed seed" branch below, not this one.
+                # (The "0-6 valid rays on CH4" once attributed here to CH4's
+                # weak limb was the zero-padded smoothing's fake drop at the
+                # window's end out-steeping the limb; with edge_pad=True
+                # CH4's limb is found all around. Without it, the only rays
+                # left valid caught the ring band crossing the globe and
+                # this branch returned r≈30.7 px for a ≈63 px disk (271026,
+                # every window) — step05 then sharpened only a 30 px circle
+                # (mottled CH4 centre) and step04 derotated with that radius.
+                # min_quadrants rejects that one-sided failure mode.)
                 if _n_valid_rays >= 8 and limb_r > 5.0 and 0.5 * seed_r <= limb_r <= 1.5 * seed_r:
                     # Semi-minor/angle are unknown here — a circular
                     # placeholder (shape_reliable=False signals this to
                     # callers that can borrow a sibling filter's oblateness).
                     cx, cy, semi_a, semi_b, angle_major = seed_cx, seed_cy, limb_r, limb_r, 0.0
                     confidence = 0.5  # genuine gradient-confirmed measurement
+                    used_limb_fallback = True
                     shape_reliable = False
                 elif seed_r > 5.0:
                     # Gradient search inconclusive — fall back to the
@@ -1080,6 +1114,7 @@ def _find_disk_center_impl(
                     # should prefer an actual measurement when one exists.
                     cx, cy, semi_a, semi_b, angle_major = seed_cx, seed_cy, seed_r, seed_r, 0.0
                     confidence = 0.3  # unconfirmed geometric estimate
+                    used_limb_fallback = True
                     shape_reliable = False
                 # else: neither approach worked — keep the raw (disk+ring)
                 # fit; confidence stays 0.0, a known-unreliable result.
@@ -1091,7 +1126,8 @@ def _find_disk_center_impl(
         # already told us which case we're in).
         search_frac = (0.6, 1.8) if raw_aspect < 0.80 else (0.75, 1.30)
         semi_a_refined = _gradient_disk_r(
-            image, float(cx), float(cy), float(semi_a), search_frac=search_frac
+            image, float(cx), float(cy), float(semi_a), search_frac=search_frac,
+            edge_pad=used_limb_fallback,
         )
         # Preserve the fitted oblateness ratio while correcting the absolute
         # scale via the more robust gradient-edge search.

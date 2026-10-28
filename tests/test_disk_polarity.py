@@ -239,6 +239,38 @@ def test_public_api_unchanged():
     assert all(isinstance(v, float) for v in result)
 
 
+def test_one_sided_edge_rays_are_rejected():
+    """_gradient_disk_r(min_quadrants=3) must not accept an "edge" seen only
+    on one side of the centre -- the 271026 CH4 failure, where every valid
+    ray (25°-150°) caught the lower edge of the ring band crossing the globe
+    and the fallback reported r≈30.7 px for a ≈63 px disk."""
+    from pipeline.modules.derotation import _gradient_disk_r
+
+    size, c = 300, 150.0
+    yy, xx = np.mgrid[:size, :size].astype(np.float32)
+    # Bright band below centre ending at y = c + 30; above it a smooth
+    # ramp with no edge anywhere in the search window.
+    img = np.where((yy > c) & (yy < c + 30), 0.8, 0.0) + 0.3 * np.clip(1 - np.hypot(xx - c, yy - c) / 140, 0, 1)
+    img = cv2.GaussianBlur(img.astype(np.float32), (0, 0), 2.0)
+    r, n = _gradient_disk_r(img, c, c, 50.0, search_frac=(0.5, 1.6), return_n_valid=True)
+    r_q, n_q = _gradient_disk_r(img, c, c, 50.0, search_frac=(0.5, 1.6), return_n_valid=True,
+                                min_quadrants=3)
+    assert n >= 8 and r < 40.0, f"setup should reproduce the one-sided edge (got r={r:.1f}, n={n})"
+    assert n_q == 0 and r_q == 50.0, f"one-sided edge must be rejected, got r={r_q:.1f}, n={n_q}"
+
+
+def test_real_saturn_271026_ch4_radius():
+    """Real CH4 frames of D:/Astro/Sat/271026 (disk darker than the rings,
+    ring band crossing the globe): r≈63 px, not the r≈30.7 px the zero-
+    padded limb search used to report in every frame."""
+    files = sorted(glob.glob("D:/Astro/Sat/271026/step02_lucky_stack/*-CH4-*.tif"))
+    if not files:
+        return
+    radii = [_find_disk_center_impl(image_io.read_tif(p))[2] for p in files[::3]]
+    assert 58.0 < float(np.median(radii)) < 68.0, f"CH4 radius implausible: {radii}"
+    assert max(radii) - min(radii) < 6.0, f"CH4 radius unstable: {radii}"
+
+
 if __name__ == "__main__":
     tests = [
         test_normal_polarity_disk_brighter_than_ring,
@@ -250,6 +282,8 @@ if __name__ == "__main__":
         test_resolve_shared_shape_and_pose_end_to_end,
         test_resolve_filter_pose_registration_sign,
         test_public_api_unchanged,
+        test_one_sided_edge_rays_are_rejected,
+        test_real_saturn_271026_ch4_radius,
     ]
     for t in tests:
         t()
