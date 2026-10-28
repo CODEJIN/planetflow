@@ -271,6 +271,19 @@ def test_real_saturn_271026_ch4_radius():
     assert max(radii) - min(radii) < 6.0, f"CH4 radius unstable: {radii}"
 
 
+def test_real_saturn_271026_half_disk_core_rejected():
+    """Real G stacks of D:/Astro/Sat/271026 (ring crossing the globe, southern
+    hemisphere dimmer): the bright core used to be the northern hemisphere
+    alone (ry≈40 for rx≈70, centre ~15 px north), which step05 then
+    sharpened while leaving the south untouched."""
+    d = Path("D:/Astro/Sat/271026/step04_derotated")
+    if not d.is_dir():
+        return
+    for w in (7, 10, 13, 16):
+        cx, cy, rx, ry, _ = find_disk_center(image_io.read_tif(d / f"window_{w:02d}" / "G_derotated.tif"))
+        assert ry / rx >= 0.8 and ry >= 55.0, (w, cx, cy, rx, ry)
+
+
 if __name__ == "__main__":
     tests = [
         test_normal_polarity_disk_brighter_than_ring,
@@ -284,6 +297,7 @@ if __name__ == "__main__":
         test_public_api_unchanged,
         test_one_sided_edge_rays_are_rejected,
         test_real_saturn_271026_ch4_radius,
+        test_real_saturn_271026_half_disk_core_rejected,
     ]
     for t in tests:
         t()

@@ -32,6 +32,7 @@ from pipeline.modules.derotation import (
     find_disk_center,
     _robust_ellipse_refit,
     _navigation_constrained_ellipse_fit,
+    _predicted_apparent_ratio,
     compute_ring_sharpening_mask,
     _ring_annulus_mask,
     estimate_ring_scatter_leak,
@@ -224,6 +225,16 @@ def run(
                     # pole_pa-based angle in every case, including the clean
                     # ones -- see master_ring_extension_enabled's docstring).
                     _angle_rad = np.radians(_pole_pa_deg)
+                    # Same for the globe's height: find_disk_center's ringed
+                    # path either measures only a limb radius (circular
+                    # placeholder, ry=rx -- too tall at the poles) or a core
+                    # whose height the crossing ring can clip (IR ry~54 vs
+                    # ~61 on 271026). The apparent aspect is known exactly
+                    # from B and the true oblateness, so derive ry from rx.
+                    _ry = _rx * _predicted_apparent_ratio(
+                        config.derotation.true_polar_equatorial_ratio,
+                        float(_wlog.get("sub_observer_lat_deg", 0.0)),
+                    )
 
                     if config.wavelet.master_navigation_limb_fit_enabled:
                         # Navigation-constrained limb fit (2026-08-16, opt-in,

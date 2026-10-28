@@ -1029,10 +1029,17 @@ def _find_disk_center_impl(
                             c_semi_a, c_semi_b, c_angle = cmi / 2, cma / 2, (cangle + 90.0) % 180.0
                         c_aspect = c_semi_b / c_semi_a if c_semi_a > 0 else 0.0
                         # Plausible only if it's a real, non-degenerate shrink
-                        # from the raw disk+ring blob — a real oblate disk
-                        # never has aspect < 0.4, and a genuine core isolation
-                        # should shrink meaningfully, not barely move.
-                        if c_semi_a > 0 and c_aspect >= 0.4 and c_semi_a < 0.95 * semi_a:
+                        # from the raw disk+ring blob, and disk-shaped: a
+                        # ringed globe's apparent aspect is never below its
+                        # true Rpol/Req (Saturn 0.90). The old 0.4 bound let
+                        # a half-disk core through -- with the ring crossing
+                        # the globe and the southern hemisphere dimmer (G/R/B
+                        # on 271026), the 60th-percentile core was the
+                        # northern hemisphere alone (aspect ~0.57, cy ~15 px
+                        # north), so step05 never sharpened the south and
+                        # step04 derotated about the wrong centre. Such cores
+                        # now fall through to the radial limb search below.
+                        if c_semi_a > 0 and c_aspect >= 0.8 and c_semi_a < 0.95 * semi_a:
                             cx, cy, semi_a, semi_b, angle_major = ccx, ccy, c_semi_a, c_semi_b, c_angle
                             confidence = int(np.count_nonzero(core_bin)) / vals.size
                             shape_reliable = True
