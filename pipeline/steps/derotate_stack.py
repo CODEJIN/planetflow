@@ -101,7 +101,7 @@ def _scan_session_pole_pa(
     # Detect disk geometry once from the middle frame (stable across session).
     mid_row = all_rows[len(all_rows) // 2]
     try:
-        mid_raw = image_io.read_tif_oriented(mid_row["path"], mid_row.get("flip180", False))
+        mid_raw = image_io.read_tif_oriented(mid_row["path"], mid_row.get("flip180", False), mid_row.get("rot_deg", 0.0))
         mid_lum = mid_raw if mid_raw.ndim == 2 else mid_raw.mean(axis=2).astype(np.float32)
         cx, cy, semi_a, *_ = find_disk_center(mid_lum)
         if semi_a < 5:
@@ -114,7 +114,7 @@ def _scan_session_pole_pa(
     belt_gradient_lums: List[np.ndarray] = []
     for i, row in enumerate(all_rows):
         try:
-            raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+            raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
             lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
             pa = auto_detect_equator_pa(frames=[lum], cx=cx, cy=cy, disk_radius_px=semi_a)
             print(f"    frame {i+1}/{len(all_rows)}: raw pole_pa = {pa:.1f}° via {filt} [belt_gradient]")
@@ -122,7 +122,7 @@ def _scan_session_pole_pa(
             belt_gradient_lums.append(lum)
         except Exception as exc:
             try:
-                raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+                raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
                 lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
                 pa = equator_pa_from_disk_ellipse(lum)
                 if pa is not None:
@@ -195,7 +195,7 @@ def _detect_session_flip_ns(
     loaded_frames: List[np.ndarray] = []
     loaded_ts: List = []
     for row in all_rows:
-        raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+        raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
         lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
         loaded_frames.append(lum)
         loaded_ts.append(row["timestamp"])
@@ -303,7 +303,7 @@ def _detect_session_pole_axis_flip(
     loaded_frames: List[np.ndarray] = []
     loaded_ts: List = []
     for row in all_rows:
-        raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+        raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
         lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
         loaded_frames.append(lum)
         loaded_ts.append(row["timestamp"])
@@ -446,8 +446,8 @@ def _measure_derot_confidence(
 
     rows = sorted(win["per_filter"][filt]["included"], key=lambda r: r["timestamp"])
     try:
-        raw_e = image_io.read_tif_oriented(rows[0]["path"], rows[0].get("flip180", False))
-        raw_l = image_io.read_tif_oriented(rows[-1]["path"], rows[-1].get("flip180", False))
+        raw_e = image_io.read_tif_oriented(rows[0]["path"], rows[0].get("flip180", False), rows[0].get("rot_deg", 0.0))
+        raw_l = image_io.read_tif_oriented(rows[-1]["path"], rows[-1].get("flip180", False), rows[-1].get("rot_deg", 0.0))
     except Exception as exc:
         warnings.warn(f"  [derot_conf] Frame read failed: {exc}")
         return fallback

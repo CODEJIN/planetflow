@@ -262,8 +262,9 @@ def read_tif(path: Path) -> np.ndarray:
     return img
 
 
-def read_tif_oriented(path: Path, flip180: bool = False) -> np.ndarray:
-    """read_tif(path), physically rotated 180° when flip180 is True.
+def read_tif_oriented(path: Path, flip180: bool = False, rot_deg: float = 0.0) -> np.ndarray:
+    """read_tif(path), physically rotated 180° when flip180 is True, then
+    by rot_deg.
 
     For a discrete camera-orientation flip (GEM meridian flip, or an alt-az
     mount re-seated between re-slews -- see
@@ -274,11 +275,31 @@ def read_tif_oriented(path: Path, flip180: bool = False) -> np.ndarray:
     switches from read_tif() to this function a strict no-op for any frame
     the flip detector doesn't mark as flipped (in particular, every frame of
     every session with no detected flip).
+
+    rot_deg (from derotation.detect_orientation_rotation_map()) corrects a
+    residual few-degree camera rotation. It uses cv2.getRotationMatrix2D's
+    convention and turns about the planet's brightness centroid, so the
+    disk stays where it was. Unlike the flip this interpolates (cubic);
+    rot_deg=0.0 (default) skips it entirely and stays a strict no-op.
     """
     img = read_tif(path)
     if flip180:
         img = np.ascontiguousarray(img[::-1, ::-1])
+    if rot_deg:
+        img = _rotate_about_centroid(img, rot_deg)
     return img
+
+
+def _rotate_about_centroid(img: np.ndarray, angle_deg: float) -> np.ndarray:
+    lum = img if img.ndim == 2 else img.mean(axis=2)
+    ys, xs = np.nonzero(lum > 0.25 * float(lum.max()))
+    w = lum[ys, xs]
+    cx = float(np.average(xs, weights=w))
+    cy = float(np.average(ys, weights=w))
+    M = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
+    out = cv2.warpAffine(img, M, (img.shape[1], img.shape[0]),
+                         flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 # ── Image writing ──────────────────────────────────────────────────────────────

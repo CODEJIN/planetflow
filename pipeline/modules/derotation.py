@@ -3217,7 +3217,7 @@ def map_space_window_stack(
     n_stacked = 0
 
     for row in included_rows:
-        img = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+        img = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
         # Mono only for Phase B (proving the core hypothesis) -- color/mono
         # handling parity with derotate_filter() is a Phase E concern.
         lum = img.mean(axis=2) if img.ndim == 3 else img
@@ -4092,6 +4092,248 @@ def detect_orientation_flip_map(
     return flip_map
 
 
+class _RotationProbe:
+    """One frame prepared for _pairwise_rotation_estimate().
+
+    Centre is the brightness-weighted centroid of the >25%-of-peak region,
+    NOT find_disk_center(): on Saturn the ellipse fit flips between the
+    globe and the globe+ring outline from frame to frame, and the resulting
+    centre error was confirmed (271026) to be absorbed as a spurious ±5-7°
+    rotation. The centroid is stable to a few px, and phase correlation in
+    _pairwise_rotation_estimate() removes the remaining translation.
+    """
+
+    def __init__(self, img: np.ndarray):
+        lum = _to_luminance(img).astype(np.float32)
+        lum = lum / max(float(lum.max()), 1e-6)
+        ys, xs = np.nonzero(lum > 0.25)
+        w = lum[ys, xs]
+        self.lum = lum
+        self.cx = float(np.average(xs, weights=w))
+        self.cy = float(np.average(ys, weights=w))
+        self.extent = float(np.hypot(xs - self.cx, ys - self.cy).max())
+
+    def canvas(self, size: int, angle_deg: float) -> np.ndarray:
+        """High-passed (σ=3) frame rotated by *angle_deg* (cv2 convention)
+        about its centroid, which lands on the centre of a size×size canvas."""
+        c = size / 2.0
+        M = cv2.getRotationMatrix2D((self.cx, self.cy), angle_deg, 1.0)
+        M[0, 2] += c - self.cx
+        M[1, 2] += c - self.cy
+        w = cv2.warpAffine(self.lum, M, (size, size),
+                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        return w - cv2.GaussianBlur(w, (0, 0), 3.0)
+
+
+def _pairwise_rotation_estimate(
+    probe_a: _RotationProbe,
+    probe_b: _RotationProbe,
+    max_deg: float = 20.0,
+) -> Tuple[float, float, float]:
+    """Rotation of frame b relative to frame a, by direct NCC search.
+
+    Returns (angle_deg, ncc_best, ncc_zero): rotating b by angle_deg
+    (cv2.getRotationMatrix2D convention, which is also what
+    image_io.read_tif_oriented applies) best matches a. Every trial angle
+    is re-aligned in translation by phase correlation before scoring, so
+    only rotation is being searched. Coarse 1° grid over ±max_deg, then a
+    0.1° grid around the best point with a parabolic refinement.
+    """
+    size = int(2 * math.ceil(1.15 * max(probe_a.extent, probe_b.extent)) + 1)
+    win = cv2.createHanningWindow((size, size), cv2.CV_32F)
+    ha = probe_a.canvas(size, 0.0)
+    haw = ha * win
+    haw = haw - haw.mean()
+    na = float(np.sqrt((haw * haw).sum()))
+
+    def _score(angle: float) -> float:
+        hb = probe_b.canvas(size, angle)
+        (dx, dy), _ = cv2.phaseCorrelate(ha, hb, win)
+        M = np.float32([[1, 0, -dx], [0, 1, -dy]])
+        hb = cv2.warpAffine(hb, M, (size, size), flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_REPLICATE) * win
+        hb = hb - hb.mean()
+        return float((haw * hb).sum() / (na * float(np.sqrt((hb * hb).sum())) + 1e-12))
+
+    coarse = np.arange(-max_deg, max_deg + 1e-9, 1.0)
+    t0 = float(coarse[int(np.argmax([_score(t) for t in coarse]))])
+    fine = np.arange(t0 - 1.0, t0 + 1.0 + 1e-9, 0.1)
+    sf = [_score(t) for t in fine]
+    k = int(np.argmax(sf))
+    angle = float(fine[k])
+    if 0 < k < len(fine) - 1:
+        y0, y1, y2 = sf[k - 1], sf[k], sf[k + 1]
+        den = y0 - 2 * y1 + y2
+        if den < 0:
+            angle += 0.1 * 0.5 * (y0 - y2) / den
+    return angle, sf[k], _score(0.0)
+
+
+def detect_orientation_rotation_map(
+    groups: Dict[str, List[Tuple[Path, dict]]],
+    flip_map: Optional[Dict[str, bool]] = None,
+    filter_pref: Optional[List[str]] = None,
+    min_step_deg: float = 2.0,
+    min_ncc_gain: float = 0.1,
+    min_ncc: float = 0.5,
+    confirm_tol_deg: float = 1.0,
+    max_deg: float = 20.0,
+) -> Dict[str, float]:
+    """Detect discrete small-angle camera rotations across a session and
+    return a per-frame correction angle.
+
+    Companion to detect_orientation_flip_map(): that one handles an exact
+    180° flip, this one the arbitrary few-degree rotation left when the
+    camera is re-seated or the target re-acquired mid-session (271026: a
+    +5.2° step across a 31-min re-acquisition gap). The rest of the
+    pipeline assumes one orientation for the session (single pole_pa,
+    derot_flip vote, GIF/grid continuity), so frames after such a step are
+    rotated back onto the reference segment's orientation at read time.
+
+    Only discrete steps are corrected. A slow, continuous drift (alt-az
+    field rotation, polar-alignment error) never produces a single
+    adjacent-pair step above min_step_deg and is left untouched. Measured
+    adjacent-pair noise on real no-step pairs: max 1.0° (Jupiter, whose
+    features move between frames), typically < 0.5°. A pair counts as a
+    step only when all of these hold:
+      * |angle| >= min_step_deg,
+      * ncc_best >= min_ncc and ncc_best - ncc_zero >= min_ncc_gain
+        (the rotation actually explains the mismatch; rejects featureless
+        or bad frames, e.g. CH4),
+      * the skip-one pair (i-1 → i+2) gives the same angle within
+        confirm_tol_deg (rejects a single bad frame at i or i+1).
+    The step size is the median over all cross-boundary pairs among the
+    two frames either side that pass min_ncc.
+
+    Runs on flip-corrected frames (flip_map from
+    detect_orientation_flip_map()), so a 180° flip plus a residual tilt is
+    handled as flip first, then rotation.
+
+    Args:
+        groups: image_io.group_by_filter()'s return value.
+        flip_map: {stem: flip180}; None/empty = no flips.
+        filter_pref: Anchor-filter priority. Defaults to _FILT_PREF_EXT_LOCAL.
+        max_deg: Search range of the pairwise estimate.
+
+    Returns:
+        {stem: rot_deg} for every frame in *groups*, where rot_deg is the
+        cv2-convention angle image_io.read_tif_oriented() applies. The
+        longest segment (most anchor frames) is the reference (0°). Empty
+        dict when no step is detected (the common case).
+    """
+    if filter_pref is None:
+        filter_pref = _FILT_PREF_EXT_LOCAL
+    flip_map = flip_map or {}
+
+    anchor = next((f for f in filter_pref if len(groups.get(f, [])) >= 4), None)
+    if anchor is None:
+        print("  [orientation_rot] No filter with >= 4 frames — rotation detection skipped")
+        return {}
+
+    def _probe(path: Path, meta: dict) -> _RotationProbe:
+        return _RotationProbe(image_io.read_tif_oriented(path, flip_map.get(meta["stem"], False)))
+
+    entries = sorted(groups[anchor], key=lambda e: e[1]["timestamp"])
+    n = len(entries)
+    timestamps = [m["timestamp"] for _, m in entries]
+    print(f"  [orientation_rot] Scanning {n} frame(s) in {anchor} for discrete camera rotations…")
+    probes = [_probe(p, m) for p, m in entries]
+
+    pair = [_pairwise_rotation_estimate(probes[i], probes[i + 1], max_deg) for i in range(n - 1)]
+
+    steps: List[Tuple[int, float]] = []
+    for i, (angle, ncc_best, ncc_zero) in enumerate(pair):
+        if abs(angle) < min_step_deg or ncc_best < min_ncc or ncc_best - ncc_zero < min_ncc_gain:
+            continue
+        if 0 <= i - 1 and i + 2 < n:
+            a_c, ncc_c, _ = _pairwise_rotation_estimate(probes[i - 1], probes[i + 2], max_deg)
+            if ncc_c < min_ncc or abs(a_c - angle) > confirm_tol_deg:
+                warnings.warn(
+                    f"  [orientation_rot] candidate step at [{i}→{i+1}] ({angle:+.2f}°) "
+                    f"not confirmed by skip-one check ({a_c:+.2f}°, ncc={ncc_c:.3f}) — treated as noise"
+                )
+                continue
+        cross = [angle]
+        for a in range(max(0, i - 1), i + 1):
+            for b in range(i + 1, min(n, i + 3)):
+                if (a, b) == (i, i + 1):
+                    continue
+                est, ncc_e, _ = _pairwise_rotation_estimate(probes[a], probes[b], max_deg)
+                if ncc_e >= min_ncc:
+                    cross.append(est)
+        step = float(np.median(cross))
+        steps.append((i, step))
+        dt = (timestamps[i + 1] - timestamps[i]).total_seconds()
+        print(
+            f"  [orientation_rot] STEP between {timestamps[i]} and {timestamps[i+1]}: "
+            f"{step:+.2f}° (pair {angle:+.2f}°, ncc {ncc_zero:.3f}→{ncc_best:.3f}, "
+            f"n_est={len(cross)}, Δt={dt:.0f}s)"
+        )
+
+    if not steps:
+        print("  [orientation_rot] No discrete camera rotations detected")
+        return {}
+
+    # Cumulative angle per segment, then re-reference to the longest one.
+    bounds = [i for i, _ in steps]
+    seg_angle = [0.0]
+    for _, step in steps:
+        seg_angle.append(seg_angle[-1] + step)
+    seg_len = [b - a for a, b in zip([0] + [i + 1 for i in bounds], [i + 1 for i in bounds] + [n])]
+    ref = seg_angle[int(np.argmax(seg_len))]
+    seg_angle = [a - ref for a in seg_angle]
+    boundaries = [timestamps[i] + (timestamps[i + 1] - timestamps[i]) / 2 for i in bounds]
+
+    def _segment_of(ts) -> int:
+        return sum(1 for b in boundaries if ts >= b)
+
+    rot_map: Dict[str, float] = {}
+    for _filt, flist in groups.items():
+        for _path, meta in flist:
+            rot_map[meta["stem"]] = seg_angle[_segment_of(meta["timestamp"])]
+
+    # Non-anchor frames between the two anchor frames bracketing a step:
+    # resolve against the nearest same-filter frame outside the interval
+    # (same approach as detect_orientation_flip_map()). The frame joins
+    # whichever adjacent segment its measured relative rotation is closer
+    # to; an unreliable estimate keeps the time-midpoint guess.
+    for k, i in enumerate(bounds):
+        lo, hi = timestamps[i], timestamps[i + 1]
+        for filt, flist in groups.items():
+            if filt == anchor:
+                continue
+            fsorted = sorted(flist, key=lambda e: e[1]["timestamp"])
+            ambiguous = [e for e in fsorted if lo < e[1]["timestamp"] < hi]
+            if not ambiguous:
+                continue
+            before = [e for e in fsorted if e[1]["timestamp"] <= lo]
+            if not before:
+                continue
+            ref_entry = before[-1]
+            ref_probe = _probe(*ref_entry)
+            ref_angle = rot_map[ref_entry[1]["stem"]]
+            for path, meta in ambiguous:
+                est, ncc_e, _ = _pairwise_rotation_estimate(ref_probe, _probe(path, meta), max_deg)
+                if ncc_e < min_ncc:
+                    warnings.warn(
+                        f"  [orientation_rot] {meta['stem']}: rotation near the step is "
+                        "ambiguous — keeping the time-midpoint estimate"
+                    )
+                    continue
+                # est = rotation that maps this frame onto ref; in segment
+                # terms the frame's own correction is ref_angle + est.
+                cands = (seg_angle[k], seg_angle[k + 1])
+                rot_map[meta["stem"]] = min(cands, key=lambda c: abs(c - (ref_angle + est)))
+
+    n_rot = sum(1 for v in rot_map.values() if v != 0.0)
+    seg_str = ", ".join(f"{a:+.2f}°×{l}" for a, l in zip(seg_angle, seg_len))
+    print(
+        f"  [orientation_rot] {len(steps)} step(s) → segments [{seg_str}] (anchor frames); "
+        f"{n_rot}/{len(rot_map)} frame(s) will be rotated across all filters"
+    )
+    return rot_map
+
+
 def equator_pa_from_disk_ellipse(image: np.ndarray) -> Optional[float]:
     """Estimate the image-space equatorial/drift-axis angle from the disk
     ellipse major axis.
@@ -4743,7 +4985,7 @@ def derotate_filter(
     # → asymmetric limb artifact (thin left limb, thick right limb).
     # Fix: detect the disk centre once from the reference frame and use the
     # same (ref_cx, ref_cy, ref_semi_a) for every frame in the window.
-    _ref_raw = image_io.read_tif_oriented(reference_row["path"], reference_row.get("flip180", False))
+    _ref_raw = image_io.read_tif_oriented(reference_row["path"], reference_row.get("flip180", False), reference_row.get("rot_deg", 0.0))
     if color_mode:
         if _ref_raw.ndim == 2:
             _ref_raw = np.stack([_ref_raw] * 3, axis=2)
@@ -4888,7 +5130,7 @@ def derotate_filter(
     ref_img: Optional[np.ndarray] = None
 
     for row in included_rows:
-        img = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+        img = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
 
         if color_mode:
             # Keep (H, W, 3); use luminance only for geometry/alignment
@@ -5515,7 +5757,7 @@ def derotate_window(
             c_included = c_filtered if c_filtered else c_included
         c_ref_row = min(c_included, key=lambda r: abs((r["timestamp"] - t_ref).total_seconds()))
         try:
-            c_raw = image_io.read_tif_oriented(c_ref_row["path"], c_ref_row.get("flip180", False))
+            c_raw = image_io.read_tif_oriented(c_ref_row["path"], c_ref_row.get("flip180", False), c_ref_row.get("rot_deg", 0.0))
             if color_mode:
                 if c_raw.ndim == 2:
                     c_raw = np.stack([c_raw] * 3, axis=2)

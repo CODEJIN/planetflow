@@ -159,6 +159,7 @@ def compute_scores(
     ten_w: float = 0.3,
     nv_w:  float = 0.2,
     flip_map: Optional[Dict[str, bool]] = None,
+    rotation_map: Optional[Dict[str, float]] = None,
     progress_callback=None,
     cancel_event=None,
 ) -> Dict[str, List[dict]]:
@@ -180,9 +181,13 @@ def compute_scores(
                   flip-detection logic. None (default) = no frame is
                   rotated and every row gets "flip180": False — fully
                   backward compatible with every existing caller.
+        rotation_map: Optional {stem: rot_deg} from
+                  derotation.detect_orientation_rotation_map() — same
+                  idea for a residual few-degree camera rotation; every
+                  row carries "rot_deg" (0.0 when absent).
 
     Returns:
-        {filter_name: [{"stem", "timestamp", "path", "flip180",
+        {filter_name: [{"stem", "timestamp", "path", "flip180", "rot_deg",
                         "laplacian", "tenengrad", "norm_variance",
                         "raw_score"}, ...]}
         Sorted by timestamp within each filter.  raw_score is the
@@ -203,7 +208,8 @@ def compute_scores(
             if cancel_event is not None and cancel_event.is_set():
                 break
             flip180 = bool(flip_map.get(meta["stem"], False)) if flip_map else False
-            img = image_io.read_tif_oriented(path, flip180)
+            rot_deg = float(rotation_map.get(meta["stem"], 0.0)) if rotation_map else 0.0
+            img = image_io.read_tif_oriented(path, flip180, rot_deg)
             m = quality_metrics(img)
 
             # Raw combined score (not yet normalised across the filter)
@@ -215,6 +221,7 @@ def compute_scores(
                 "path":         path,
                 "filter":       filt,
                 "flip180":      flip180,
+                "rot_deg":      rot_deg,
                 "laplacian":    m["laplacian"],
                 "tenengrad":    m["tenengrad"],
                 "norm_variance": m["norm_variance"],
@@ -391,6 +398,8 @@ def scores_to_csv_rows(scores: Dict[str, List[dict]]) -> List[dict]:
                 "raw_score":    round(e["raw_score"], 4),
                 "norm_score":   round(e.get("norm_score", 0.0), 6),
                 "rank":         e.get("rank", -1),
+                "flip180":      int(bool(e.get("flip180", False))),
+                "rot_deg":      round(e.get("rot_deg", 0.0), 2),
             })
     rows.sort(key=lambda r: (r["timestamp"], r["filter"]))
     return rows

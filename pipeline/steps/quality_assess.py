@@ -42,6 +42,7 @@ def run(
           "windows":  [window_dict, ...],               # all windows, chronological
           "groups":   {filter: [(path, meta), ...]},    # for downstream steps
           "flip_map": {stem: flip180, ...},              # from detect_orientation_flip_map()
+          "rotation_map": {stem: rot_deg, ...},          # from detect_orientation_rotation_map()
         }
     """
     # ── Output directory ───────────────────────────────────────────────────────
@@ -74,6 +75,12 @@ def run(
     if config.quality.detect_orientation_flips:
         flip_map = derotation.detect_orientation_flip_map(groups)
 
+    # Residual few-degree camera rotation (re-seat / re-acquisition), measured
+    # on the flip-corrected frames. {} for the common no-step case.
+    rotation_map: Dict[str, float] = {}
+    if config.quality.detect_orientation_rotations:
+        rotation_map = derotation.detect_orientation_rotation_map(groups, flip_map)
+
     # ── Compute quality metrics ────────────────────────────────────────────────
     scores = quality.compute_scores(
         groups,
@@ -81,6 +88,7 @@ def run(
         ten_w=config.quality.fourier_hf_weight,     # re-used for Tenengrad
         nv_w =config.quality.norm_variance_weight,
         flip_map=flip_map,
+        rotation_map=rotation_map,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )
@@ -132,6 +140,7 @@ def run(
         "windows":  windows,
         "groups":   groups,
         "flip_map": flip_map,
+        "rotation_map": rotation_map,
     }
 
 

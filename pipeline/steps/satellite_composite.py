@@ -195,7 +195,7 @@ def _satellite_translate_stack(
         pos = positions[i]
         if pos is None or not pos.on_disk:
             continue
-        raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+        raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
         img = raw.astype(np.float32) / 65535.0 if raw.dtype == np.uint16 else raw.astype(np.float32)
         if img.ndim == 3 and not keep_color:
             img = img.mean(axis=2)
@@ -1059,7 +1059,7 @@ def _detect_tracker_flip_ns(
         win_frames: List[np.ndarray] = []
         for row in win["per_filter"][filt]["included"]:
             try:
-                raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False))
+                raw = image_io.read_tif_oriented(row["path"], row.get("flip180", False), row.get("rot_deg", 0.0))
                 lum = raw if raw.ndim == 2 else raw.mean(axis=2).astype(np.float32)
                 lum = lum.astype(np.float32)
                 if lum.max() > 1.5:
@@ -1193,7 +1193,7 @@ def compute_session_disk_radius(windows: List[dict]) -> Optional[float]:
             continue
         for _row in _win["per_filter"][_filt]["included"]:
             try:
-                _raw = image_io.read_tif_oriented(_row["path"], _row.get("flip180", False))
+                _raw = image_io.read_tif_oriented(_row["path"], _row.get("flip180", False), _row.get("rot_deg", 0.0))
                 _lum = _raw if _raw.ndim == 2 else _raw.mean(axis=2).astype(np.float32)
                 _lum = _lum.astype(np.float32)
                 if _lum.max() > 1.5:

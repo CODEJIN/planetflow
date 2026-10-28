@@ -525,6 +525,14 @@ class QualityConfig:
     # pixel data at read time rather than only choosing a warp parameter.
     detect_orientation_flips: bool = True
 
+    # Auto-detect discrete few-degree camera rotations (camera re-seated or
+    # target re-acquired mid-session) and rotate later segments back onto
+    # the longest segment's orientation — see
+    # derotation.detect_orientation_rotation_map(). Only discrete steps
+    # (>= 2° between adjacent frames, confirmed) are corrected; continuous
+    # field rotation is left alone. Runs after the 180° flip correction.
+    detect_orientation_rotations: bool = True
+
     @property
     def window_minutes(self) -> float:
         """Derived: window duration in minutes (window_frames × cycle_minutes)."""
