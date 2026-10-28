@@ -366,6 +366,13 @@ def run(
             print(f"    {filt}: disk_median={global_med:.4f}  "
                   f"scales=[{min(scales.values()):.3f}–{max(scales.values()):.3f}]")
 
+    s04_dir: Optional[Path] = config.step_dir(4, "derotated")
+    if not s04_dir.is_dir():
+        s04_dir = None
+    if align:
+        print(f"  Alignment measured on: "
+              f"{'step04 (unsharpened) stacks' if s04_dir is not None else 'step05 images (step04 output not found)'}")
+
     # ── Pass 1: compose all windows, cache results (saturation deferred) ───────
     # {win_label: {spec_name: comp_img or None}}
     cache: Dict[str, Dict[str, Optional[np.ndarray]]] = {}
@@ -415,10 +422,21 @@ def run(
                     img = np.clip(img * filter_scales[f][win_label], 0.0, 1.0).astype("float32")
                 filter_images[f] = img
 
+            # Measure alignment on the unsharpened step04 stacks (same canvas
+            # as step05's output); compose() falls back to the step05 images
+            # when step04 was not saved or a file is missing.
+            align_images: Dict[str, np.ndarray] = {}
+            if align and s04_dir is not None:
+                for f in required:
+                    p04 = s04_dir / win_label / f"{f}_derotated.tif"
+                    if p04.exists():
+                        align_images[f] = image_io.read_tif(p04)
+
             try:
                 comp_img, log = composite.compose(
                     spec, filter_images,
                     align=align,
+                    align_images=align_images or None,
                     max_shift_px=config.composite.max_shift_px,
                     color_stretch_mode=config.composite.color_stretch_mode if config.composite.stretch_enabled else "none",
                     stretch_plow=plow,

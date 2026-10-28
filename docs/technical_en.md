@@ -694,9 +694,14 @@ Pass 1 — per window, per composite spec:
         │
         ▼
     Reference channel: spec.align_ref > L > IR > R > G > B > CH4
-    Non-reference channels → whole-frame phase correlation
-        → shift applied only if within Max Channel Shift AND it improves
-          the high-pass disk NCC vs. leaving the channel unshifted
+    Shifts measured on the unsharpened step04 stacks (fallback: step05 images)
+    by whole-frame gradient-magnitude NCC (sky floored at 8% of the bright
+    end, σ1.5 Sobel magnitude, matchTemplate over ±Max Channel Shift,
+    0.25 px grid refinement); rejected (no shift) if the peak is on the
+    search boundary or NCC < 0.5
+        [RGB]  non-reference channels → reference
+        [LRGB] colour channels → R first, then the registered colour group
+               → L as one unit (each channel shifted once, summed shift)
         │
         ▼
     np.stack([R, G, B])

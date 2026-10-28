@@ -7,9 +7,12 @@ Supported composite types (controlled by CompositeSpec in config):
   - False colour: any filter-to-channel mapping (e.g. CH4→R, G→G, IR→B)
 
 Channel alignment:
-  All channels are aligned to the reference channel (first defined in the spec,
-  or the L channel if present) via sub-pixel phase correlation before compositing.
-  This corrects atmospheric dispersion and filter-wheel mechanical offsets.
+  All channels are aligned to the reference channel (the L channel if present,
+  else IR → R → G → B) by whole-frame gradient-magnitude NCC, measured on the
+  unsharpened step04 stacks when available (see estimate_channel_shift). With
+  an L channel, the colour channels are registered to each other first and
+  then moved to L as one group (see align_lrgb). This corrects the tracking
+  drift between filter captures, atmospheric dispersion and filter offsets.
 
 Auto-stretch:
   Each input channel is independently auto-stretched using percentile
@@ -23,7 +26,7 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 
-from pipeline.modules.derotation import subpixel_align, apply_shift, find_disk_center
+from pipeline.modules.derotation import apply_shift, find_disk_center
 
 
 # ── Per-channel stretch ────────────────────────────────────────────────────────
@@ -82,107 +85,195 @@ def auto_stretch(
 
 # ── Channel alignment ──────────────────────────────────────────────────────────
 
-def _disk_region_quality(ref: np.ndarray, img: np.ndarray, cx: float, cy: float, sr: float) -> float:
-    """High-pass NCC between ref and img inside the disk (r < 0.95*sr).
+_ALIGN_SEARCH_PX = 25.0    # search radius when max_shift_px is 0 (no clamp)
+_ALIGN_MIN_NCC = 0.5       # real pairs measure 0.89–1.00; below this = no common structure
 
-    Used to judge whether a candidate channel-alignment shift actually
-    improved registration, since cv2.phaseCorrelate can report a confident-
-    looking but WRONG peak when a channel has too little reference-correlated
-    signal — observed on real Jupiter data: B channel phase correlation
-    (against an IR reference) locked onto plausible-but-wrong offsets in
-    ~25% of a 28-window session (e.g. dy=+2.16 reported when every
-    neighbouring window measured dy in -0.4..-0.9), producing a visible
-    limb colour fringe. Returns -inf if the disk mask is degenerate.
+
+def _alignment_signal(img: np.ndarray) -> np.ndarray:
+    """Gradient magnitude of *img* with the sky floored to zero.
+
+    Edges (limb, ring, belts) are what must coincide for a fringe-free
+    composite, and their position does not depend on each filter's
+    brightness profile the way raw intensity does — Saturn's rings and IR
+    vs. visible limb darkening differ strongly in brightness between
+    filters. The floor (8% of the bright end) zeroes the stacked frames'
+    sky plateau, whose hard rectangular coverage edge differs per filter
+    and would otherwise dominate the gradient.
     """
-    h, w = ref.shape[:2]
-    yy, xx = np.mgrid[0:h, 0:w]
-    mask = np.hypot(xx - cx, yy - cy) < sr * 0.95
-    if mask.sum() < 25:
-        return float("-inf")
+    a = img.astype(np.float32)
+    hi = float(np.percentile(a, 99.9))
+    t = 0.08 * hi
+    a = np.clip((a - t) / max(hi - t, 1e-9), 0.0, None)
+    a = cv2.GaussianBlur(a, (0, 0), 1.5)
+    gx = cv2.Sobel(a, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(a, cv2.CV_32F, 0, 1)
+    return np.sqrt(gx * gx + gy * gy)
 
-    def _hp(im: np.ndarray) -> np.ndarray:
-        return im - cv2.GaussianBlur(im, (0, 0), 4.0)
 
-    a, b = _hp(ref)[mask], _hp(img)[mask]
+def _ncc(a: np.ndarray, b: np.ndarray) -> float:
     a = a - a.mean()
     b = b - b.mean()
-    denom = np.linalg.norm(a) * np.linalg.norm(b)
-    return float(np.dot(a, b) / denom) if denom > 0 else float("-inf")
+    denom = float(np.sqrt((a * a).sum() * (b * b).sum()))
+    return float((a * b).sum() / denom) if denom > 0 else 0.0
+
+
+def _parabolic_offset(lo: float, mid: float, hi: float) -> float:
+    d = lo - 2.0 * mid + hi
+    return 0.0 if abs(d) < 1e-12 else 0.5 * (lo - hi) / d
+
+
+def estimate_channel_shift(
+    ref: np.ndarray,
+    img: np.ndarray,
+    search_px: float = _ALIGN_SEARCH_PX,
+) -> Optional[Tuple[float, float, float]]:
+    """Shift (dx, dy) to apply to *img* (via apply_shift) to register it on
+    *ref*, plus the peak NCC. None when no trustworthy peak exists.
+
+    Whole-frame normalised cross-correlation of _alignment_signal() over
+    ±search_px (no disk-ROI crop — the user has explicitly rejected that
+    approach twice; do not reintroduce it in any form, gated or not).
+    Integer peak from cv2.matchTemplate, then refined on a 0.25 px grid
+    (synthetic known-shift test on real Saturn data: rms 0.04 px, max
+    0.08 px; parabolic interpolation alone left 0.3 px errors along the
+    rings' long axis).
+
+    Replaces cv2.phaseCorrelate: its spectral whitening amplifies the
+    high-frequency noise of weak channels, and on real data it lost the
+    peak entirely (response ≈ 0, shifts of 150 px) or locked onto plausible
+    but wrong offsets (Jupiter B in ~25% of windows; Saturn G/B up to 5 px
+    off). Gradient NCC found a sane peak (NCC 0.89–1.00) for every pair of
+    a 27-window Saturn and a 30-window Jupiter session, and composites
+    built with it were visibly fringe-free where phase correlation's were
+    not (D:/Astro/Sat/271026 w06/w07/w22, Mono_Temp_260407 w06/w26).
+
+    Returns None when the peak lies on the search boundary (true offset
+    outside the range) or its NCC is below _ALIGN_MIN_NCC.
+    """
+    S = max(1, int(np.ceil(search_px)))
+    gr = _alignment_signal(ref)
+    gi = _alignment_signal(img)
+    padded = cv2.copyMakeBorder(gr, S, S, S, S, cv2.BORDER_CONSTANT, value=0)
+    m = cv2.matchTemplate(padded, gi, cv2.TM_CCOEFF_NORMED)
+    i, j = np.unravel_index(int(np.argmax(m)), m.shape)
+    peak = float(m[i, j])
+    if i in (0, 2 * S) or j in (0, 2 * S) or peak < _ALIGN_MIN_NCC:
+        return None
+
+    dx = j - S + _parabolic_offset(m[i, j - 1], m[i, j], m[i, j + 1])
+    dy = i - S + _parabolic_offset(m[i - 1, j], m[i, j], m[i + 1, j])
+    offs = np.arange(-2, 3) * 0.25
+    for _ in range(2):
+        sx = [_ncc(gr, apply_shift(gi, dx + o, dy)) for o in offs]
+        k = int(np.argmax(sx))
+        dx += offs[k] + (0.25 * _parabolic_offset(sx[k - 1], sx[k], sx[k + 1]) if 0 < k < 4 else 0.0)
+        sy = [_ncc(gr, apply_shift(gi, dx, dy + o)) for o in offs]
+        k = int(np.argmax(sy))
+        dy += offs[k] + (0.25 * _parabolic_offset(sy[k - 1], sy[k], sy[k + 1]) if 0 < k < 4 else 0.0)
+    if abs(dx) > search_px or abs(dy) > search_px:
+        return None
+    return float(dx), float(dy), peak
 
 
 def align_channels(
     channels: Dict[str, np.ndarray],
     reference_key: str,
     max_shift_px: float = 0.0,
+    estimate_from: Optional[Dict[str, np.ndarray]] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, Tuple[float, float]]]:
-    """Align all channels to *reference_key* via sub-pixel phase correlation.
-
-    Whole-frame phase correlation ONLY (no disk-ROI crop — the user has
-    explicitly rejected that approach twice; do not reintroduce it in any
-    form, gated or not). The shift is applied only if it improves a
-    post-hoc disk-region NCC (see _disk_region_quality) over leaving the
-    channel unshifted, since phase correlation can report a confident-
-    looking but WRONG peak: real Jupiter data (28 windows, one session)
-    showed this for the B channel (weak IR-correlated signal) in ~25% of
-    windows — e.g. dy=+2.16 reported when every neighbouring window
-    measured dy in -0.4..-0.9 — which max_shift_px's magnitude-only gate
-    does not catch, since the bad shift is often well under the gate. If
-    disk detection fails, falls back to trusting whole-frame correlation
-    unconditionally, since there is no quality metric to gate against.
+    """Align all channels to *reference_key* (see estimate_channel_shift).
 
     Args:
         channels:      {filter_name: float [0,1] 2D image}
         reference_key: Key of the channel to treat as reference (no shift applied).
-        max_shift_px:  If > 0, shifts larger than this are discarded as
-                       candidates (never considered, regardless of quality).
+        max_shift_px:  Search radius; a true offset beyond it is rejected
+                       (0 = default radius _ALIGN_SEARCH_PX).
+        estimate_from: Optional images (same keys and shapes as *channels*)
+                       to measure the shifts on, which are then applied to
+                       *channels*. Used to measure on the unsharpened step04
+                       stacks: wavelet sharpening amplifies each filter's
+                       own noise and PSF, which degrades the match (Saturn
+                       271026: peak NCC 0.79–0.98 sharpened vs. 0.93–0.99
+                       unsharpened, and visibly worse composites).
 
     Returns:
         (aligned, shifts):
             aligned: New dict with aligned images (reference unchanged, others shifted).
             shifts:  {filter_name: (dx, dy)} actually applied for every key
-                     (0.0, 0.0 for the reference and for any discarded shift).
+                     (0.0, 0.0 for the reference and for any rejected estimate).
     """
-    ref = channels[reference_key]
+    src = estimate_from if estimate_from is not None else channels
+    shifts = _estimate_shifts(src, reference_key, list(channels), max_shift_px)
+    return _apply_shifts(channels, shifts), shifts
 
-    disk = None
-    try:
-        cx, cy, sr, _, _ = find_disk_center(ref)
-        if sr >= 10:
-            disk = (cx, cy, sr)
-    except Exception:
-        pass
 
-    def _within_gate(dx: float, dy: float) -> bool:
-        return max_shift_px <= 0 or (abs(dx) <= max_shift_px and abs(dy) <= max_shift_px)
-
-    aligned: Dict[str, np.ndarray] = {}
+def _estimate_shifts(
+    src: Dict[str, np.ndarray],
+    reference_key: str,
+    keys,
+    max_shift_px: float,
+) -> Dict[str, Tuple[float, float]]:
+    search = max_shift_px if max_shift_px > 0 else _ALIGN_SEARCH_PX
     shifts: Dict[str, Tuple[float, float]] = {}
-    for key, img in channels.items():
-        if key == reference_key:
-            aligned[key] = img
-            shifts[key] = (0.0, 0.0)
-            continue
+    for key in keys:
+        est = None if key == reference_key else estimate_channel_shift(src[reference_key], src[key], search)
+        shifts[key] = (est[0], est[1]) if est is not None else (0.0, 0.0)
+    return shifts
 
-        dx, dy = subpixel_align(ref, img)
-        candidate_ok = _within_gate(dx, dy)
 
-        if candidate_ok and disk is not None:
-            cx, cy, sr = disk
-            q_shifted = _disk_region_quality(ref, apply_shift(img, dx, dy), cx, cy, sr)
-            q_none = _disk_region_quality(ref, img, cx, cy, sr)
-            use_shift = q_shifted > q_none
-        else:
-            # No disk to quality-gate against — trust phase correlation
-            # unconditionally if it's within the gate (old behaviour).
-            use_shift = candidate_ok
+def _apply_shifts(
+    channels: Dict[str, np.ndarray],
+    shifts: Dict[str, Tuple[float, float]],
+) -> Dict[str, np.ndarray]:
+    return {
+        k: (apply_shift(img, *shifts[k]) if shifts.get(k, (0.0, 0.0)) != (0.0, 0.0) else img)
+        for k, img in channels.items()
+    }
 
-        if use_shift:
-            aligned[key] = apply_shift(img, dx, dy)
-            shifts[key] = (dx, dy)
-        else:
-            aligned[key] = img
-            shifts[key] = (0.0, 0.0)
-    return aligned, shifts
+
+def _group_signal(images: Dict[str, np.ndarray], keys, shifts: Dict[str, Tuple[float, float]]) -> np.ndarray:
+    """Mean of the brightness-normalised, already-registered *keys* images —
+    the colour group's combined appearance, for aligning it to L as a unit."""
+    acc = None
+    for k in keys:
+        a = images[k].astype(np.float32)
+        a = a / max(float(np.percentile(a, 99.9)), 1e-9)
+        if shifts.get(k, (0.0, 0.0)) != (0.0, 0.0):
+            a = apply_shift(a, *shifts[k])
+        acc = a if acc is None else acc + a
+    return acc / len(keys)
+
+
+def align_lrgb(
+    channels: Dict[str, np.ndarray],
+    lum_key: str,
+    colour_keys,
+    colour_ref: str,
+    max_shift_px: float = 0.0,
+    estimate_from: Optional[Dict[str, np.ndarray]] = None,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, Tuple[float, float]]]:
+    """Two-stage LRGB alignment: colour channels to *colour_ref* first, then
+    the registered colour group as a whole to the luminance channel.
+
+    Registering each colour channel to L independently lets every one of
+    them carry its own IR-vs-visible matching error, so the colour channels
+    end up misregistered against EACH OTHER — the visible fringe. Here the
+    colour channels are matched among themselves (similar appearance), and
+    the group then moves as one rigid unit, so any residual L-vs-colour
+    error only offsets colour from luminance instead of splitting colours.
+    Each channel is still interpolated once, with the summed shift.
+    """
+    src = estimate_from if estimate_from is not None else channels
+    shifts = _estimate_shifts(src, colour_ref, colour_keys, max_shift_px)
+
+    search = max_shift_px if max_shift_px > 0 else _ALIGN_SEARCH_PX
+    est = estimate_channel_shift(src[lum_key], _group_signal(src, colour_keys, shifts), search)
+    gdx, gdy = (est[0], est[1]) if est is not None else (0.0, 0.0)
+    shifts = {k: (dx + gdx, dy + gdy) for k, (dx, dy) in shifts.items()}
+    shifts[lum_key] = (0.0, 0.0)
+    for k in channels:
+        shifts.setdefault(k, (0.0, 0.0))
+    return _apply_shifts(channels, shifts), shifts
 
 
 # ── RGB composite ──────────────────────────────────────────────────────────────
@@ -245,6 +336,7 @@ def compose(
     saturate: bool = False,
     saturation_phigh: float = 99.5,
     saturation_headroom: float = 0.30,
+    align_images: Optional[Dict[str, np.ndarray]] = None,
 ) -> Tuple[np.ndarray, dict]:
     """Build a composite image from per-filter images according to *spec*.
 
@@ -253,6 +345,10 @@ def compose(
         filter_images:      {filter_name: float [0,1] 2D array}
         align:              If True, align channels before compositing.
         max_shift_px:       Max allowed alignment shift (0 = no clamp).
+        align_images:       Optional {filter_name: 2D array} of the same
+                            shape to measure alignment shifts on (the
+                            unsharpened step04 stacks); falls back to
+                            *filter_images* when None or incomplete.
         color_stretch_mode: How to stretch colour channels (R/G/B):
                               "joint"       – same lo/hi from all colour channels
                                               combined (preserves colour ratios)
@@ -342,8 +438,21 @@ def compose(
 
     # ── Align ──────────────────────────────────────────────────────────────────
     shift_log: Dict[str, list] = {k: [0.0, 0.0] for k in required}
+    align_source = None
     if align and len(stretched) > 1:
-        aligned, shifts = align_channels(stretched, reference_key, max_shift_px=max_shift_px)
+        est = None
+        if align_images is not None and all(
+            k in align_images and align_images[k].shape == stretched[k].shape for k in stretched
+        ):
+            est = align_images
+        align_source = "align_images" if est is not None else "filter_images"
+        if lum_key is not None and reference_key == lum_key and len(colour_keys) > 1:
+            colour_ref = next((k for k in ["R", "G", "B", "IR", "CH4"] if k in colour_keys), spec.R)
+            aligned, shifts = align_lrgb(stretched, lum_key, colour_keys, colour_ref,
+                                         max_shift_px=max_shift_px, estimate_from=est)
+        else:
+            aligned, shifts = align_channels(stretched, reference_key,
+                                             max_shift_px=max_shift_px, estimate_from=est)
         for key, (dx, dy) in shifts.items():
             shift_log[key] = [round(dx, 3), round(dy, 3)]
     else:
@@ -480,6 +589,7 @@ def compose(
         "channels":           {"L": lum_key, "R": spec.R, "G": spec.G, "B": spec.B},
         "stretch":            stretch_log,
         "alignment":          shift_log,
+        "alignment_source":   align_source,
         "saturation_gain":    round(sat_gain, 4) if sat_gain is not None else None,
     }
     return result, log

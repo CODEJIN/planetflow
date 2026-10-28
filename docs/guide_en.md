@@ -397,7 +397,7 @@ Multiple composite types (RGB, LRGB, false color) can be defined and produced in
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
-| **Max Channel Shift (px)** | 15.0 | 0.0–100.0 | Maximum allowed shift in channel-to-channel phase correlation alignment. If the computed shift exceeds this value, alignment is skipped (prevents runaway misalignment). Raise to 20–30 on nights with strong atmospheric dispersion. A shift within this limit is also applied only if it actually improves the match with the reference channel inside the disc, which filters out confident-looking but wrong alignments. |
+| **Max Channel Shift (px)** | 15.0 | 0.0–100.0 | Search range for channel-to-channel alignment. Alignment matches the edges (limb, rings, belts) of the unsharpened Step 4 stacks across the whole frame; if the best match lies at the edge of this range, or no clear match is found, that channel is left unshifted. Raise to 20–30 if the planet drifts a lot between filter captures or on nights with strong atmospheric dispersion. With an L channel (e.g. IR-RGB), the R/G/B channels are aligned to each other first and then moved to L together. |
 | **Stretch** | Off | — | Stretches the colour channels together (shared black/white points), keeping natural colour ratios. |
 | **Saturation boost** | On | — | Automatically boosts colour saturation so the disc's chroma reaches a fixed target. Never reduces saturation; at most 4×. |
 | **Global Normalize** | On | — | When enabled, scales each window's composite so its mean luminance matches the cross-window average. Eliminates inter-window brightness flicker in the GIF output. |
@@ -432,7 +432,7 @@ Use the **+ Add** button to add new composite specs with any filter combination 
 
 The right panel shows a live preview of the currently selected (radio button) composite. The preview refreshes automatically 400ms after changing any R/G/B/L dropdown.
 
-> **Note**: The preview is computed without channel alignment (phase correlation) for speed. Alignment effects can be verified in the output files after running the step.
+> **Note**: The preview is computed without channel alignment for speed. Alignment effects can be verified in the output files after running the step.
 
 ---
 
